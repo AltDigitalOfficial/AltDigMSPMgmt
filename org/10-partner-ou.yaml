@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — one partner OU beneath Members.
+  Deployed once per partner by partner onboarding (design doc 15). Creates the
+  OU and publishes its id; it does not create accounts, SCPs or the partner's
+  Truveon tenant.
+
+# ---------------------------------------------------------------------------
+# One stack per partner, deliberately
+# ---------------------------------------------------------------------------
+# Partner onboarding is a separate, one-time process and a partner must exist
+# before any client can be onboarded beneath it. Keeping one stack per partner
+# means a partner can be added, amended or (in principle) removed without a
+# change that touches every other partner's OU — the same blast-radius argument
+# that makes partner an OU rather than a name prefix.
+#
+# Stack name convention: platform-partner-<slug>
+#
+# Billing: this OU is the consolidated billing boundary AltDigital invoices
+# against. The Cost Category 'Partner' dimension is derived from account id, but
+# the OU is what makes the roll-up verifiable — an account in the wrong OU is a
+# billing error, and that is detectable here rather than in a spreadsheet.
+
+Parameters:
+
+  PartnerSlug:
+    Type: String
+    Description: >-
+      Machine-safe partner identifier, used verbatim as the OU name and as the
+      <partner> segment of every account alias beneath it. Lowercase
+      alphanumeric and hyphens only — account aliases permit nothing else.
+      Strip dots: oeight.io becomes oeight.
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$'
+    MinLength: 1
+    MaxLength: 20
+    ConstraintDescription: >-
+      1-20 chars, lowercase alphanumeric and hyphens, must start and end
+      alphanumeric. The cap is part of a fixed budget against the 63-character
+      account alias limit: 3 (ad-) + 20 partner + 1 + 20 client + 1 + 12 app
+      short code + 1 + 4 env = 62. Do not raise it in isolation.
+
+  PartnerLegalName:
+    Type: String
+    Description: >-
+      Partner legal or trading entity name, for display and for the audit trail.
+      The slug is the machine identifier; this is the human one. Kept distinct
+      on purpose, the same way an account alias is distinct from an account name.
+    MinLength: 1
+    MaxLength: 128
+
+  PartnerDomain:
+    Type: String
+    Default: ''
+    Description: >-
+      Partner's primary domain, e.g. oeight.io. Display attribute only —
+      recorded here because the slug discards the dot.
+    MaxLength: 253
+
+  MembersOuId:
+    Type: String
+    Description: >-
+      Members OU id. Read from /platform/org/ou/members; not hardcoded.
+    AllowedPattern: '^ou-[0-9a-z]{4,32}-[0-9a-z]{8,32}$'
+    ConstraintDescription: Must be an Organizational Unit id, e.g. ou-ab12-cdef3456.
+
+  SsmPrefix:
+    Type: String
+    Default: /platform
+    AllowedPattern: '^/[a-zA-Z0-9._/-]+$'
+
+Resources:
+
+  PartnerOu:
+    Type: AWS::Organizations::OrganizationalUnit
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Ref PartnerSlug
+      ParentId: !Ref MembersOuId
+      Tags:
+        - { Key: platform-managed,  Value: 'true' }
+        - { Key: PartnerSlug,       Value: !Ref PartnerSlug }
+        - { Key: PartnerLegalName,  Value: !Ref PartnerLegalName }
+        - { Key: PartnerDomain,     Value: !Ref PartnerDomain }
+        - { Key: BillingRollup,     Value: partner }
+
+  # Published so the client OU stack and the provisioning saga can resolve the
+  # parent without a list-organizational-units call and without hardcoding.
+  PartnerOuParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/org/ou/members/${PartnerSlug}'
+      Type: String
+      Value: !Ref PartnerOu
+      Description: !Sub 'Partner OU id for ${PartnerLegalName}'
+      Tags:
+        platform-managed: 'true'
+        PartnerSlug: !Ref PartnerSlug
+
+Outputs:
+
+  PartnerOuId:
+    Description: !Sub 'OU id for partner ${PartnerSlug}'
+    Value: !Ref PartnerOu
+
+  PartnerSlugOut:
+    Description: Partner slug, echoed for pipeline consumption
+    Value: !Ref PartnerSlug

@@ -1,0 +1,48 @@
+graph TD
+    ROOT[AWS Organization Root<br/><i>management account: empty</i>]
+
+    ROOT --> SEC[Security OU]
+    ROOT --> INF[Infrastructure OU]
+    ROOT --> MEM[Members OU]
+    ROOT --> SBX[Sandbox OU]
+
+    SEC --> LOG[Log Archive<br/>Object Lock compliance mode<br/>multi-region]
+    SEC --> AUD[Audit<br/>Security Hub / Config / GuardDuty<br/>multi-region]
+    SEC --> FOR[Forensics<br/>isolated · incident preservation]
+
+    INF --> TOOL[Platform Tooling<br/>CloudFormation pipeline<br/>StackSet admin]
+    INF --> SHR[Shared Services<br/>platform automation<br/>Truveon ingestion]
+    INF --> BKP[Backup<br/>Vault Lock]
+
+    MEM --> P1[oeight/<br/><i>partner OU</i>]
+    MEM --> P2[zones/ · onstak/<br/><i>reserved</i>]
+    MEM --> P3[direct/<br/><i>AltDigital's own clients</i>]
+
+    P1 --> C1[arc8/<br/><i>client OU</i>]
+    P1 --> C2[avergent/<br/><i>client OU</i>]
+
+    C1 --> A1[ad-oeight-arc8-prod<br/>multi-AZ · always on]
+    C1 --> A2[ad-oeight-arc8-uat<br/>single-AZ · IN SCOPE<br/>opt-in · HOOP conservative]
+    C1 --> A3[ad-oeight-arc8-test<br/>HOOP aggressive]
+    C1 --> A4[ad-oeight-arc8-dev<br/>HOOP aggressive]
+    C2 --> A5[ad-oeight-avergent-*<br/>dev / test / uat / prod]
+
+    SBX --> CAN[Baseline Canary<br/>first wave of every rollout]
+
+    TRU[Truveon<br/><i>separate account</i><br/>per-tenant isolation<br/>consumed over public internet]
+
+    A1 -.evidence.-> TRU
+    A5 -.evidence.-> TRU
+    P1 -.partner tenant.-> TRU
+    AUD -.findings.-> TRU
+    LOG -.raw logs retained here.-> TRU
+
+    style ROOT fill:#1f2937,color:#fff
+    style TRU fill:#312e81,color:#fff
+    style MEM fill:#374151,color:#fff
+    style SEC fill:#374151,color:#fff
+    style INF fill:#374151,color:#fff
+    style SBX fill:#374151,color:#fff
+    style A2 fill:#78350f,color:#fff
+    style P1 fill:#312e81,color:#fff
+    style P3 fill:#374151,color:#fff

@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — fixed Organizational Unit skeleton.
+  Deploys to the Organization management account only. Creates the OUs that
+  never change: Security, Infrastructure, Members, Members/direct, Sandbox.
+  Partner and client OUs beneath Members are created dynamically by partner
+  onboarding and the client provisioning saga — they are NOT in this template.
+
+# ---------------------------------------------------------------------------
+# Why OUs and not name prefixes (design doc 15)
+# ---------------------------------------------------------------------------
+# OU placement is what drives everything downstream: SCP and RCP inheritance,
+# StackSet targeting, blast radius containment, and — the reason this matters
+# for billing — the consolidated billing boundary. Cost Categories derive
+# partner, client, application and environment from the account id, so getting
+# this tree right is what makes exact per-client and per-partner invoicing fall
+# out structurally rather than needing to be assembled from resource tags.
+#
+# Every OU carries DeletionPolicy and UpdateReplacePolicy Retain. Deleting this
+# stack must never attempt to dismantle the Organization. Detaching an OU that
+# holds accounts would fail anyway, but a half-succeeded teardown of the top of
+# the tree is not a state worth being able to reach.
+
+Parameters:
+
+  RootId:
+    Type: String
+    Description: >-
+      Organization root id (r-xxxx). Discovered by
+      scripts/bootstrap-management-account.sh and published to
+      /platform/org/root-id; deploy-org-structure.sh reads it from there.
+    AllowedPattern: '^r-[0-9a-z]{4,32}$'
+    ConstraintDescription: Must be an Organization root id, e.g. r-ab12.
+
+  SsmPrefix:
+    Type: String
+    Default: /platform
+    Description: >-
+      SSM Parameter Store namespace for published OU ids. Templates and
+      pipelines read OU ids from here so nothing hardcodes an id.
+    AllowedPattern: '^/[a-zA-Z0-9._/-]+$'
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Security — immutable log destination, aggregation, forensics
+  # -------------------------------------------------------------------------
+  # Holds accounts, not sub-OUs: Log Archive, Audit, Forensics.
+  # Forensics is isolated by design and receives preserved evidence during a
+  # security incident; containment automation writes into it from outside the
+  # affected member account (design doc 07).
+  SecurityOu:
+    Type: AWS::Organizations::OrganizationalUnit
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: Security
+      ParentId: !Ref RootId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: security-and-evidence }
+        - { Key: BillingRollup,    Value: platform-shared }
+
+  # -------------------------------------------------------------------------
+  # Infrastructure — the platform's own machinery
+  # -------------------------------------------------------------------------
+  # Platform Tooling (CloudFormation pipeline, StackSet admin), Shared Services
+  # (platform automation, Truveon ingestion), Backup (Vault Lock), and Network
+  # (reserved — centralised egress is deferred, item D3).
+  InfrastructureOu:
+    Type: AWS::Organizations::OrganizationalUnit
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: Infrastructure
+      ParentId: !Ref RootId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: platform-operations }
+        - { Key: BillingRollup,    Value: platform-shared }
+
+  # -------------------------------------------------------------------------
+  # Members — every tenant account, nested partner then client
+  # -------------------------------------------------------------------------
+  # Members
+  #   <partner>/            created by partner onboarding  (org/10-partner-ou.yaml)
+  #     <client>/           created by the provisioning saga (org/20-client-ou.yaml)
+  #       ad-<partner>-<client>-<env>
+  MembersOu:
+    Type: AWS::Organizations::OrganizationalUnit
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: Members
+      ParentId: !Ref RootId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: tenant-workloads }
+        - { Key: BillingRollup,    Value: tenant }
+
+  # AltDigital's own clients, with no partner in the chain. Reserved from the
+  # outset: without it the first direct client gets bolted on awkwardly, and
+  # the billing roll-up would need a special case for "no partner".
+  # Accounts here are named ad-direct-<client>-<env>, so 'direct' occupies the
+  # partner slot and the naming rule stays uniform.
+  MembersDirectOu:
+    Type: AWS::Organizations::OrganizationalUnit
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: direct
+      ParentId: !Ref MembersOu
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: altdigital-direct-clients }
+        - { Key: PartnerSlug,      Value: direct }
+        - { Key: BillingRollup,    Value: tenant }
+
+  # -------------------------------------------------------------------------
+  # Sandbox — the baseline canary
+  # -------------------------------------------------------------------------
+  # First wave of every baseline rollout, and the target for the guardrail test
+  # harness. A member account with full local administrator attempting denied
+  # actions has to happen somewhere real; this is that somewhere.
+  SandboxOu:
+    Type: AWS::Organizations::OrganizationalUnit
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: Sandbox
+      ParentId: !Ref RootId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: baseline-canary-and-guardrail-tests }
+        - { Key: BillingRollup,    Value: platform-shared }
+
+  # -------------------------------------------------------------------------
+  # Published OU ids
+  # -------------------------------------------------------------------------
+  # No CloudFormation Exports: cross-stack exports create an update lock, and
+  # later consumers live in other accounts and regions where exports cannot
+  # reach. SSM is the published contract.
+  SecurityOuParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/org/ou/security'
+      Type: String
+      Value: !Ref SecurityOu
+      Description: Security OU id
+      Tags: { platform-managed: 'true' }
+
+  InfrastructureOuParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/org/ou/infrastructure'
+      Type: String
+      Value: !Ref InfrastructureOu
+      Description: Infrastructure OU id
+      Tags: { platform-managed: 'true' }
+
+  MembersOuParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/org/ou/members'
+      Type: String
+      Value: !Ref MembersOu
+      Description: Members OU id — parent of every partner OU
+      Tags: { platform-managed: 'true' }
+
+  MembersDirectOuParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/org/ou/members/direct'
+      Type: String
+      Value: !Ref MembersDirectOu
+      Description: Members/direct OU id — AltDigital's own clients, no partner
+      Tags: { platform-managed: 'true' }
+
+  SandboxOuParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/org/ou/sandbox'
+      Type: String
+      Value: !Ref SandboxOu
+      Description: Sandbox OU id — baseline canary account
+      Tags: { platform-managed: 'true' }
+
+Outputs:
+
+  SecurityOuId:
+    Description: Security OU id
+    Value: !Ref SecurityOu
+
+  InfrastructureOuId:
+    Description: Infrastructure OU id
+    Value: !Ref InfrastructureOu
+
+  MembersOuId:
+    Description: Members OU id
+    Value: !Ref MembersOu
+
+  MembersDirectOuId:
+    Description: Members/direct OU id
+    Value: !Ref MembersDirectOu
+
+  SandboxOuId:
+    Description: Sandbox OU id
+    Value: !Ref SandboxOu

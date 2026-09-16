@@ -1,0 +1,27 @@
+graph TD
+    F[Foundry<br/><i>IP holding company</i><br/>owns platform IP]
+    F -->|licence| AD[AltDigital<br/><i>operating entity</i><br/>AWS account owner + payer<br/>holds SOC 2 · owns Truveon<br/>employs the people]
+
+    AD -->|subcontract + BAA| P1[OEight<br/><i>partner · MSP of record</i><br/>SOC 2 + HIPAA<br/>CEO + sales only, no in-house IT]
+    AD -.reserved.-> P2[Zones / OnStak<br/><i>future partners</i>]
+    AD -.reserved.-> P3[direct/<br/><i>AltDigital's own clients</i>]
+
+    P1 -->|contract + BAA| CL1[Arc8<br/><i>client</i><br/>owns app + data]
+    P1 -->|contract + BAA| CL2[Avergent<br/><i>client</i><br/>owns app + data<br/><b>app built by OEight</b>]
+
+    CL1 --> E1[dev · test · uat · prod]
+    CL2 --> E2[dev · test · uat · prod]
+
+    subgraph CLOCK[Notification chain — runs in series from discovery_time]
+        N1[AltDigital → Partner<br/><b>must be tightest</b>] --> N2[Partner → Client] --> N3[Client → individuals / HHS<br/>≤60 days statutory]
+    end
+
+    subgraph SOC[SOC 2 — carve-out method]
+        S1[AWS<br/>subservice to AltDigital] --> S2[AltDigital<br/>infrastructure operations<br/><b>reference report</b>] --> S3[Partner<br/>relationship · contract<br/>notification · vendor mgmt] --> S4[Client<br/>application controls]
+    end
+
+    style F fill:#1f2937,color:#fff
+    style AD fill:#312e81,color:#fff
+    style P1 fill:#78350f,color:#fff
+    style CLOCK fill:#450a0a,color:#fff
+    style SOC fill:#14532d,color:#fff

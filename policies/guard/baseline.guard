@@ -1,0 +1,218 @@
+#
+# AltDigital Managed Platform — cfn-guard baseline rules
+#
+# Every template in this repository must pass these before it is considered
+# complete. Run: scripts/guard.sh
+#
+# These are deliberately blunt and explicit. This file will be read by auditors
+# and by whoever is on call, not only by cfn-guard, so each rule carries the
+# reason it exists rather than just the assertion.
+#
+# Syntax targets cfn-guard 3.x.
+#
+
+# ===========================================================================
+# S3
+# ===========================================================================
+
+let s3_buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+
+rule S3_ENCRYPTION_REQUIRED when %s3_buckets !empty {
+  %s3_buckets {
+    Properties.BucketEncryption exists
+    <<
+      Violation: S3 bucket without BucketEncryption.
+      Reason:    Encryption at rest is not optional on this platform and is not
+                 a per-tenant question (design doc 04). Relying on the account
+                 default leaves no template-level evidence for an auditor.
+      Fix:       Add BucketEncryption with a platform KMS key.
+    >>
+  }
+}
+
+rule S3_PUBLIC_ACCESS_BLOCKED when %s3_buckets !empty {
+  %s3_buckets {
+    Properties.PublicAccessBlockConfiguration exists
+    Properties.PublicAccessBlockConfiguration {
+      BlockPublicAcls == true
+      BlockPublicPolicy == true
+      IgnorePublicAcls == true
+      RestrictPublicBuckets == true
+    }
+    <<
+      Violation: S3 bucket without all four public access blocks set true.
+      Reason:    Partial block configuration reads as protected and is not.
+      Fix:       Set all four to true. Public content is served via CloudFront,
+                 never from a public bucket.
+    >>
+  }
+}
+
+# ===========================================================================
+# KMS
+# ===========================================================================
+
+let kms_keys = Resources.*[ Type == 'AWS::KMS::Key' ]
+
+rule KMS_ROTATION_ENABLED when %kms_keys !empty {
+  %kms_keys {
+    Properties.EnableKeyRotation == true
+    <<
+      Violation: KMS key without automatic rotation.
+      Reason:    Annual rotation is the baseline standard (design doc 04).
+      Fix:       Set EnableKeyRotation: true.
+    >>
+  }
+}
+
+rule KMS_DELETION_WINDOW_30_DAYS when %kms_keys !empty {
+  %kms_keys {
+    Properties.PendingWindowInDays exists
+    Properties.PendingWindowInDays >= 30
+    <<
+      Violation: KMS key with a deletion window shorter than 30 days.
+      Reason:    Design doc 04 specifies 30 days, not the 7-day default. Key
+                 deletion is quorum-controlled and pages on every attempt; the
+                 window is the time available to notice and cancel.
+      Fix:       Set PendingWindowInDays: 30.
+    >>
+  }
+}
+
+# ===========================================================================
+# CloudWatch Logs
+# ===========================================================================
+
+let log_groups = Resources.*[ Type == 'AWS::Logs::LogGroup' ]
+
+rule LOG_GROUP_ENCRYPTED when %log_groups !empty {
+  %log_groups {
+    Properties.KmsKeyId exists
+    <<
+      Violation: CloudWatch log group without KmsKeyId.
+      Reason:    Logs routinely contain more than intended. Encrypting them is
+                 the cheap half of the answer; the data protection policy is
+                 the other half.
+      Fix:       Set KmsKeyId to the platform logs key.
+    >>
+  }
+}
+
+rule LOG_GROUP_RETENTION_SET when %log_groups !empty {
+  %log_groups {
+    Properties.RetentionInDays exists
+    <<
+      Violation: CloudWatch log group without RetentionInDays.
+      Reason:    Unset means retain forever, which is both a cost leak and a
+                 retention-policy violation. The retention floor is derived
+                 from the tenant's frameworks and must be stated explicitly.
+      Fix:       Set RetentionInDays from the tenant's retention floor.
+    >>
+  }
+}
+
+# ===========================================================================
+# IAM
+# ===========================================================================
+
+let iam_policies = Resources.*[
+  Type in [ 'AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy' ]
+]
+
+rule IAM_NO_WILDCARD_ACTION_AND_RESOURCE when %iam_policies !empty {
+  %iam_policies {
+    Properties.PolicyDocument.Statement[*] {
+      when Effect == 'Allow' {
+        Action != '*'
+        <<
+          Violation: IAM policy allowing Action "*".
+          Reason:    Nothing on this platform legitimately needs every action.
+                     Where something genuinely does, it is a named exception
+                     with a comment, not a default.
+          Fix:       Enumerate the actions.
+        >>
+      }
+    }
+  }
+}
+
+let iam_roles = Resources.*[ Type == 'AWS::IAM::Role' ]
+
+rule IAM_ROLE_NO_WILDCARD_INLINE when %iam_roles !empty {
+  %iam_roles[ Properties.Policies exists ] {
+    Properties.Policies[*].PolicyDocument.Statement[*] {
+      when Effect == 'Allow' {
+        Action != '*'
+        <<
+          Violation: Inline role policy allowing Action "*".
+          Fix:       Enumerate the actions.
+        >>
+      }
+    }
+  }
+}
+
+# ===========================================================================
+# Networking
+# ===========================================================================
+
+let security_groups = Resources.*[ Type == 'AWS::EC2::SecurityGroup' ]
+
+rule SG_NO_OPEN_INGRESS_EXCEPT_443 when %security_groups !empty {
+  %security_groups[ Properties.SecurityGroupIngress exists ] {
+    Properties.SecurityGroupIngress[*] {
+      when CidrIp == '0.0.0.0/0' {
+        FromPort == 443
+        ToPort == 443
+        <<
+          Violation: Security group open to 0.0.0.0/0 on a port other than 443.
+          Reason:    There is no SSH path in this architecture — engineer access
+                     is Session Manager only, with no inbound ports at all
+                     (design doc 02). Public ingress terminates at ALB or
+                     CloudFront on 443.
+          Fix:       Remove the rule, or front the service with an ALB.
+        >>
+      }
+    }
+  }
+}
+
+let sg_ingress = Resources.*[ Type == 'AWS::EC2::SecurityGroupIngress' ]
+
+rule SG_INGRESS_NO_OPEN_EXCEPT_443 when %sg_ingress !empty {
+  %sg_ingress {
+    when Properties.CidrIp == '0.0.0.0/0' {
+      Properties.FromPort == 443
+      Properties.ToPort == 443
+      <<
+        Violation: Standalone ingress rule open to 0.0.0.0/0 on a non-443 port.
+        Fix:       Remove it, or front the service with an ALB.
+      >>
+    }
+  }
+}
+
+# ===========================================================================
+# Organizations — platform-specific
+# ===========================================================================
+#
+# The OU tree is the spine of tenant isolation, SCP inheritance, StackSet
+# targeting and both billing roll-ups. A stack rollback or an accidental
+# delete must never attempt to dismantle it.
+
+let org_units = Resources.*[ Type == 'AWS::Organizations::OrganizationalUnit' ]
+
+rule OU_RETAINED_ON_DELETE when %org_units !empty {
+  %org_units {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    <<
+      Violation: Organizational Unit without Retain on delete and update-replace.
+      Reason:    Deleting this stack must never dismantle the Organization
+                 tree. An OU holding accounts would refuse to delete anyway,
+                 so the failure mode is a half-torn-down tree — the worst of
+                 both outcomes.
+      Fix:       Add DeletionPolicy: Retain and UpdateReplacePolicy: Retain.
+    >>
+  }
+}

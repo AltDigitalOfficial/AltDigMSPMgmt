@@ -1,0 +1,30 @@
+# Line endings.
+#
+# core.autocrlf is enabled on the Windows dev box, which would check out shell
+# scripts with CRLF. bash then fails on the carriage return with errors like
+#   $'\r': command not found
+# — the same class of problem that broke AWS CLI output parsing during
+# bootstrap, and just as hard to see. Pin everything textual to LF so the repo
+# behaves identically on Windows, Linux and in CI.
+
+* text=auto eol=lf
+
+*.sh        text eol=lf
+*.guard     text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.mermaid   text eol=lf
+*.env       text eol=lf
+*.example   text eol=lf
+Makefile    text eol=lf
+
+# The hook has no extension and must stay executable and LF.
+.githooks/pre-commit text eol=lf
+
+# Never touch binaries.
+*.png  binary
+*.jpg  binary
+*.pdf  binary
+*.zip  binary

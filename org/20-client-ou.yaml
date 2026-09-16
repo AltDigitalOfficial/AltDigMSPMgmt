@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — one client OU beneath a partner OU.
+  Deployed by the client provisioning saga (design doc 13) after the partner
+  precondition passes. Creates the OU and publishes its id. Accounts are vested
+  into it separately.
+
+# ---------------------------------------------------------------------------
+# Position in the saga
+# ---------------------------------------------------------------------------
+# This stack is part of step 5 (AWS accounts + baseline), not step 1. The
+# registry entry comes first and is the spine; this template consumes the
+# partner and client slugs from it and writes the resulting OU id back.
+#
+# It must not be deployed before the step 0 partner precondition passes —
+# partner exists, is active, notification window non-null. An OU created
+# beneath an incomplete partner relationship is exactly the half-provisioned
+# state the saga is built to avoid, because it looks supported.
+#
+# Stack name convention: platform-client-<partner>-<client>
+#
+# Billing: the client OU is the boundary the partner invoices their own client
+# against. Two roll-ups, one tree — by client for the partner, by partner for
+# AltDigital. Both derive from account id via Cost Categories; this OU is what
+# makes the derivation checkable.
+
+Parameters:
+
+  PartnerSlug:
+    Type: String
+    Description: >-
+      Partner slug this client sits beneath. Must match the parent OU's name.
+      Use 'direct' for AltDigital's own clients with no partner in the chain.
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$'
+    MinLength: 1
+    MaxLength: 20
+
+  ClientSlug:
+    Type: String
+    Description: >-
+      Machine-safe client identifier, used verbatim as the OU name and as the
+      <client> segment of every account alias beneath it.
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$'
+    MinLength: 1
+    MaxLength: 20
+    ConstraintDescription: >-
+      1-20 chars, lowercase alphanumeric and hyphens, must start and end
+      alphanumeric.
+
+  ClientLegalName:
+    Type: String
+    Description: Client legal or trading entity name, for display and audit trail.
+    MinLength: 1
+    MaxLength: 128
+
+  PartnerIsApplicationOwner:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether the partner also built the application for this client
+      (questionnaire 1.0b). Recorded as a tag because it changes the
+      responsibility matrix: the partner then appears in both the P and C
+      columns, and its service-delivery and application-owner control sets must
+      not be collapsed. OEight is the application owner for one of its two
+      clients, so this is a real case, not a hypothetical.
+
+  PartnerOuId:
+    Type: String
+    Description: >-
+      Parent partner OU id. Read from /platform/org/ou/members/<partner>.
+    AllowedPattern: '^ou-[0-9a-z]{4,32}-[0-9a-z]{8,32}$'
+    ConstraintDescription: Must be an Organizational Unit id, e.g. ou-ab12-cdef3456.
+
+  SsmPrefix:
+    Type: String
+    Default: /platform
+    AllowedPattern: '^/[a-zA-Z0-9._/-]+$'
+
+Resources:
+
+  ClientOu:
+    Type: AWS::Organizations::OrganizationalUnit
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Ref ClientSlug
+      ParentId: !Ref PartnerOuId
+      Tags:
+        - { Key: platform-managed,            Value: 'true' }
+        - { Key: PartnerSlug,                 Value: !Ref PartnerSlug }
+        - { Key: ClientSlug,                  Value: !Ref ClientSlug }
+        - { Key: ClientLegalName,             Value: !Ref ClientLegalName }
+        - { Key: PartnerIsApplicationOwner,   Value: !Ref PartnerIsApplicationOwner }
+        - { Key: BillingRollup,               Value: client }
+
+  ClientOuParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/org/ou/members/${PartnerSlug}/${ClientSlug}'
+      Type: String
+      Value: !Ref ClientOu
+      Description: !Sub 'Client OU id for ${ClientLegalName} under partner ${PartnerSlug}'
+      Tags:
+        platform-managed: 'true'
+        PartnerSlug: !Ref PartnerSlug
+        ClientSlug: !Ref ClientSlug
+
+Outputs:
+
+  ClientOuId:
+    Description: !Sub 'OU id for client ${ClientSlug} under partner ${PartnerSlug}'
+    Value: !Ref ClientOu
+
+  AccountAliasPrefix:
+    Description: >-
+      Alias stem for every account vested into this OU. The vesting pipeline
+      appends -<env>, or -<app>-<env> where the client has more than one
+      application.
+    Value: !Sub 'ad-${PartnerSlug}-${ClientSlug}'

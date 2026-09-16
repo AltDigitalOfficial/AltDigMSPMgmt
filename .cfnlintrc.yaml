@@ -1,0 +1,9 @@
+templates:
+  - org/**/*.yaml
+  - baseline/**/*.yaml
+regions:
+  - us-east-2
+include_checks:
+  - I    # informational rules on, deliberately: this code is read by auditors
+ignore_checks:
+  - W3011  # DeletionPolicy/UpdateReplacePolicy Retain is intentional on OUs

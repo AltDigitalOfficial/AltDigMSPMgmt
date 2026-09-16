@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+#
+# Create one client OU beneath an existing partner OU.
+#
+# Part of step 5 of the provisioning saga (design doc 13). The step 0 partner
+# precondition — partner exists, is active, notification window non-null — is
+# NOT fully enforceable yet: 'active' and the notification window live in the
+# platform registry, which does not exist until phase 3.2.
+#
+# What this script CAN check today is enforced below. What it cannot check is
+# printed as an explicit warning rather than passed over silently, so the gap
+# is visible until the registry closes it.
+#
+# Usage:
+#   scripts/create-client-ou.sh --partner oeight --slug arc8 \
+#     --legal-name "Arc8" [--partner-is-app-owner] [--dry-run]
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+
+PARTNER=""; SLUG=""; LEGAL_NAME=""; APP_OWNER=false
+
+usage() {
+  cat <<'USAGE'
+Usage: create-client-ou.sh --partner <slug> --slug <slug> --legal-name <name>
+                           [--partner-is-app-owner] [--dry-run]
+
+  --partner                Partner slug this client sits beneath, or 'direct'
+                           for an AltDigital client with no partner.
+  --slug                   Machine-safe client id, 1-20 chars.
+  --legal-name             Client legal or trading name.
+  --partner-is-app-owner   The partner also built this client's application
+                           (questionnaire 1.0b). Recorded because it puts the
+                           partner in two columns of the responsibility matrix.
+  --dry-run                Produce a changeset without executing it.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --partner)              PARTNER="$2"; shift 2 ;;
+    --slug)                 SLUG="$2"; shift 2 ;;
+    --legal-name)           LEGAL_NAME="$2"; shift 2 ;;
+    --partner-is-app-owner) APP_OWNER=true; shift ;;
+    --dry-run)              DRY_RUN=1; shift ;;
+    -h|--help)              usage; exit 0 ;;
+    *) die "Unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "${PARTNER}" ]]    || { usage; die "--partner is required."; }
+[[ -n "${SLUG}" ]]       || { usage; die "--slug is required."; }
+[[ -n "${LEGAL_NAME}" ]] || { usage; die "--legal-name is required."; }
+
+validate_slug partner "${PARTNER}"
+validate_slug client  "${SLUG}"
+
+# Account alias length check, done here at the point the segments are chosen
+# rather than at account creation where a failure is far more expensive to
+# unwind. Worst case is a client with multiple applications:
+# ad-<partner>-<client>-<app>-<env> with a full-length 12-char app code.
+# account_alias dies if the result exceeds 63, so this is the whole check.
+account_alias "${PARTNER}" "${SLUG}" "xxxxxxxxxxxx" "prod" >/dev/null
+
+export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
+
+require_cli
+require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
+
+# --- partner precondition, as far as it can be checked today ---------------
+
+if [[ "${PARTNER}" == "direct" ]]; then
+  PARTNER_OU="$(get_param /org/ou/members/direct)"
+else
+  PARTNER_OU="$(get_param "/org/ou/members/${PARTNER}")"
+fi
+
+[[ -n "${PARTNER_OU}" && "${PARTNER_OU}" != "None" ]] \
+  || die "Partner '${PARTNER}' does not exist.
+      A client cannot be onboarded beneath a partner that does not exist.
+      Run: scripts/create-partner-ou.sh --slug ${PARTNER} --legal-name '<name>'"
+
+EXISTING="$(find_ou "${PARTNER_OU}" "${SLUG}")"
+STACK_NAME="platform-client-${PARTNER}-${SLUG}"
+if [[ -n "${EXISTING}" ]]; then
+  STACK_EXISTS="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
+    --query 'Stacks[0].StackName' --output text 2>/dev/null || true)"
+  if [[ -z "${STACK_EXISTS}" || "${STACK_EXISTS}" == "None" ]]; then
+    die "An OU named '${SLUG}' already exists under partner '${PARTNER}'
+      (${EXISTING}) but is not managed by stack ${STACK_NAME}.
+      Resolve by hand — deploying would create a duplicate and split billing."
+  fi
+  skip "Client OU '${SLUG}' exists (${EXISTING}); updating."
+fi
+
+hr
+log "Client OU"
+log "  partner      : ${PARTNER} (${PARTNER_OU})"
+log "  slug         : ${SLUG}"
+log "  legal name   : ${LEGAL_NAME}"
+log "  app owner    : $([[ ${APP_OWNER} == true ]] && echo "partner (two matrix columns)" || echo "client")"
+log "  alias stem   : ${PLATFORM_ACCOUNT_PREFIX}-${PARTNER}-${SLUG}"
+log "  root emails  : $(account_email "$(account_alias "${PARTNER}" "${SLUG}" '' 'dev')")"
+log "                 $(account_email "$(account_alias "${PARTNER}" "${SLUG}" '' 'test')")"
+log "                 $(account_email "$(account_alias "${PARTNER}" "${SLUG}" '' 'uat')")  (opt-in)"
+log "                 $(account_email "$(account_alias "${PARTNER}" "${SLUG}" '' 'prod')")"
+hr
+
+warn "Partner precondition only PARTIALLY enforced:"
+warn "  checked   — partner OU exists"
+warn "  UNCHECKED — partner state is 'active'"
+warn "  UNCHECKED — partner notification window is non-null"
+warn "  UNCHECKED — AltDigital's window is tighter than the partner's"
+warn "These need the platform registry (phase 3.2). Until it exists, a human"
+warn "confirms them. Design doc 13 requires these to BLOCK, not warn."
+hr
+
+cfn_deploy "${STACK_NAME}" "${REPO_ROOT}/org/20-client-ou.yaml" \
+  "PartnerSlug=${PARTNER}" \
+  "ClientSlug=${SLUG}" \
+  "ClientLegalName=${LEGAL_NAME}" \
+  "PartnerIsApplicationOwner=${APP_OWNER}" \
+  "PartnerOuId=${PARTNER_OU}" \
+  "SsmPrefix=${PLATFORM_SSM_PREFIX}"
+
+if [[ "${DRY_RUN}" != "1" ]]; then
+  hr
+  cfn_outputs "${STACK_NAME}" | sed 's/^/  /'
+fi

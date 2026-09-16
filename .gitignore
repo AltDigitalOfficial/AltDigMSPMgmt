@@ -1,0 +1,37 @@
+# Personal data — names, emails and phone numbers for AWS alternate contacts.
+# Never committed. Copy config/contacts.env.example and fill in locally.
+#
+# Glob, not an exact match: an exact 'config/contacts.env' would leave a
+# contacts.env.bak or contacts.env.old tracked. The .example file is
+# re-included below because it holds only empty placeholders.
+config/contacts.env*
+!config/contacts.env.example
+
+# Local AWS and tooling state
+.aws-sam/
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build output
+dist/
+build/
+node_modules/
+
+# Scratch
+*.log
+tmp/
+scratch/
