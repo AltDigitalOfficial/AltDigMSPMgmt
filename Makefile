@@ -6,14 +6,15 @@
 
 SHELL := /usr/bin/env bash
 
-.PHONY: help setup lint guard validate validate-aws bootstrap org-structure
+.PHONY: help setup lint guard validate validate-aws validate-policies bootstrap org-structure
 
 help:
 	@echo "setup           install cfn-lint and cfn-guard"
 	@echo "lint            cfn-lint all templates"
 	@echo "guard           cfn-guard all templates against policies/guard"
 	@echo "validate-aws    validate all templates against the CloudFormation API"
-	@echo "validate        validate-aws + lint + guard"
+	@echo "validate-policies  check SCPs/RCPs with IAM Access Analyzer"
+	@echo "validate        validate-aws + validate-policies + lint + guard"
 	@echo "bootstrap       bootstrap the management account (add DRY=1 for dry run)"
 	@echo "org-structure   deploy the OU skeleton (add DRY=1 for dry run)"
 
@@ -31,7 +32,10 @@ guard:
 validate-aws:
 	@scripts/validate.sh
 
-validate: validate-aws lint guard
+validate-policies:
+	@scripts/validate-policies.sh
+
+validate: validate-aws validate-policies lint guard
 
 bootstrap:
 	@scripts/bootstrap-management-account.sh $(DRYFLAG)

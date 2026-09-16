@@ -1,0 +1,124 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ProtectCloudTrail",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors",
+        "cloudtrail:RemoveTags",
+        "cloudtrail:DeleteEventDataStore",
+        "cloudtrail:UpdateEventDataStore"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/Platform*",
+            "arn:aws:sts::*:assumed-role/Platform*/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ProtectConfigRecorder",
+      "Effect": "Deny",
+      "Action": [
+        "config:DeleteConfigurationRecorder",
+        "config:StopConfigurationRecorder",
+        "config:PutConfigurationRecorder",
+        "config:DeleteDeliveryChannel",
+        "config:PutDeliveryChannel",
+        "config:DeleteConfigRule",
+        "config:DeleteOrganizationConfigRule",
+        "config:DeleteRetentionConfiguration",
+        "config:PutRetentionConfiguration",
+        "config:DeleteConformancePack",
+        "config:DeleteAggregationAuthorization",
+        "config:DeleteConfigurationAggregator"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/Platform*",
+            "arn:aws:sts::*:assumed-role/Platform*/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ProtectThreatDetection",
+      "Effect": "Deny",
+      "Action": [
+        "guardduty:DeleteDetector",
+        "guardduty:UpdateDetector",
+        "guardduty:DeleteMembers",
+        "guardduty:DisassociateMembers",
+        "guardduty:DisassociateFromMasterAccount",
+        "guardduty:DisassociateFromAdministratorAccount",
+        "guardduty:StopMonitoringMembers",
+        "guardduty:DeletePublishingDestination",
+        "guardduty:CreateFilter",
+        "guardduty:UpdateFilter",
+        "guardduty:CreateIPSet",
+        "guardduty:UpdateIPSet",
+        "securityhub:DisableSecurityHub",
+        "securityhub:DeleteMembers",
+        "securityhub:DisassociateMembers",
+        "securityhub:DisassociateFromMasterAccount",
+        "securityhub:DisassociateFromAdministratorAccount",
+        "securityhub:BatchDisableStandards",
+        "securityhub:UpdateStandardsControl",
+        "securityhub:DeleteInsight",
+        "macie2:DisableMacie",
+        "macie2:DisassociateFromMasterAccount",
+        "macie2:DisassociateFromAdministratorAccount",
+        "macie2:UpdateMacieSession",
+        "inspector2:Disable",
+        "inspector2:DisassociateMember",
+        "inspector2:UpdateOrganizationConfiguration",
+        "access-analyzer:DeleteAnalyzer",
+        "access-analyzer:UpdateArchiveRule",
+        "access-analyzer:CreateArchiveRule"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/Platform*",
+            "arn:aws:sts::*:assumed-role/Platform*/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ProtectFlowAndDnsLogging",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DeleteFlowLogs",
+        "logs:DeleteLogGroup",
+        "logs:DeleteRetentionPolicy",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteDataProtectionPolicy",
+        "logs:DeleteAccountPolicy",
+        "logs:PutAccountPolicy",
+        "logs:DeleteResourcePolicy",
+        "route53resolver:DeleteResolverQueryLogConfig",
+        "route53resolver:DisassociateResolverQueryLogConfig"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/Platform*",
+            "arn:aws:sts::*:assumed-role/Platform*/*"
+          ]
+        }
+      }
+    }
+  ]
+}

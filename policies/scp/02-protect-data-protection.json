@@ -1,0 +1,108 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ProtectKmsKeys",
+      "Effect": "Deny",
+      "Action": [
+        "kms:ScheduleKeyDeletion",
+        "kms:DisableKey",
+        "kms:DisableKeyRotation",
+        "kms:PutKeyPolicy",
+        "kms:DeleteAlias",
+        "kms:DeleteImportedKeyMaterial",
+        "kms:DeleteCustomKeyStore",
+        "kms:DisconnectCustomKeyStore",
+        "kms:RevokeGrant"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/Platform*",
+            "arn:aws:sts::*:assumed-role/Platform*/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ProtectBackupVaultsAndRecoveryPoints",
+      "Effect": "Deny",
+      "Action": [
+        "backup:DeleteBackupVault",
+        "backup:DeleteBackupVaultAccessPolicy",
+        "backup:DeleteBackupVaultLockConfiguration",
+        "backup:PutBackupVaultLockConfiguration",
+        "backup:DeleteBackupVaultNotifications",
+        "backup:DeleteRecoveryPoint",
+        "backup:UpdateRecoveryPointLifecycle",
+        "backup:DisassociateRecoveryPoint",
+        "backup:DeleteBackupPlan",
+        "backup:DeleteBackupSelection",
+        "backup:UpdateBackupPlan",
+        "backup:StopBackupJob",
+        "backup:UpdateRegionSettings",
+        "backup:UpdateGlobalSettings"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/Platform*",
+            "arn:aws:sts::*:assumed-role/Platform*/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ProtectSnapshotsFromDeletion",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DeleteSnapshot",
+        "rds:DeleteDBSnapshot",
+        "rds:DeleteDBClusterSnapshot"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/Platform*",
+            "arn:aws:sts::*:assumed-role/Platform*/*"
+          ]
+        },
+        "StringEquals": {
+          "aws:ResourceTag/platform-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyPlatformLogAndEvidenceBucketTampering",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketObjectLockConfiguration",
+        "s3:PutObjectRetention",
+        "s3:PutObjectLegalHold",
+        "s3:BypassGovernanceRetention",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutReplicationConfiguration",
+        "s3:PutEncryptionConfiguration"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/Platform*",
+            "arn:aws:sts::*:assumed-role/Platform*/*"
+          ]
+        },
+        "StringEquals": {
+          "aws:ResourceTag/platform-managed": "true"
+        }
+      }
+    }
+  ]
+}
