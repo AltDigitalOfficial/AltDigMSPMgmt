@@ -161,7 +161,7 @@ Expect an `assumed-role/AWSReservedSSO_PlatformBootstrapAdmin_*` ARN in account
 
 - [x] `get-caller-identity` returns the expected account and an SSO role
 
-## 6. Alternate contacts and mail verification
+## 6. Alternate contacts and mail verification ✅ *done 2026-09-16*
 
 ### 6a — Alternate contacts
 
@@ -206,8 +206,11 @@ Get-OrganizationConfig | Select-Object DisablePlusAddressInRecipients
 
 `False` means plus-addressing is on.
 
-- [ ] Test message to `msp-mgmt+ad-test-test-dev@altdigital.ai` arrives
-- [ ] Not silently filtered to Junk or a rule-driven folder
+- [x] Test message to `msp-mgmt+ad-test-test-dev@altdigital.ai` arrives — verified
+      2026-09-16 from both an internal (`jamie@altdigital.ai`) and an external
+      sender. External is the one that counts: AWS mail traverses connectors,
+      transport rules and anti-spam that internal mail skips
+- [x] Not silently filtered to Junk or a rule-driven folder
 
 ## 7. Run the bootstrap script ✅ *done 2026-09-16*
 

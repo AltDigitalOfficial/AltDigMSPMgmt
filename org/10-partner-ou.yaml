@@ -31,14 +31,16 @@ Parameters:
       <partner> segment of every account alias beneath it. Lowercase
       alphanumeric and hyphens only — account aliases permit nothing else.
       Strip dots: oeight.io becomes oeight.
-    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$'
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$'
     MinLength: 1
-    MaxLength: 20
+    MaxLength: 18
     ConstraintDescription: >-
-      1-20 chars, lowercase alphanumeric and hyphens, must start and end
-      alphanumeric. The cap is part of a fixed budget against the 63-character
-      account alias limit: 3 (ad-) + 20 partner + 1 + 20 client + 1 + 12 app
-      short code + 1 + 4 env = 62. Do not raise it in isolation.
+      1-18 chars, lowercase alphanumeric and hyphens, must start and end
+      alphanumeric. The cap is part of a fixed budget against TWO limits, of
+      which the email is the tighter: the 63-char account alias
+      (3 + 18 + 1 + 18 + 1 + 10 + 1 + 4 = 56) and the 64-octet RFC 5321 email
+      local part (8 + 1 + 18 + 1 + 18 + 1 + 10 + 1 + 4 = 62). Do not raise it
+      in isolation.
 
   PartnerLegalName:
     Type: String
@@ -101,7 +103,10 @@ Resources:
 Outputs:
 
   PartnerOuId:
-    Description: !Sub 'OU id for partner ${PartnerSlug}'
+    # Outputs' Description must be a literal String — CloudFormation rejects
+    # intrinsic functions here, unlike a resource property. The parameterised
+    # detail belongs in Value, not in the label.
+    Description: OU id for this partner
     Value: !Ref PartnerOu
 
   PartnerSlugOut:
