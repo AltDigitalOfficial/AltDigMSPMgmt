@@ -13,24 +13,29 @@
 #
 # Usage:
 #   scripts/create-client-ou.sh --partner oeight --slug arc8 \
-#     --legal-name "Arc8" [--partner-is-app-owner] [--dry-run]
+#     --legal-name "Arc8" --app-owner partner --app-builder partner [--dry-run]
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-PARTNER=""; SLUG=""; LEGAL_NAME=""; APP_OWNER=false
+PARTNER=""; SLUG=""; LEGAL_NAME=""; APP_OWNER="client"; APP_BUILDER="client"
 
 usage() {
   cat <<'USAGE'
 Usage: create-client-ou.sh --partner <slug> --slug <slug> --legal-name <name>
-                           [--partner-is-app-owner] [--dry-run]
+                           [--app-owner <who>] [--app-builder <who>] [--dry-run]
 
   --partner                Partner slug this client sits beneath, or 'direct'
                            for an AltDigital client with no partner.
   --slug                   Machine-safe client id, 1-20 chars.
   --legal-name             Client legal or trading name.
-  --partner-is-app-owner   The partner also built this client's application
-                           (questionnaire 1.0b). Recorded because it puts the
-                           partner in two columns of the responsibility matrix.
+  --app-owner              Who owns the application IP: client | partner.
+                           Default client. 'partner' means doc 10's "the
+                           customer owns their application" does not hold here,
+                           and the exit clause must say what they leave with.
+  --app-builder            Who writes and maintains it: client | partner |
+                           third-party. Default client. Independent of
+                           ownership: a partner can build under contract while
+                           the client keeps the IP.
   --dry-run                Produce a changeset without executing it.
 USAGE
 }
@@ -40,7 +45,8 @@ while [[ $# -gt 0 ]]; do
     --partner)              PARTNER="$2"; shift 2 ;;
     --slug)                 SLUG="$2"; shift 2 ;;
     --legal-name)           LEGAL_NAME="$2"; shift 2 ;;
-    --partner-is-app-owner) APP_OWNER=true; shift ;;
+    --app-owner)            APP_OWNER="$2"; shift 2 ;;
+    --app-builder)          APP_BUILDER="$2"; shift 2 ;;
     --dry-run)              DRY_RUN=1; shift ;;
     -h|--help)              usage; exit 0 ;;
     *) die "Unknown argument: $1" ;;
@@ -53,6 +59,16 @@ done
 
 validate_slug partner "${PARTNER}"
 validate_slug client  "${SLUG}"
+
+case "${APP_OWNER}" in client|partner) ;; *) die "--app-owner must be client or partner." ;; esac
+case "${APP_BUILDER}" in client|partner|third-party) ;; *) die "--app-builder must be client, partner or third-party." ;; esac
+
+# Worth surfacing at creation rather than at contract-review time.
+if [[ "${APP_OWNER}" == "partner" ]]; then
+  warn "ApplicationOwner=partner: design doc 10 states the customer owns their"
+  warn "application and data. That does not hold for this client. The exit"
+  warn "clause must state what ${SLUG} leaves with. Owned by Art and Wayne (X2)."
+fi
 
 # Account alias length check, done here at the point the segments are chosen
 # rather than at account creation where a failure is far more expensive to
@@ -98,7 +114,8 @@ log "Client OU"
 log "  partner      : ${PARTNER} (${PARTNER_OU})"
 log "  slug         : ${SLUG}"
 log "  legal name   : ${LEGAL_NAME}"
-log "  app owner    : $([[ ${APP_OWNER} == true ]] && echo "partner (two matrix columns)" || echo "client")"
+log "  app owner    : ${APP_OWNER}"
+log "  app builder  : ${APP_BUILDER}"
 log "  alias stem   : ${PLATFORM_ACCOUNT_PREFIX}-${PARTNER}-${SLUG}"
 log "  root emails  : $(account_email "${PARTNER}" "${SLUG}" '' 'dev')"
 log "                 $(account_email "${PARTNER}" "${SLUG}" '' 'test')"
@@ -119,7 +136,8 @@ cfn_deploy "${STACK_NAME}" "${REPO_ROOT}/org/20-client-ou.yaml" \
   "PartnerSlug=${PARTNER}" \
   "ClientSlug=${SLUG}" \
   "ClientLegalName=${LEGAL_NAME}" \
-  "PartnerIsApplicationOwner=${APP_OWNER}" \
+  "ApplicationOwner=${APP_OWNER}" \
+  "ApplicationBuilder=${APP_BUILDER}" \
   "PartnerOuId=${PARTNER_OU}" \
   "SsmPrefix=${PLATFORM_SSM_PREFIX}"
 

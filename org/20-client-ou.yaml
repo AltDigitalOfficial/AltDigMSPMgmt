@@ -55,17 +55,44 @@ Parameters:
     MinLength: 1
     MaxLength: 128
 
-  PartnerIsApplicationOwner:
+  # Ownership and authorship are recorded separately because they vary
+  # independently, and the design package models only the case where they move
+  # together.
+  #
+  # Doc 15 treats "is the partner also the application owner?" as a single
+  # question (questionnaire 1.0b). OEight's two clients show why that is not
+  # enough:
+  #
+  #   Arc8      OEight owns the IP   and   OEight builds it
+  #   Avergent  Avergent owns the IP and   OEight builds it as a service
+  #
+  # Collapsing these loses precisely the distinction doc 15 warns about — that
+  # an auditor must be able to separate what the partner does as a service
+  # provider from what it does as an application owner. They also drive
+  # different things: ownership drives the IP and exit clauses, authorship
+  # drives who is accountable for application-layer patching, change records
+  # and remediation on the responsibility matrix.
+
+  ApplicationOwner:
     Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
+    Default: client
+    AllowedValues: [client, partner]
     Description: >-
-      Whether the partner also built the application for this client
-      (questionnaire 1.0b). Recorded as a tag because it changes the
-      responsibility matrix: the partner then appears in both the P and C
-      columns, and its service-delivery and application-owner control sets must
-      not be collapsed. OEight is the application owner for one of its two
-      clients, so this is a real case, not a hypothetical.
+      Who owns the application intellectual property. Drives the IP boundary
+      and the exit clause. Where this is 'partner', design doc 10's position
+      that "the customer owns their application and their data" does not hold
+      for this client and the contract must say what they leave with.
+
+  ApplicationBuilder:
+    Type: String
+    Default: client
+    AllowedValues: [client, partner, third-party]
+    Description: >-
+      Who actually writes and maintains the application. Drives the
+      responsibility matrix rows for application patching, dependency
+      remediation, change records and Tier 2 application response. Independent
+      of ownership: a partner can build under contract while the client retains
+      the IP.
 
   PartnerOuId:
     Type: String
@@ -93,7 +120,8 @@ Resources:
         - { Key: PartnerSlug,                 Value: !Ref PartnerSlug }
         - { Key: ClientSlug,                  Value: !Ref ClientSlug }
         - { Key: ClientLegalName,             Value: !Ref ClientLegalName }
-        - { Key: PartnerIsApplicationOwner,   Value: !Ref PartnerIsApplicationOwner }
+        - { Key: ApplicationOwner,            Value: !Ref ApplicationOwner }
+        - { Key: ApplicationBuilder,          Value: !Ref ApplicationBuilder }
         - { Key: BillingRollup,               Value: client }
 
   ClientOuParam:

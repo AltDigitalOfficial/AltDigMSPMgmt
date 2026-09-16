@@ -127,46 +127,41 @@ notification window is *tighter* than the partner's, not merely present.
 
 ---
 
-## D-008 · One test message silently dropped in transit
+## D-008 · Delayed test message — CLOSED
 
-**Observed** — 2026-09-16, during plus-addressing verification. A test to
-`mspr+ad-test-test-d@altdigital.ai` from one external sender never arrived.
-The same address received successfully from a second external sender, and the
-earlier `msp-mgmt+` tests succeeded from that same first sender.
+**Observed** — 2026-09-16. A test to `mspr+ad-test-test-d@altdigital.ai` from one
+external sender appeared not to arrive, while the same address received
+successfully from a second sender. With no NDR, the reasonable reading was that
+the message had been accepted and silently filtered — quarantine, spam
+classification or a transport rule — which would have been serious, because
+member account root addresses are where AWS sends root password reset and
+account verification.
 
-**Significant because there was no NDR.** A bounce would have meant the message
-was rejected at the edge — most likely proxy-address replication lag, which is
-benign and self-resolving. No bounce means it was accepted and then dropped,
-which is filtering: quarantine, spam classification, or a transport rule. None
-of those notify the sender or the recipient.
+**Resolved same day.** The message arrived; it was **delayed, not dropped**.
+No filtering, no quarantine, no transport rule.
 
-**Decision** — Accepted and proceeding (Jamie, 2026-09-16). Not investigated.
+**Worth keeping for the lesson, not the incident.** "No bounce and not yet
+delivered" does not distinguish *dropped* from *slow*, and both readings were
+available from the same evidence. The diagnosis was reasonable and wrong. Mail
+delay across external senders is ordinary and the absence of an NDR says
+nothing about it within the first few minutes.
 
-**Risk while open** — Member account root addresses are where AWS sends the
-root password reset, account verification and security notices. If Exchange
-Online Protection is dropping mail to these addresses silently, the failure
-surfaces on the day an account needs recovering, and the recovery path is the
-thing that is broken. Plausible cause: repeated near-identical messages to
-unusual plus-addressed recipients resemble directory-harvest probing, which EOP
-has heuristics against — but that is a guess, not a finding.
+**What would have settled it in two minutes** — Exchange admin center → Mail
+flow → **Message trace**, which reports Delivered, Filtered as spam,
+Quarantined or never accepted, with timestamps. That remains the right first
+move for any future suspicion, in preference to inferring from silence.
 
-**How to close, in ascending order of effort**
-- Exchange admin center → Mail flow → **Message trace** on the recipient. This
-  is authoritative and takes two minutes: it reports Delivered, Filtered as
-  spam, Quarantined, or never accepted
-- security.microsoft.com → Review → **Quarantine**. Quarantined mail never
-  reaches Junk, so there is otherwise no way to see it
-- The real end-to-end proof arrives free: AWS sends a welcome message to the
-  root address at account creation. The first vested account confirms the whole
-  path with genuine AWS mail rather than a hand-sent test
+**Status** — Closed 2026-09-16. Plus-addressed delivery to `mspr@` is verified
+from both internal and external senders. Independently corroborated by the AWS
+welcome message for `ad-sandbox-canary`, sent to
+`mspr+sandbox-canary@altdigital.ai` on account creation — genuine AWS mail over
+the real path, which is the strongest confirmation available.
 
-**If an exception is ever needed, do not allow-list `amazon.com` or
-`amazonaws.com` by domain.** Spoofed AWS notifications are a common phishing
-lure and a domain allow-list bypasses exactly the checks that catch them. Scope
-any exception to DKIM-authenticated `amazonses.com`.
-
-**Close when** — Message trace explains it, or the first vested account's AWS
-welcome mail is confirmed received.
+**Standing guidance retained** — if a mail exception is ever needed for AWS
+notifications, do not allow-list `amazon.com` or `amazonaws.com` by domain.
+Spoofed AWS notifications are a common phishing lure and a domain allow-list
+bypasses the checks that catch them. Scope any exception to DKIM-authenticated
+`amazonses.com`.
 
 ---
 
