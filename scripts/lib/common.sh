@@ -299,6 +299,36 @@ account_email() {
   printf '%s@%s' "${local_part}" "${PLATFORM_EMAIL_DOMAIN}"
 }
 
+# --- platform (non-member) accounts ----------------------------------------
+#
+# The design package names member accounts (ad-<partner>-<client>-<env>) but is
+# silent on the seven platform accounts. Convention adopted here:
+#
+#   ad-<ou>-<role>      ad-security-logarchive, ad-infra-tooling, ad-sandbox-canary
+#
+# OU placement is readable from the account name, which is what you have in a
+# support ticket or a Cost Explorer row. 'platform' is not used as the scope
+# segment because it would collide conceptually with a partner slug of the same
+# name, and because it discards the OU hint for no gain.
+
+PLATFORM_OUS="security infra sandbox"
+
+platform_account_alias() {
+  local ou="$1" role="$2"
+  validate_slug "platform-ou" "${ou}"
+  validate_slug "platform-role" "${role}"
+  local alias="${PLATFORM_ACCOUNT_PREFIX}-${ou}-${role}"
+  [[ ${#alias} -le ${ACCOUNT_ALIAS_MAX} ]]     || die "Platform account alias '${alias}' is ${#alias} chars; limit ${ACCOUNT_ALIAS_MAX}."
+  printf '%s' "${alias}"
+}
+
+platform_account_email() {
+  local ou="$1" role="$2"
+  local local_part="${PLATFORM_EMAIL_LOCAL}+${ou}-${role}"
+  [[ ${#local_part} -le ${EMAIL_LOCAL_MAX} ]]     || die "Platform root email local part '${local_part}' is ${#local_part} octets; limit ${EMAIL_LOCAL_MAX}."
+  printf '%s@%s' "${local_part}" "${PLATFORM_EMAIL_DOMAIN}"
+}
+
 # --- contact details -------------------------------------------------------
 #
 # normalise_phone <value> -> E.164, or empty on failure

@@ -1,8 +1,10 @@
 # Service Control Policies
 
-**Status: written and validated. Nothing is attached.** Attaching is a separate,
-deliberate step and should not happen before the Phase 1.3 guardrail harness can
-prove these actually hold — see [Before attaching](#before-attaching).
+**Status: attached to the Sandbox OU and verified. NOT attached to Members.**
+
+The Phase 1.3 harness passes 8 of 9 assertions against a live account, with the
+ninth ambiguous by choice — see [Verified against a live account](#verified-against-a-live-account).
+Members remains unattached pending a decision to vest tenant accounts.
 
 ---
 
@@ -104,31 +106,76 @@ reasons:
 Drift detection is handled by comparing live policy content to these files,
 rather than by CloudFormation drift.
 
+## Verified against a live account
+
+Run 2026-09-16 against `ad-sandbox-canary` (754280127660), policies attached to
+the Sandbox OU: **8 passed, 0 failed, 1 ambiguous.**
+
+Every pass is *provable*, not merely "the call failed". `scripts/test-guardrails.sh`
+classifies three ways:
+
+- the service names the SCP in its error, or
+- a **differential probe** — the same call run as a `Platform*`-named principal
+  that the policy excludes — is permitted where the subject is denied, or
+- the target resource genuinely exists and the subject holds
+  `AdministratorAccess`, so nothing but an SCP could have denied it
+
+The one remaining ambiguity is `organizations:LeaveOrganization`, and it is
+irreducible: Organizations does not name the SCP in its error, the statement has
+no exclusion to differentiate against, and AWS independently blocks
+`LeaveOrganization` for accounts created by `CreateAccount`. Two mechanisms deny
+it and the outcome is correct either way. Adding an exclusion purely to make the
+test provable would weaken the control, so it stays ambiguous by choice.
+
+## Findings from the first live run
+
+**`aws:PrincipalArn` for an assumed role is
+`arn:aws:sts::<acct>:assumed-role/<RoleName>/<session>`.** Confirmed
+empirically. The `arn:aws:iam::*:role/Platform*` form in each exclusion never
+matches a real request and is redundant — kept because it costs nothing, is
+correct if AWS ever surfaces the other form, and removing it risks a silent
+regression for no benefit.
+
+**AWS Backup returns `AccessDenied` for a vault that does not exist**,
+regardless of whether the caller is permitted. Verified by getting the identical
+error as an *excluded* principal. Any guardrail test against a made-up backup
+vault name therefore passes vacuously. The harness uses a real vault.
+
+**KMS resolves the key before evaluating authorization** and returns
+`NotFoundException` for a made-up key id, so it too cannot be tested against a
+non-existent resource. The harness keeps a real key as a fixture — and that key
+**cannot be deleted**, because scheduling its deletion is denied by the very
+policy under test, for `OrganizationAccountAccessRole` as well. Roughly $1/month
+in the canary account, permanently. Prompt 1.3 called for exactly this and the
+reason is now clear.
+
+**`DenyPlatformManagedTagTampering` blocks resource *creation* carrying a
+platform tag.** `kms:CreateKey --tags` requires `kms:TagResource`, which the
+statement denies for any principal outside its exclusion list —
+`OrganizationAccountAccessRole` included. This is correct and intended, but it
+has a practical consequence: anything that needs to create platform-tagged
+resources must run as `Platform*` or `stacksets-exec-*`. The baseline StackSet
+does, so production is unaffected. It blocked the harness's own fixture, which
+is how it was found.
+
 ## Open uncertainties — flagged rather than assumed
 
 Prompt 1.2 asks explicitly for this rather than quiet assumption.
 
-**1. The exact form of `aws:PrincipalArn` for an assumed role.** I have seen
-both `arn:aws:iam::<acct>:role/<name>` and
-`arn:aws:sts::<acct>:assumed-role/<name>/<session>` documented. Every exclusion
-here matches **both** forms, which is correct either way but means the
-conditions are wider than strictly necessary. The 1.3 harness must determine
-empirically which form appears and the patterns should then be narrowed.
-
-**2. The StackSet execution principal.** `stacksets-exec-*` is the
+**1. The StackSet execution principal.** `stacksets-exec-*` is the
 service-managed StackSet execution role pattern, but this has not been confirmed
 against a real deployment and differs between the self-managed and
 service-managed permission models. If it is wrong, the baseline StackSet will be
 denied by policy 03 when it tries to create platform roles in a member account.
 **Confirm at Phase 2.4 before the first baseline deployment.**
 
-**3. `DenyMemberAccountRootUser` is absolute.** It denies every action by a
+**2. `DenyMemberAccountRootUser` is absolute.** It denies every action by a
 member account's root user with no exception. That is the correct posture, and
 AWS centralised root access management is the better long-term answer, but be
 aware it also blocks the small set of operations only root can perform in a
 member account. Revisit alongside centralised root access management.
 
-**4. `organizations:DetachPolicy` and friends are denied without exclusion.**
+**3. `organizations:DetachPolicy` and friends are denied without exclusion.**
 Member accounts have no business detaching policies. This is safe because SCPs
 **do not apply to the management account** — policy management continues to work
 from there regardless.

@@ -13,8 +13,8 @@ Design package: [starter_docs/](starter_docs/) · Build sequence:
 | 0 — Repository and validation loop | Built |
 | Management account bootstrap | **Deployed** — org `o-61yvddd7d0`, root `r-t7wy`, 5 policy types, 18 service principals |
 | 1.1 / 14.1 — Organization and OU structure | **Deployed** — stack `platform-org-structure`, drift `IN_SYNC` |
-| 1.2 — SCPs and RCPs | Not started |
-| 1.3 — Guardrail test harness | Not started |
+| 1.2 — SCPs | **Deployed** — 3 policies attached to Sandbox OU; Members not yet attached |
+| 1.3 — Guardrail test harness | **Passing** — 8/9 provable against a live account |
 | 2 onward | Not started |
 
 Live tree:
@@ -23,14 +23,16 @@ Live tree:
 Root  r-t7wy
 ├── Security         ou-t7wy-oa08csv6
 ├── Infrastructure   ou-t7wy-9pmwmp9x
-├── Members          ou-t7wy-w4bt7t9p
+├── Members          ou-t7wy-w4bt7t9p      (no SCPs attached yet)
 │   └── direct       ou-t7wy-4mjvd5lu
-└── Sandbox          ou-t7wy-tue14x6e
+└── Sandbox          ou-t7wy-tue14x6e      SCPs attached, harness passing
+    └── ad-sandbox-canary  754280127660
 ```
 
-**Nothing is being prevented yet.** Five policy types are enabled and no policy
-is attached. See [docs/bootstrap-runbook.md](docs/bootstrap-runbook.md) for the
-full list of what does not exist.
+Guardrails are live **in the Sandbox OU only** and proven by
+`scripts/test-guardrails.sh`. The Members OU has no policies attached, so a
+tenant account placed there today would be unprotected. See
+[policies/scp/README.md](policies/scp/README.md).
 
 Phases 1.1 and 14.1 are folded together deliberately, per the ordering note in
 the prompts document: the partner and client OU levels are cheaper to build once
