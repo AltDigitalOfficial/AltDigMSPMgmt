@@ -190,32 +190,32 @@ find_ou() {
 # because account aliases are globally unique and immutable in practice, and
 # because every billing dimension is derived from the account name.
 
-# Length budget. TWO limits apply, and the email is the tighter of the two —
-# which is easy to miss, because the alias is the more obvious constraint.
+# Length budget. TWO limits apply, and the EMAIL is the tighter of the two —
+# easy to miss, because the alias is the more obvious constraint. Sizing the
+# slugs against the alias alone once produced a 71-octet local part: invalid
+# addresses for any client with long slugs, and only discovered at vesting,
+# mid-saga.
 #
-#   AWS account alias, max 63:
-#     ad-  partner  -  client  -  app  -  env   = total
-#      3  +   18   + 1 +  18  + 1 + 10 + 1 + 4  =  56
+#   AWS account alias, max 63 — keeps the full environment word:
+#     ad-  partner  -  client  -  app  - env    = total
+#      3  +   20   + 1 +  20  + 1 + 12 + 1 + 4  =  62
 #
-#   Email local part, max 64 octets (RFC 5321 section 4.5.3.1.1):
-#     msp-mgmt  +  partner  -  client  -  app  -  env   = total
-#        8     + 1 +  18   + 1 +  18  + 1 + 10 + 1 + 4  =  62
+#   Email local part, max 64 octets (RFC 5321 s4.5.3.1.1) — short base, no
+#   'ad-' prefix, one-character tier:
+#     mspr  +  partner  -  client  -  app  - tier  = total
+#      4   + 1 +  20   + 1 +  20  + 1 + 12 + 1 + 1 =  61
 #
-# Sizing the slugs against the alias alone produced a 71-octet local part,
-# i.e. invalid addresses for any client with long slugs — discovered only at
-# vesting, mid-saga. Both limits are now enforced in code, at the point the
-# slugs are chosen.
+# The email is short deliberately so the slug caps can be generous. Dropping
+# 'msp-mgmt' for 'mspr' buys 4 octets, dropping 'ad-' buys 3, and a
+# single-character tier buys another 3 — which is what funds 20/20/12 instead
+# of 18/18/10.
 #
-# Note the email drops the 'ad-' prefix. That prefix exists because account
-# aliases are globally unique across all of AWS; email addresses only need to
-# be unique within the domain, so it is three wasted octets against the
-# tighter limit.
-#
-# These caps must not be raised independently of each other.
+# These caps must not be raised independently of each other, and account_email
+# enforces the limit rather than trusting them.
 ACCOUNT_ALIAS_MAX=63
 EMAIL_LOCAL_MAX=64
-SLUG_RE='^[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$'      # 1-18 chars
-APP_SLUG_RE='^[a-z0-9]([a-z0-9-]{0,8}[a-z0-9])?$'   # 1-10 chars
+SLUG_RE='^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$'       # 1-20 chars
+APP_SLUG_RE='^[a-z0-9]([a-z0-9-]{0,10}[a-z0-9])?$'   # 1-12 chars
 
 validate_slug() {
   local kind="$1" value="$2"
@@ -252,23 +252,48 @@ account_alias() {
   printf '%s' "${alias}"
 }
 
-# account_email <alias> -> plus-addressed root email
+# env_tier <env> -> single character
 #
-# Takes the account alias and strips the platform prefix: the alias needs
-# 'ad-' for global AWS uniqueness, the address does not, and those three
-# octets matter against the 64-octet local-part limit.
+# Used only in the email. The account alias keeps the full word. No two
+# environment names share a first letter, so this is unambiguous — but it is a
+# case statement rather than a substring so that adding a fifth environment
+# cannot silently collide.
+env_tier() {
+  case "$1" in
+    dev)  printf 'd' ;;
+    test) printf 't' ;;
+    uat)  printf 'u' ;;
+    prod) printf 'p' ;;
+    *) die "Unknown environment '$1'. Expected dev, test, uat or prod." ;;
+  esac
+}
+
+# account_email <partner> <client> <app|""> <env> -> member account root email
 #
-# Enforces that limit rather than trusting the slug caps, so raising a cap
-# without re-reading the budget above fails loudly here instead of producing
-# an invalid root address that AWS rejects part-way through account vesting.
+#   mspr+oeight-arc8-p@altdigital.ai
+#   mspr+oeight-avergent-cms-u@altdigital.ai
+#
+# Same argument order as account_alias deliberately, so the two cannot be
+# called inconsistently. This is the MEMBER account address; the management
+# account uses PLATFORM_ROOT_EMAIL and a different mailbox entirely.
+#
+# Enforces the 64-octet limit rather than trusting the slug caps, so raising a
+# cap without re-reading the budget above fails loudly here instead of
+# producing an invalid root address that AWS rejects part-way through vesting.
 account_email() {
-  local alias="$1"
-  local tag="${alias#${PLATFORM_ACCOUNT_PREFIX}-}"
+  local partner="$1" client="$2" app="$3" env="$4"
+  local tier; tier="$(env_tier "${env}")"
+  local tag
+  if [[ -n "${app}" ]]; then
+    tag="${partner}-${client}-${app}-${tier}"
+  else
+    tag="${partner}-${client}-${tier}"
+  fi
   local local_part="${PLATFORM_EMAIL_LOCAL}+${tag}"
   if [[ ${#local_part} -gt ${EMAIL_LOCAL_MAX} ]]; then
     die "Root email local part '${local_part}' is ${#local_part} octets; RFC 5321
       allows ${EMAIL_LOCAL_MAX}. Shorten the partner, client or application slug.
-      Note the email is a TIGHTER constraint than the ${ACCOUNT_ALIAS_MAX}-character
+      The email is a TIGHTER constraint than the ${ACCOUNT_ALIAS_MAX}-character
       account alias — an alias that fits can still yield an invalid address."
   fi
   printf '%s@%s' "${local_part}" "${PLATFORM_EMAIL_DOMAIN}"

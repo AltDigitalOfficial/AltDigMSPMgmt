@@ -26,7 +26,7 @@ Usage: create-client-ou.sh --partner <slug> --slug <slug> --legal-name <name>
 
   --partner                Partner slug this client sits beneath, or 'direct'
                            for an AltDigital client with no partner.
-  --slug                   Machine-safe client id, 1-18 chars.
+  --slug                   Machine-safe client id, 1-20 chars.
   --legal-name             Client legal or trading name.
   --partner-is-app-owner   The partner also built this client's application
                            (questionnaire 1.0b). Recorded because it puts the
@@ -57,10 +57,10 @@ validate_slug client  "${SLUG}"
 # Account alias length check, done here at the point the segments are chosen
 # rather than at account creation where a failure is far more expensive to
 # unwind. Worst case is a client with multiple applications:
-# ad-<partner>-<client>-<app>-<env> with a full-length 10-char app code.
+# ad-<partner>-<client>-<app>-<env> with a full-length 12-char app code.
 # Chained through account_email because the 64-octet local part is the TIGHTER
 # of the two limits; both functions die on overflow, so this is the whole check.
-account_email "$(account_alias "${PARTNER}" "${SLUG}" "xxxxxxxxxx" "prod")" >/dev/null
+account_email "${PARTNER}" "${SLUG}" "xxxxxxxxxxxx" "prod" >/dev/null
 
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 
@@ -100,10 +100,10 @@ log "  slug         : ${SLUG}"
 log "  legal name   : ${LEGAL_NAME}"
 log "  app owner    : $([[ ${APP_OWNER} == true ]] && echo "partner (two matrix columns)" || echo "client")"
 log "  alias stem   : ${PLATFORM_ACCOUNT_PREFIX}-${PARTNER}-${SLUG}"
-log "  root emails  : $(account_email "$(account_alias "${PARTNER}" "${SLUG}" '' 'dev')")"
-log "                 $(account_email "$(account_alias "${PARTNER}" "${SLUG}" '' 'test')")"
-log "                 $(account_email "$(account_alias "${PARTNER}" "${SLUG}" '' 'uat')")  (opt-in)"
-log "                 $(account_email "$(account_alias "${PARTNER}" "${SLUG}" '' 'prod')")"
+log "  root emails  : $(account_email "${PARTNER}" "${SLUG}" '' 'dev')"
+log "                 $(account_email "${PARTNER}" "${SLUG}" '' 'test')"
+log "                 $(account_email "${PARTNER}" "${SLUG}" '' 'uat')  (opt-in)"
+log "                 $(account_email "${PARTNER}" "${SLUG}" '' 'prod')"
 hr
 
 warn "Partner precondition only PARTIALLY enforced:"

@@ -13,23 +13,41 @@ itself.
 open item B14: *"The base mailbox must be a monitored distribution list, not a
 personal account — AWS sends root-level security and billing notices there."*
 
-**Actual** — `msp-mgmt@altdigital.ai` is an alias onto `jamie@altdigital.ai`.
+**Actual** — **Two** addresses, both currently aliases onto
+`jamie@altdigital.ai`:
+
+| Address | Used for |
+|---|---|
+| `msp-mgmt@altdigital.ai` | Organization management account root |
+| `mspr@altdigital.ai` | Every member account root, plus-addressed |
 
 **Decision** — Accepted for now (Jamie, 2026-09-16). Proceed with bootstrap.
+Both become shared mailboxes later.
+
+**The split is deliberate and should be preserved.** The management account
+root cannot be constrained by any SCP or RCP and governs every account beneath
+it; a member account root governs one account. Different blast radius, so they
+should end up as different shared mailboxes with different access lists rather
+than one mailbox for both.
 
 **Risk while open**
 - AWS root security and billing notices reach one personal mailbox
 - No shared archive, so the notice history is not independently evidenced
 - Single point of failure on one person's availability and tenure
-- Every member account root address plus-addresses off this base, so the
-  exposure grows with each account vested
+- Every member account root address plus-addresses off `mspr@`, so the exposure
+  grows with each account vested
+- Compounds with [D-006](#d-006--root-mfa-is-a-virtual-authenticator-not-a-hardware-token):
+  AWS account recovery runs through the root email, so password, MFA and
+  recovery path all currently terminate with one person
 
-**Mitigation available now** — Set the three alternate contacts (billing,
-operations, security) in `config/contacts.env` to different people. That does
-not close the deviation but it stops the root mailbox being the only path.
+**Mitigation applied** — The three alternate contacts (billing, operations,
+security) are set to three different people. That does not close the deviation
+but it stops the root mailbox being the only path for AWS notices.
 
-**Close when** — `msp-mgmt@altdigital.ai` becomes a shared mailbox or
-distribution list including at minimum Jamie, Wayne and Art.
+**Close when** — Both `msp-mgmt@altdigital.ai` and `mspr@altdigital.ai` are
+shared mailboxes. `msp-mgmt@` should include at minimum Jamie, Wayne and Art;
+`mspr@` can be broader, since member account root mail is lower-value and
+higher-volume.
 
 **Deadline** — Before first client go-live. The go-live gate in design doc 13
 already blocks on contract and BAA items; this belongs in the same set.
@@ -106,6 +124,49 @@ partner is inert. The script prints exactly which conditions are unchecked.
 check must then move from warning to hard failure, and the same assertion must
 appear in the phase 12.5 verification sweep — including that AltDigital's
 notification window is *tighter* than the partner's, not merely present.
+
+---
+
+## D-008 · One test message silently dropped in transit
+
+**Observed** — 2026-09-16, during plus-addressing verification. A test to
+`mspr+ad-test-test-d@altdigital.ai` from one external sender never arrived.
+The same address received successfully from a second external sender, and the
+earlier `msp-mgmt+` tests succeeded from that same first sender.
+
+**Significant because there was no NDR.** A bounce would have meant the message
+was rejected at the edge — most likely proxy-address replication lag, which is
+benign and self-resolving. No bounce means it was accepted and then dropped,
+which is filtering: quarantine, spam classification, or a transport rule. None
+of those notify the sender or the recipient.
+
+**Decision** — Accepted and proceeding (Jamie, 2026-09-16). Not investigated.
+
+**Risk while open** — Member account root addresses are where AWS sends the
+root password reset, account verification and security notices. If Exchange
+Online Protection is dropping mail to these addresses silently, the failure
+surfaces on the day an account needs recovering, and the recovery path is the
+thing that is broken. Plausible cause: repeated near-identical messages to
+unusual plus-addressed recipients resemble directory-harvest probing, which EOP
+has heuristics against — but that is a guess, not a finding.
+
+**How to close, in ascending order of effort**
+- Exchange admin center → Mail flow → **Message trace** on the recipient. This
+  is authoritative and takes two minutes: it reports Delivered, Filtered as
+  spam, Quarantined, or never accepted
+- security.microsoft.com → Review → **Quarantine**. Quarantined mail never
+  reaches Junk, so there is otherwise no way to see it
+- The real end-to-end proof arrives free: AWS sends a welcome message to the
+  root address at account creation. The first vested account confirms the whole
+  path with genuine AWS mail rather than a hand-sent test
+
+**If an exception is ever needed, do not allow-list `amazon.com` or
+`amazonaws.com` by domain.** Spoofed AWS notifications are a common phishing
+lure and a domain allow-list bypasses exactly the checks that catch them. Scope
+any exception to DKIM-authenticated `amazonses.com`.
+
+**Close when** — Message trace explains it, or the first vested account's AWS
+welcome mail is confirmed received.
 
 ---
 
