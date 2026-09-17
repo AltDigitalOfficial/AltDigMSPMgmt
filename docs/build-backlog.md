@@ -80,7 +80,7 @@ covered by it. See D-011 and
 
 ---
 
-## B-015 · Every alarm in the platform has no action
+## B-015 · Every alarm in the platform has no action — CLOSED
 
 **Observed** — 2026-09-17, adding replication failure alarms and finding there
 was nowhere to send them.
@@ -126,9 +126,57 @@ Organization — including member accounts, which are the ones a tenant
 application can compromise. Alarms publish cross-account instead, so the
 credential exists once and rotates in one place.
 
-**Close before** — the first tenant carrying an incident-response commitment.
-Committing to a detection-and-response SLA while no detection reaches a human
-is the kind of gap that turns a control failure into a contractual one.
+**Status** — Closed 2026-09-17. A synthetic alarm reached Jamie's phone.
+
+That sentence is the whole close condition, and nothing weaker would have done.
+Every intermediate signal was green well before it was true:
+
+| Signal | Said | Actually proved |
+|---|---|---|
+| `set-alarm-state` returns 0 | alarm fired | nothing — succeeds even if the publish is refused |
+| `NumberOfMessagesPublished` 0 → 1 | topic accepted it | the SNS and KMS policies admit the publisher |
+| Subscription `Confirmed` | endpoint is good | **nothing** — a wrong routing key confirms identically |
+| `NumberOfNotificationsDelivered` 1 | PagerDuty returned 200 | close, but a wrong key also returns 200 |
+| **A phone buzzed** | — | the chain works |
+
+The fourth row is the trap. PagerDuty answers `200` to the subscription
+confirmation regardless of whether the routing key is valid, and then discards
+everything. Every AWS-side indicator is indistinguishable between "working" and
+"silently dropping every page", which is why the close condition was always the
+phone and never the console.
+
+This is design doc 13's check 2 — *"a synthetic test alarm actually reached
+PagerDuty and paged the correct rotation"* — passing for the first time.
+
+**Still true, and now the narrower problem** — the alert-delivery-failure alarm
+routes through the path it monitors. See B-021.
+
+---
+
+## B-021 · The alert-delivery alarm pages through the path it monitors
+
+**Observed** — 2026-09-17, on closing B-015.
+
+`platform-alert-delivery-failed` watches `NumberOfNotificationsFailed` on the
+alerting topic. Its only action is to publish to that same topic, which
+forwards to PagerDuty. So the one condition it exists to detect — delivery to
+PagerDuty is broken — is precisely the condition under which it cannot tell
+anyone.
+
+Not a design oversight so much as an unavoidable shape: any monitor of a
+notification channel that uses that channel has this property. It only stops
+being circular with a **second, independent** path.
+
+**What it needs** — one channel that shares nothing with the first. Email to a
+monitored mailbox via a separate SNS subscription is the cheap version and
+mostly sufficient, since the failure being detected is PagerDuty-specific
+rather than SNS-wide. A genuinely independent path — something outside AWS
+polling a heartbeat — also covers "the topic was deleted" and "the alarm was
+disabled", which the email does not.
+
+**Narrow but real.** Every other alarm now pages correctly; this is the one
+that cannot. Worth closing alongside B-017, which wants an external heartbeat
+for overlapping reasons.
 
 ---
 

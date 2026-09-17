@@ -21,7 +21,7 @@ happened three times during the build.
 | # | Check | Status |
 |---|---|---|
 | 1 | Truveon received evidence from all accounts; sequence clean | Not built — Truveon |
-| 2 | A synthetic test alarm reached PagerDuty and paged the correct rotation | Not built — phase 5 |
+| 2 | A synthetic test alarm reached PagerDuty and paged the correct rotation | **PASSED** 2026-09-17 — `scripts/test-alert-path.sh` + a phone |
 | 3 | The canary is running and passing | Not built — phase 4 |
 | 4 | A test change reconciled correctly against Jira | Not built — phase 8 |
 | 5 | Backup policy attached; a first recovery point exists | Not built — phase 5 |
