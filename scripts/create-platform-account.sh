@@ -205,6 +205,32 @@ if [[ "${ALIAS}" != "${CANONICAL_ALIAS}" ]]; then
   put_param "/org/account/${CANONICAL_ALIAS}/alias" "${ALIAS}" "Live IAM alias; differs from the canonical name because of a global collision"
 fi
 
+# --- detective coverage ----------------------------------------------------
+#
+# A new account is NOT automatically covered, even with --auto-enable set on
+# every service (B-008). Enrolment is a separate step, and the failure is
+# silent: consoles show the services enabled while the new account has no
+# detector at all.
+#
+# So enrolment runs here, as part of account creation, rather than being
+# something to remember afterwards. Both scripts are idempotent, so the cost of
+# running them every time is a few seconds and the cost of forgetting once is
+# an account nobody is watching.
+hr
+info "Enrolling ${ACCOUNT_ID} in the detective services"
+if bash "${REPO_ROOT}/scripts/enable-security-services.sh" >/dev/null 2>&1; then
+  ok "detective services enrolled"
+else
+  warn "Enrolment reported a problem. Run scripts/enable-security-services.sh"
+fi
+
+info "Verifying coverage"
+if bash "${REPO_ROOT}/scripts/verify-security-coverage.sh" 2>&1 | tail -6 | sed 's/^/  /'; then
+  :
+else
+  warn "COVERAGE GAP — this account may not be monitored. Do not treat it as protected."
+fi
+
 hr
 ok "${CANONICAL_ALIAS} = ${ACCOUNT_ID}   (alias: ${ALIAS})"
 log ""

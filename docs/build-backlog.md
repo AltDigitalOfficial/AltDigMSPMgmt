@@ -84,11 +84,21 @@ covers accounts. Three separate steps, each of which looks like completion from
 the console, and the first two produce a system that appears monitored and is
 not.
 
-**Standing check** — coverage should be asserted rather than assumed. Member
-count per service per region should equal (accounts in organization − 1), and
-that belongs in the phase 12.5 verification sweep alongside the evidence and
-paging checks. Until then it is a manual `list-members` after any account
-change.
+**Closed structurally, 2026-09-17.** Not left as a note to remember:
+
+- `scripts/verify-security-coverage.sh` asserts
+  `members(service, region) == active accounts − 1` for all four services in
+  every allowed region, and exits non-zero on any gap
+- `scripts/create-platform-account.sh` runs enrolment and then that assertion
+  automatically after creating any account, so a new account cannot come into
+  existence unmonitored without it being reported
+- Recorded as check **V-A** in [verification-sweep.md](verification-sweep.md),
+  which is the working version of design doc 13's fail-closed sweep and the
+  specification phase 12.5 implements
+
+Also needs running on: account moves between OUs, any region added to
+`PLATFORM_ALLOWED_REGIONS`, and on a schedule — a member can be removed from a
+service without the service reporting anything.
 
 **Verified after fixing** — 3 of 3 members enrolled for all four services in
 all three regions, and the canary confirmed from inside itself: GuardDuty
