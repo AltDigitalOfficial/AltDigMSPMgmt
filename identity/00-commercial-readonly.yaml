@@ -1,0 +1,414 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — CommercialReadOnly permission set.
+  Billing and cost data only, for the commercial function (design doc 12).
+  Assigned to an Identity Center GROUP, never to a user. Grants no access to
+  any member account and no read of any operational telemetry.
+
+# ---------------------------------------------------------------------------
+# Scope, and why this is not "read-only everywhere plus billing"
+# ---------------------------------------------------------------------------
+# Design doc 12 is explicit: this grant is billing only. Cost data reveals that
+# an account exists and roughly what shape it is; it reveals nothing about its
+# contents. That is the correct exposure for a commercial function and it is
+# what the deny statements below enforce.
+#
+# The assignment targets ONE account. Identity Center assignments are
+# per-account, so "no member account access of any kind" is achieved by never
+# assigning this permission set anywhere else — not by policy. Whoever reviews
+# this template should read the Assignment resource as the real boundary and
+# the deny statements as defence in depth.
+#
+# ---------------------------------------------------------------------------
+# Why the deny statements carry the weight here
+# ---------------------------------------------------------------------------
+# The target is the Organization MANAGEMENT account. SCPs do not apply to the
+# management account — that is an AWS property, not a configuration choice. So
+# there is no outer guardrail behind this permission set. Its own inline policy
+# is the entire boundary, which is why the denies are constructed to hold even
+# if the attached AWS managed policy grows new actions later.
+#
+# Two layers, deliberately:
+#
+#   1. DenyOutsideBillingDomain — a NotAction deny. Anything whose service
+#      prefix is not in the billing domain is denied outright, regardless of
+#      what any Allow grants. This is what makes "no CloudWatch, no logs, no
+#      Config, no Security Hub, no GuardDuty" true by construction rather than
+#      by enumeration. An enumerated deny list is incomplete the day AWS ships
+#      a new service.
+#
+#   2. DenyWritesWithinBillingDomain — layer 1 permits the billing services to
+#      be reached at all, so writes inside those services still need denying.
+#      Enumerated by verb prefix per service, because there is no valid IAM
+#      syntax for "any action that is not a Get/List/Describe".
+#
+# AWSBillingReadOnlyAccess is attached as the base grant. It is maintained by
+# AWS and picks up new read actions as billing services evolve, which is worth
+# more than a frozen hand-written list. Layer 1 is what makes trusting it safe:
+# if AWS ever adds a non-billing action to it, the deny still holds.
+
+Parameters:
+
+  InstanceArn:
+    Type: String
+    Description: >-
+      IAM Identity Center instance ARN. Resolved at deploy time by
+      scripts/deploy-commercial-access.sh from sso-admin:ListInstances and
+      published to /platform/identity/instance-arn.
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:sso:::instance/(sso)?ins-[0-9a-f]{16}$'
+    ConstraintDescription: Must be an Identity Center instance ARN.
+
+  GroupId:
+    Type: String
+    Description: >-
+      Identity store group id for the CommercialReadOnly group. The group is
+      NOT created here on purpose — see the note on the Assignment resource.
+    AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ConstraintDescription: Must be an identity store group id (UUID form).
+
+  TargetAccountId:
+    Type: String
+    Description: >-
+      Account the permission set is assigned to. Currently the Organization
+      management account, which is deviation D-009 — the aggregation layer that
+      should hold this does not exist yet.
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account id.
+
+  SessionDuration:
+    Type: String
+    Default: PT4H
+    Description: >-
+      ISO-8601 session duration. Four hours rather than the one hour used by
+      PlatformBootstrapAdmin: this role is read-only over a single data domain
+      and carries no ability to change anything, so the re-authentication tax
+      buys much less here than it does on an admin role. A month-end close
+      should not need six sign-ins.
+    AllowedValues: [PT1H, PT2H, PT4H]
+
+  SsmPrefix:
+    Type: String
+    Default: /platform
+    Description: SSM Parameter Store namespace for published platform facts.
+    AllowedPattern: '^/[a-zA-Z0-9._/-]+$'
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # CommercialReadOnly
+  # -------------------------------------------------------------------------
+  CommercialReadOnlyPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: CommercialReadOnly
+      Description: >-
+        Billing and cost data only. No member account access, no operational
+        telemetry, no write actions anywhere. Design doc 12.
+      InstanceArn: !Ref InstanceArn
+      SessionDuration: !Ref SessionDuration
+
+      # Drops the portal straight into Cost Management rather than the generic
+      # console home. The Cost Explorer and Billing consoles are served from
+      # us-east-1 regardless of the platform home region.
+      RelayStateType: 'https://us-east-1.console.aws.amazon.com/costmanagement/home#/home'
+
+      ManagedPolicies:
+        - arn:aws:iam::aws:policy/AWSBillingReadOnlyAccess
+
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+
+          # -----------------------------------------------------------------
+          # What AWSBillingReadOnlyAccess does not cover
+          # -----------------------------------------------------------------
+          # Checked against version v28 of that policy on 2026-09-16. It is
+          # strong on the Billing console — invoices, credits, tax, payments,
+          # purchase orders — and thin on Cost Explorer's analytical surface.
+          # Everything below is absent from it.
+          - Sid: CostExplorerAnalysisAndForecasts
+            Effect: Allow
+            Action:
+              # Forecasting. The reason this statement exists at all: the
+              # managed policy grants GetCostAndUsage but not either forecast
+              # call, so Cost Explorer renders history and fails on the
+              # forward-looking view, which is the half the commercial
+              # function actually needs.
+              - ce:GetCostForecast
+              - ce:GetUsageForecast
+              # Remaining Cost Explorer reads
+              - ce:GetApproximateUsageRecords
+              - ce:GetCostAndUsageWithResources
+              - ce:GetCostCategories
+              - ce:GetPreferences
+              # Anomaly detection — feeds the cost-anomaly event in doc 12
+              - ce:GetAnomalies
+              - ce:GetAnomalyMonitors
+              - ce:GetAnomalySubscriptions
+              # Commitment reporting (Savings Plans, Reserved Instances)
+              - ce:GetReservationCoverage
+              - ce:GetReservationPurchaseRecommendation
+              - ce:GetReservationUtilization
+              - ce:GetRightsizingRecommendation
+              - ce:GetSavingsPlanPurchaseRecommendationDetails
+              - ce:GetSavingsPlansCoverage
+              - ce:GetSavingsPlansPurchaseRecommendation
+              - ce:GetSavingsPlansUtilization
+              - ce:GetSavingsPlansUtilizationDetails
+              - ce:ListSavingsPlansPurchaseRecommendationGeneration
+              - savingsplans:DescribeSavingsPlanRates
+              - savingsplans:DescribeSavingsPlans
+              - savingsplans:DescribeSavingsPlansOfferingRates
+              - savingsplans:DescribeSavingsPlansOfferings
+              - savingsplans:ListTagsForResource
+              # Cost Optimization Hub
+              - cost-optimization-hub:GetPreferences
+              - cost-optimization-hub:GetRecommendation
+              - cost-optimization-hub:ListEnrollmentStatuses
+              - cost-optimization-hub:ListRecommendationSummaries
+              - cost-optimization-hub:ListRecommendations
+              # Data Exports — the modern CUR API. The export itself does not
+              # exist yet (phase 11.1); this is here so that when it lands the
+              # permission set does not need reopening.
+              - bcm-data-exports:GetExecution
+              - bcm-data-exports:GetExport
+              - bcm-data-exports:GetTable
+              - bcm-data-exports:ListExecutions
+              - bcm-data-exports:ListExports
+              - bcm-data-exports:ListTables
+              - bcm-data-exports:ListTagsForResource
+              # Public price list, for modelling uplift against list price
+              - pricing:DescribeServices
+              - pricing:GetAttributeValues
+              - pricing:GetPriceListFileUrl
+              - pricing:GetProducts
+              - pricing:ListPriceLists
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # Organization structure, read only
+          # -----------------------------------------------------------------
+          # Without this, every Cost Explorer row is a bare 12-digit account id
+          # and the by-partner / by-client roll-ups are unreadable. This is a
+          # real widening: it exposes the account and OU tree, which is the
+          # client roster. That is accepted — a commercial function that cannot
+          # see which clients it is billing for is not a commercial function.
+          # It exposes names and structure only, never contents.
+          - Sid: OrganizationStructureRead
+            Effect: Allow
+            Action:
+              - organizations:DescribeAccount
+              - organizations:DescribeOrganization
+              - organizations:DescribeOrganizationalUnit
+              - organizations:ListAccounts
+              - organizations:ListAccountsForParent
+              - organizations:ListOrganizationalUnitsForParent
+              - organizations:ListParents
+              - organizations:ListRoots
+              - organizations:ListTagsForResource
+            Resource: '*'
+
+          # Console chrome. Without GetCallerIdentity and ListAccountAliases
+          # the console header renders an error banner on every page, which
+          # trains people to ignore error banners.
+          - Sid: ConsoleIdentityChrome
+            Effect: Allow
+            Action:
+              - iam:ListAccountAliases
+              - sts:GetCallerIdentity
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # Layer 1 — nothing outside the billing domain
+          # -----------------------------------------------------------------
+          # NotAction, so the list below is the complete set of service
+          # prefixes this role can reach. Everything else is denied: EC2, S3,
+          # RDS, CloudWatch, CloudTrail, Config, Security Hub, GuardDuty, KMS,
+          # Secrets Manager, SSM, Lambda, Step Functions, Identity Center,
+          # IAM beyond the one chrome call, and every service AWS has not
+          # launched yet.
+          #
+          # Wildcards are used per service on purpose. Layer 2 removes the
+          # writes; keeping layer 1 at service granularity means a new READ
+          # action in a billing service works on the day it ships instead of
+          # producing a support request that resolves to "add one action".
+          - Sid: DenyOutsideBillingDomain
+            Effect: Deny
+            NotAction:
+              - account:GetAccountInformation
+              - aws-portal:*
+              - bcm-data-exports:*
+              - billing:*
+              - budgets:*
+              - ce:*
+              - consolidatedbilling:*
+              - cost-optimization-hub:*
+              - cur:*
+              - freetier:*
+              - iam:ListAccountAliases
+              - invoicing:*
+              - mapcredits:*
+              - organizations:Describe*
+              - organizations:List*
+              - payments:*
+              - pricing:*
+              - purchase-orders:*
+              - savingsplans:*
+              - sts:GetCallerIdentity
+              - sustainability:*
+              - tax:*
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # Layer 2 — no writes inside the billing domain either
+          # -----------------------------------------------------------------
+          # Enumerated by verb prefix per service. IAM has no syntax for "every
+          # action that is not a read", so this is the honest construction:
+          # explicit, greppable, and reviewable against the AWS action tables.
+          #
+          # Includes tagging. Tag and untag look harmless and are not — Cost
+          # Categories and cost allocation tags are the mechanism the whole
+          # billing model rests on, so a tag change is a billing change.
+          - Sid: DenyWritesWithinBillingDomain
+            Effect: Deny
+            Action:
+              - account:Accept*
+              - account:Delete*
+              - account:Disable*
+              - account:Enable*
+              - account:Put*
+              - account:Start*
+              - aws-portal:Modify*
+              - bcm-data-exports:Create*
+              - bcm-data-exports:Delete*
+              - bcm-data-exports:Tag*
+              - bcm-data-exports:Untag*
+              - bcm-data-exports:Update*
+              - billing:Create*
+              - billing:Delete*
+              - billing:Put*
+              - billing:Redeem*
+              - billing:Tag*
+              - billing:Untag*
+              - billing:Update*
+              - budgets:Create*
+              - budgets:Delete*
+              - budgets:Execute*
+              - budgets:Modify*
+              - budgets:Update*
+              - ce:Create*
+              - ce:Delete*
+              - ce:Provide*
+              - ce:Start*
+              - ce:Tag*
+              - ce:Untag*
+              - ce:Update*
+              - cost-optimization-hub:Update*
+              - cur:Delete*
+              - cur:Modify*
+              - cur:Put*
+              - cur:Tag*
+              - cur:Untag*
+              - freetier:Put*
+              - freetier:Upgrade*
+              - invoicing:Create*
+              - invoicing:Delete*
+              - invoicing:Put*
+              - invoicing:Tag*
+              - invoicing:Untag*
+              - invoicing:Update*
+              - payments:Create*
+              - payments:Delete*
+              - payments:Make*
+              - payments:Set*
+              - payments:Tag*
+              - payments:Untag*
+              - payments:Update*
+              - purchase-orders:Add*
+              - purchase-orders:Delete*
+              - purchase-orders:Modify*
+              - purchase-orders:Tag*
+              - purchase-orders:Untag*
+              - purchase-orders:Update*
+              - savingsplans:Create*
+              - savingsplans:Delete*
+              - savingsplans:Return*
+              - savingsplans:Tag*
+              - savingsplans:Untag*
+              - tax:Batch*
+              - tax:Delete*
+              - tax:Put*
+              - tax:Update*
+            Resource: '*'
+
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: commercial-billing-readonly }
+        - { Key: DesignDoc,        Value: '12' }
+
+  # -------------------------------------------------------------------------
+  # Assignment — to a GROUP, never to a user
+  # -------------------------------------------------------------------------
+  # Design doc 03: "Permission sets are defined centrally and assigned to Entra
+  # groups; access is granted by group membership, never per-account
+  # configuration." Group membership is the only lever; joiners and leavers are
+  # one change in one place.
+  #
+  # The group is NOT an AWS::IdentityStore::Group resource in this template,
+  # and that is deliberate. The identity source is still the built-in Identity
+  # Center directory. Switching it to Entra deletes every directory user and
+  # group, which would leave a CloudFormation resource pointing at something
+  # that no longer exists and a stack that fails on its next update. Taking the
+  # group id as a parameter means this template is unchanged across that
+  # cutover: before it, the deploy script creates the group; after it, SCIM
+  # does, and only the parameter value differs.
+  #
+  # Membership is likewise not in CloudFormation. It is personal data, and the
+  # repository holds none — see config/identity.env.
+  CommercialReadOnlyAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !GetAtt CommercialReadOnlyPermissionSet.PermissionSetArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref GroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref TargetAccountId
+
+  # -------------------------------------------------------------------------
+  # Published facts
+  # -------------------------------------------------------------------------
+  PermissionSetArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/commercial-readonly'
+      Type: String
+      Value: !GetAtt CommercialReadOnlyPermissionSet.PermissionSetArn
+      Description: CommercialReadOnly permission set ARN
+      Tags: { platform-managed: 'true' }
+
+  AssignedAccountParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/commercial-readonly/account'
+      Type: String
+      Value: !Ref TargetAccountId
+      Description: >-
+        Account CommercialReadOnly is assigned to. Deviation D-009 while this
+        is the management account.
+      Tags: { platform-managed: 'true' }
+
+Outputs:
+
+  PermissionSetArn:
+    Description: CommercialReadOnly permission set ARN
+    Value: !GetAtt CommercialReadOnlyPermissionSet.PermissionSetArn
+
+  GroupId:
+    Description: Identity store group the permission set is assigned to
+    Value: !Ref GroupId
+
+  TargetAccountId:
+    Description: Account the permission set is assigned to
+    Value: !Ref TargetAccountId

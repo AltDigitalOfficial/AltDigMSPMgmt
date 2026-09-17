@@ -7,6 +7,11 @@
 config/contacts.env*
 !config/contacts.env.example
 
+# Identity Center group membership — names and direct email addresses.
+# Same rule, same reason. Copy config/identity.env.example and fill in locally.
+config/identity.env*
+!config/identity.env.example
+
 # Local AWS and tooling state
 .aws-sam/
 *.tfstate

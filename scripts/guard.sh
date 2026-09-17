@@ -7,7 +7,7 @@ command -v cfn-guard >/dev/null 2>&1 \
 
 RULES_DIR="${REPO_ROOT}/policies/guard"
 
-mapfile -t TEMPLATES < <(find "${REPO_ROOT}/org" "${REPO_ROOT}/baseline" \
+mapfile -t TEMPLATES < <(find "${REPO_ROOT}/org" "${REPO_ROOT}/identity" "${REPO_ROOT}/baseline" \
   -name '*.yaml' -o -name '*.yml' 2>/dev/null | sort)
 
 [[ ${#TEMPLATES[@]} -gt 0 ]] || { warn "No templates found."; exit 0; }

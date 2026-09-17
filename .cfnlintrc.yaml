@@ -1,5 +1,6 @@
 templates:
   - org/**/*.yaml
+  - identity/**/*.yaml
   - baseline/**/*.yaml
 regions:
   - us-east-2

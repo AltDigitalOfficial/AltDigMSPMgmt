@@ -1,0 +1,25 @@
+# Where each policy is attached. Read by scripts/deploy-policies.sh.
+#
+# Attachment is configuration, not a flag on a command line. Before this file
+# existed, --attach applied every policy to one target, which is wrong the
+# moment any policy belongs somewhere else — and one does. It also left the
+# actual attachment topology undocumented, recoverable only by querying AWS.
+#
+# Design doc 15 anticipates per-partner and per-client SCPs ("a partner with
+# specific contractual constraints gets them at OU level"), so targets will
+# only get more varied.
+#
+# Targets:
+#   root      the Organization root — applies to every account in every OU.
+#             Note SCPs never apply to the management account, wherever
+#             attached, so "every account" excludes it by definition.
+#   sandbox   the Sandbox OU — baseline canary, guardrail harness target
+#   members   the Members OU — every partner, client and tenant account.
+#             Requires --confirm-production.
+#
+# Columns: <policy file>  <TAB>  <comma-separated targets>
+
+00-deny-leave-and-close-account.json	root
+01-protect-detective-controls.json	sandbox,members
+02-protect-data-protection.json	sandbox,members
+03-protect-platform-identity.json	sandbox,members

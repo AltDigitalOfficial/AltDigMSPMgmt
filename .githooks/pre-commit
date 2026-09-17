@@ -4,14 +4,21 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
-# Hard stop: contacts.env holds names, emails and phone numbers.
-if git diff --cached --name-only | grep -qx 'config/contacts.env'; then
-  echo "BLOCKED: config/contacts.env contains personal data and must not be committed." >&2
-  echo "         git restore --staged config/contacts.env" >&2
-  exit 1
-fi
+# Hard stop: these hold names, emails and phone numbers.
+#
+# Matched as whole lines against an explicit list rather than a pattern, so a
+# new config file is only ever protected by being added here deliberately. A
+# pattern like 'config/*.env' would silently also block platform.env, which is
+# meant to be committed.
+for PROTECTED in config/contacts.env config/identity.env; do
+  if git diff --cached --name-only | grep -qx "${PROTECTED}"; then
+    echo "BLOCKED: ${PROTECTED} contains personal data and must not be committed." >&2
+    echo "         git restore --staged ${PROTECTED}" >&2
+    exit 1
+  fi
+done
 
-CHANGED="$(git diff --cached --name-only --diff-filter=ACM | grep -E '^(org|baseline)/.*\.ya?ml$' || true)"
+CHANGED="$(git diff --cached --name-only --diff-filter=ACM | grep -E '^(org|identity|baseline)/.*\.ya?ml$' || true)"
 [[ -n "${CHANGED}" ]] || exit 0
 
 if command -v cfn-lint >/dev/null 2>&1; then

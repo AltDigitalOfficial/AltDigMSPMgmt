@@ -216,3 +216,64 @@ rule OU_RETAINED_ON_DELETE when %org_units !empty {
     >>
   }
 }
+
+# ===========================================================================
+# IAM Identity Center permission sets
+# ===========================================================================
+#
+# Permission sets are not AWS::IAM::Policy, so the IAM rules above do not see
+# them. They need their own, and they need them more: a permission set assigned
+# to the management account has no SCP behind it, because SCPs do not apply to
+# the management account. Its own policy is the whole boundary.
+
+let permission_sets = Resources.*[ Type == 'AWS::SSO::PermissionSet' ]
+
+rule SSO_PERMISSION_SET_NO_WILDCARD_ACTION when %permission_sets !empty {
+  %permission_sets[ Properties.InlinePolicy exists ] {
+    Properties.InlinePolicy.Statement[*] {
+      when Effect == 'Allow' {
+        Action != '*'
+        <<
+          Violation: Permission set inline policy allowing Action "*".
+          Reason:    A permission set is a standing grant to a group of people.
+                     Nothing on this platform legitimately needs every action
+                     from a standing role; that is what JIT elevation is for
+                     (design doc 03).
+          Fix:       Enumerate the actions.
+        >>
+      }
+    }
+  }
+}
+
+rule SSO_PERMISSION_SET_NO_ADMINISTRATOR_ACCESS when %permission_sets !empty {
+  %permission_sets[ Properties.ManagedPolicies exists ] {
+    Properties.ManagedPolicies[*] != 'arn:aws:iam::aws:policy/AdministratorAccess'
+    <<
+      Violation: Permission set attaching AdministratorAccess.
+      Reason:    Design doc 03 allows no standing administrative access.
+                 PlatformAdmin is JIT-only with a stated reason, a time box and
+                 an elevation record. The one standing admin grant that exists
+                 (PlatformBootstrapAdmin) is console-created and tracked as
+                 deviation D-007 precisely so it stays visible rather than
+                 becoming normal by appearing in a template.
+      Fix:       Use a scoped permission set, or route it through JIT elevation.
+    >>
+  }
+}
+
+rule SSO_PERMISSION_SET_SESSION_DURATION_BOUNDED when %permission_sets !empty {
+  %permission_sets {
+    Properties.SessionDuration exists
+    Properties.SessionDuration in [ 'PT1H', 'PT2H', 'PT4H' ]
+    <<
+      Violation: Permission set without a bounded session duration.
+      Reason:    Unset defaults to one hour, which is fine, but leaving it
+                 implicit means nobody notices when a later edit sets twelve.
+                 The session is how long a revoked or compromised federation
+                 still works after the identity source has cut it off.
+      Fix:       Set SessionDuration to PT1H, PT2H or PT4H. Longer than four
+                 hours needs a deviation record, not a template change.
+    >>
+  }
+}

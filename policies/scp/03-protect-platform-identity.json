@@ -67,6 +67,7 @@
       "Effect": "Deny",
       "Action": [
         "organizations:LeaveOrganization",
+        "account:CloseAccount",
         "organizations:DeleteOrganization",
         "organizations:DetachPolicy",
         "organizations:DisablePolicyType",

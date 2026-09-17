@@ -5,8 +5,7 @@
 #
 #   scripts/deploy-policies.sh --dry-run
 #   scripts/deploy-policies.sh                      # create/update only
-#   scripts/deploy-policies.sh --attach sandbox     # ...and attach
-#   scripts/deploy-policies.sh --attach members --confirm-production
+#   scripts/deploy-policies.sh --attach             # ...and attach per manifest
 #   scripts/deploy-policies.sh --drift              # compare live vs files
 #
 # ---------------------------------------------------------------------------
@@ -18,30 +17,32 @@
 # can be staged and reviewed before it becomes live anywhere, and it makes the
 # dangerous step explicit in shell history.
 #
-# Attaching to 'members' additionally requires --confirm-production: that OU is
-# where tenant workloads live, and an over-broad deny there is an outage.
+# Where each policy goes is declared in policies/scp/attachments.tsv, not on the
+# command line. Any policy targeting 'members' or 'root' requires
+# --confirm-production: those reach tenant accounts, and an over-broad deny
+# there is an outage.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-ATTACH_TARGET=""; DO_DRIFT=0
+DO_ATTACH=0; DO_DRIFT=0
 
 usage() {
   cat <<'USAGE'
-Usage: deploy-policies.sh [--attach <sandbox|members|both>] [--drift] [--dry-run]
-                          [--confirm-production]
+Usage: deploy-policies.sh [--attach] [--drift] [--dry-run] [--confirm-production]
 
-  --attach              Attach after create/update. 'members' and 'both'
-                        require --confirm-production.
+  --attach              Attach each policy to the targets declared in
+                        policies/scp/attachments.tsv. Targets reaching tenant
+                        accounts (members, root) require --confirm-production.
   --drift               Report where live policy content differs from the
                         files in policies/. Makes no changes.
   --dry-run             Print intended actions; change nothing.
-  --confirm-production  Required to attach anything to the Members OU.
+  --confirm-production  Required to attach anything at root or to Members.
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --attach)             ATTACH_TARGET="$2"; shift 2 ;;
+    --attach)             DO_ATTACH=1; shift ;;
     --drift)              DO_DRIFT=1; shift ;;
     --dry-run)            DRY_RUN=1; shift ;;
     --confirm-production) CONFIRM_PRODUCTION=1; shift ;;
@@ -81,9 +82,14 @@ if [[ ${DO_DRIFT} -eq 1 ]]; then
     fi
     live="$(aws organizations describe-policy --policy-id "${pid}" \
       --query 'Policy.Content' --output text | no_cr)"
-    # Compare canonicalised JSON: whitespace is not drift.
+    # Compare canonicalised JSON: whitespace and key order are not drift.
+    #
+    # Note win_path on the file argument. python.exe is a Windows binary and
+    # cannot open '/c/AltDigital/...'; with MSYS_NO_PATHCONV set, nothing
+    # converts it on our behalf. The same trap as the CloudFormation
+    # --template-file argument, in a different disguise.
     if diff -q <(printf '%s' "${live}" | python -c 'import json,sys;print(json.dumps(json.load(sys.stdin),sort_keys=True))') \
-               <(python -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True))' "${f}") >/dev/null 2>&1; then
+               <(python -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True))' "$(win_path "${f}")") >/dev/null 2>&1; then
       ok "${name} in sync"
     else
       printf '%sDRIFT%s %s — live content differs from %s\n' "${C_RED}" "${C_RESET}" "${name}" "$(basename "${f}")"
@@ -141,36 +147,69 @@ done
 hr
 
 # --- attach ----------------------------------------------------------------
-[[ -n "${ATTACH_TARGET}" ]] || { ok "Policies created/updated. Nothing attached."; \
-  log ""; log "To attach: scripts/deploy-policies.sh --attach sandbox"; exit 0; }
+if [[ ${DO_ATTACH} -ne 1 ]]; then
+  ok "Policies created/updated. Nothing attached."
+  log ""
+  log "To attach per policies/scp/attachments.tsv:"
+  log "  scripts/deploy-policies.sh --attach --confirm-production"
+  exit 0
+fi
 
-declare -a TARGETS=() TARGET_LABELS=()
-case "${ATTACH_TARGET}" in
-  sandbox) TARGETS+=("$(get_param /org/ou/sandbox)"); TARGET_LABELS+=("Sandbox") ;;
-  members) confirm_production; TARGETS+=("$(get_param /org/ou/members)"); TARGET_LABELS+=("Members") ;;
-  both)    confirm_production
-           TARGETS+=("$(get_param /org/ou/sandbox)" "$(get_param /org/ou/members)")
-           TARGET_LABELS+=("Sandbox" "Members") ;;
-  *) die "Unknown --attach target '${ATTACH_TARGET}'. Expected sandbox, members or both." ;;
-esac
+MANIFEST="${REPO_ROOT}/policies/scp/attachments.tsv"
+[[ -f "${MANIFEST}" ]] || die "Attachment manifest not found: ${MANIFEST}"
 
-for i in "${!TARGETS[@]}"; do
-  tgt="${TARGETS[$i]}"; label="${TARGET_LABELS[$i]}"
-  [[ -n "${tgt}" && "${tgt}" != "None" ]] || die "Could not resolve the ${label} OU id."
-  info "Attaching to ${label} OU (${tgt})"
+# resolve_target <name> -> organization target id
+resolve_target() {
+  case "$1" in
+    root)    get_param /org/root-id ;;
+    sandbox) get_param /org/ou/sandbox ;;
+    members) get_param /org/ou/members ;;
+    *) die "Unknown attachment target '$1' in $(basename "${MANIFEST}").
+      Expected root, sandbox or members." ;;
+  esac
+}
 
-  attached="$(aws organizations list-policies-for-target --target-id "${tgt}" \
-    --filter SERVICE_CONTROL_POLICY --query 'Policies[].Name' --output text 2>/dev/null | no_cr | tr '\t\n' '  ')"
+# Any target that reaches tenant accounts needs explicit confirmation. Checked
+# once up front rather than mid-loop, so the run either proceeds fully or not
+# at all — a half-applied attachment set is a confusing state to diagnose.
+NEEDS_CONFIRM=0
+while IFS=$'\t' read -r pfile ptargets; do
+  [[ "${pfile}" =~ ^#.*$ || -z "${pfile}" ]] && continue
+  [[ ",${ptargets}," == *",members,"* || ",${ptargets}," == *",root,"* ]] && NEEDS_CONFIRM=1
+done < "${MANIFEST}"
+[[ ${NEEDS_CONFIRM} -eq 0 ]] || confirm_production
 
+while IFS=$'\t' read -r pfile ptargets; do
+  [[ "${pfile}" =~ ^#.*$ || -z "${pfile}" ]] && continue
+  pfile="$(printf '%s' "${pfile}" | tr -d ' \r')"
+  ptargets="$(printf '%s' "${ptargets}" | tr -d ' \r')"
+
+  # Find the id computed during create/update, by file.
+  pid=""; pname=""
   for j in "${!POLICY_IDS[@]}"; do
-    if [[ " ${attached} " == *" ${POLICY_NAMES[$j]} "* ]]; then
-      skip "${POLICY_NAMES[$j]} already attached to ${label}"
-    else
-      run "attach ${POLICY_NAMES[$j]} -> ${label}" \
-        aws organizations attach-policy --policy-id "${POLICY_IDS[$j]}" --target-id "${tgt}"
+    if [[ "$(basename "${FILES[$j]}")" == "${pfile}" ]]; then
+      pid="${POLICY_IDS[$j]}"; pname="${POLICY_NAMES[$j]}"; break
     fi
   done
-done
+  [[ -n "${pid}" ]] || { warn "${pfile} is in the manifest but has no policy document — skipped"; continue; }
+
+  IFS=',' read -ra tlist <<<"${ptargets}"
+  for t in "${tlist[@]}"; do
+    tgt="$(resolve_target "${t}")"
+    [[ -n "${tgt}" && "${tgt}" != "None" ]] || die "Could not resolve target '${t}'."
+
+    attached="$(aws organizations list-policies-for-target --target-id "${tgt}" \
+      --filter SERVICE_CONTROL_POLICY --query 'Policies[].Name' --output text 2>/dev/null \
+      | no_cr | tr '\t\n' '  ')"
+
+    if [[ " ${attached} " == *" ${pname} "* ]]; then
+      skip "${pname} already attached to ${t}"
+    else
+      run "attach ${pname} -> ${t} (${tgt})" \
+        aws organizations attach-policy --policy-id "${pid}" --target-id "${tgt}"
+    fi
+  done
+done < "${MANIFEST}"
 hr
 
 warn "FullAWSAccess remains attached. These are Deny policies and rely on it:"
