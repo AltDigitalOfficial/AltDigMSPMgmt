@@ -58,6 +58,59 @@ decision is reversed.
 
 ---
 
+## D-010 · Per-application Object Lock mode is not achievable with a shared archive
+
+**Decision** — Log archive default is **COMPLIANCE, 2190 days** (6 years),
+matching HIPAA's documentation retention expectation and the union of current
+tenant frameworks (Jamie, 2026-09-16).
+
+**Requirement raised alongside it** — lock mode "needs to be an app-by-app
+decision, but our default should be COMPLIANCE".
+
+**Why that cannot be done as stated.** Object Lock mode is a property of the
+*bucket's default retention configuration*, and per-object mode can only be set
+by the writer at PutObject time. CloudTrail and Config write to the archive
+themselves; there is no hook to vary the lock header per tenant or per
+application. So with one shared bucket, every object inherits one mode.
+
+**And the direction is one-way.** GOVERNANCE objects can later be upgraded to
+COMPLIANCE via `s3:PutObjectRetention`. COMPLIANCE can never be downgraded, by
+anyone, including the account root. A COMPLIANCE default therefore forecloses
+per-app variation for everything already written under it.
+
+**What per-app variation would actually require** — separate log destinations
+per tenant, each with its own bucket-level default. That changes the
+topology design doc 02 describes ("Log Archive — immutable log destination,
+Object Lock"), and it has real consequences:
+
+- The CloudTrail *organization* trail writes to one destination. Per-tenant
+  destinations mean per-tenant trails, which is a different and more expensive
+  arrangement, and loses the single org-wide trail an auditor expects to see
+- Cross-tenant correlation during an incident gets harder — design doc 07's
+  "whether the same indicators appear in other accounts" check assumes one place
+  to look
+- Per-tenant buckets multiply the Object Lock configurations that must be right
+
+**Status** — Deployed as COMPLIANCE/2190 on the shared archive, per the stated
+default. Per-app variation is **not built** and is recorded here rather than
+silently dropped.
+
+**Decide before the first tenant with a conflicting requirement.** The likely
+trigger is a client who will not accept six years of undeletable logs, or one
+whose contract requires a shorter destruction schedule than the platform floor.
+That is a contract question as much as a technical one (open item X2, Art and
+Wayne).
+
+**Related, and accepted the same day:** stdout data leakage in dev and test.
+Prompt 2.1 already requires CloudWatch Logs data protection policies applied at
+*account* level so they cover log groups created after deployment, masking card
+numbers, US SSNs and credential patterns. Jamie's instruction to prioritise dev
+and test specifically is carried into the Phase 2 baseline. This matters more
+under COMPLIANCE: anything leaked into the archive cannot be removed for six
+years, so masking at the source is the only control that actually works.
+
+---
+
 ## D-001 · Root mailbox is a personal alias, not a monitored distribution list
 
 **Design position** — [15-partner-model.md](../starter_docs/15-partner-model.md),

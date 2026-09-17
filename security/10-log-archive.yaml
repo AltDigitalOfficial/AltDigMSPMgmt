@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — immutable log destination in the Log Archive
+  account. S3 with Object Lock, a dedicated KMS key, and a bucket policy
+  admitting CloudTrail and Config. Deployed once, directly into the Log Archive
+  account; this is platform infrastructure, not part of the member baseline.
+
+# ---------------------------------------------------------------------------
+# Object Lock cannot be added later
+# ---------------------------------------------------------------------------
+# ObjectLockEnabled is settable ONLY at bucket creation. A bucket created
+# without it can never gain it — the only remedy is a new bucket and a copy of
+# every object, which for a log archive means re-writing the evidence trail
+# that the archive exists to preserve. That is why this template exists before
+# any trail is configured rather than alongside it.
+#
+# COMPLIANCE mode means exactly what it says: for the retention period, no
+# principal can delete or overwrite an object. Not an administrator, not the
+# account root, not AWS Support. That is the property that makes the archive
+# worth anything to an auditor, and it is also an unbreakable commitment to
+# storage cost for the full period. See the RetentionDays parameter.
+
+Parameters:
+
+  RetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 1
+    MaxValue: 36500
+    Description: >-
+      Default Object Lock retention, in days, applied to every object written.
+      In COMPLIANCE mode this is irreversible: the objects cannot be deleted by
+      anyone until it expires, and storage is billed for the whole period.
+      Design doc 02 derives the retention floor from the union of each tenant's
+      frameworks, so this must be at least the longest any tenant requires.
+
+  ObjectLockMode:
+    Type: String
+    Default: COMPLIANCE
+    AllowedValues: [COMPLIANCE, GOVERNANCE]
+    Description: >-
+      COMPLIANCE — nobody can delete or shorten retention, including the root
+      user. This is what design doc 02's "immutable log destination" means and
+      what an auditor will look for.
+      GOVERNANCE — a principal holding s3:BypassGovernanceRetention can
+      override. Weaker, but recoverable from a mistake. The platform SCPs
+      already deny BypassGovernanceRetention on platform-managed buckets, which
+      narrows the gap but does not close it for the management account.
+
+  TransitionToGlacierDays:
+    Type: Number
+    Default: 90
+    MinValue: 1
+    Description: >-
+      Age at which objects move to Glacier Instant Retrieval. Object Lock is
+      unaffected by storage class, so immutability is preserved. This is the
+      main lever on the cost of a long retention period.
+
+  OrganizationId:
+    Type: String
+    Description: Organization id (o-xxxx), used to scope the bucket policy.
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Encryption key
+  # -------------------------------------------------------------------------
+  LogArchiveKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts the platform log archive
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:TagResource
+              - kms:UntagResource
+            Resource: '*'
+          # CloudTrail and Config encrypt with this key from the management
+          # account and from every member account, so the grant is scoped by
+          # organization rather than by account id — there is no list of
+          # accounts to maintain, and a newly vested account works immediately.
+          - Sid: AllowLogServicesToEncrypt
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+                - config.amazonaws.com
+                - delivery.logs.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Encrypt
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+          - Sid: AllowAuditAccountToRead
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: [ kms:Decrypt, kms:DescribeKey ]
+            Resource: '*'
+
+  LogArchiveKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-log-archive
+      TargetKeyId: !Ref LogArchiveKey
+
+  # -------------------------------------------------------------------------
+  # The archive bucket
+  # -------------------------------------------------------------------------
+  LogArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-log-archive-${AWS::AccountId}'
+      # Object Lock requires versioning, and both must be set at creation.
+      ObjectLockEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: !Ref ObjectLockMode
+            Days: !Ref RetentionDays
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref LogArchiveKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: !Ref TransitionToGlacierDays
+            NoncurrentVersionTransitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: !Ref TransitionToGlacierDays
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: log-archive }
+        - { Key: DataClassification, Value: regulated }
+
+  LogArchiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogArchiveBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Without this, any of the grants below are reachable over plain HTTP.
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LogArchiveBucket.Arn
+              - !Sub '${LogArchiveBucket.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': false }
+
+          - Sid: DenyUnencryptedUploads
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogArchiveBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                's3:x-amz-server-side-encryption': 'aws:kms'
+
+          - Sid: CloudTrailCheckAcl
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: 's3:GetBucketAcl'
+            Resource: !GetAtt LogArchiveBucket.Arn
+
+          - Sid: CloudTrailWrite
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogArchiveBucket.Arn}/AWSLogs/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+                'aws:SourceOrgID': !Ref OrganizationId
+
+          - Sid: ConfigCheckAcl
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: [ 's3:GetBucketAcl', 's3:ListBucket' ]
+            Resource: !GetAtt LogArchiveBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
+
+          - Sid: ConfigWrite
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogArchiveBucket.Arn}/AWSLogs/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+                'aws:SourceOrgID': !Ref OrganizationId
+
+Outputs:
+
+  BucketName:
+    Description: Log archive bucket name
+    Value: !Ref LogArchiveBucket
+
+  BucketArn:
+    Description: Log archive bucket ARN
+    Value: !GetAtt LogArchiveBucket.Arn
+
+  KeyArn:
+    Description: Log archive KMS key ARN
+    Value: !GetAtt LogArchiveKey.Arn
