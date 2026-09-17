@@ -116,7 +116,7 @@ half is waiting on a credential.
 | SNS topic in Audit, org-scoped publish | **Done** — `alerting/10-alert-topic.yaml` |
 | Cross-account alarm can actually publish | **Verified** — `scripts/test-alert-path.sh`, 0 → 1 |
 | `AlarmActions` on the Log Archive alarms | **Done** |
-| `AlarmActions` on the member-baseline alarm | Not done — needs the StackSet pass |
+| `AlarmActions` on the member-baseline alarm | **Done** — StackSet updated, canary verified |
 | PagerDuty service, schedule, escalation policy | **Written** — `pagerduty/`, not applied |
 | Routing key in Secrets Manager, subscription | Blocked on `PAGERDUTY_TOKEN` |
 
@@ -182,6 +182,53 @@ themselves live in `us-west-2`, and there are none.
 (2) is the right answer and is a phase 5 conversation, not a template change.
 
 **Related** — B-013, which is the same shape for the detective consoles.
+
+---
+
+## B-018 · PagerDuty schedule uses the deprecated v1 resource
+
+**Observed** — 2026-09-17, building `pagerduty/`. `terraform validate` warns
+that `pagerduty_schedule` uses the legacy v1 API and will be removed.
+
+**Why it was not migrated immediately.** `pagerduty_schedulev2` replaces a
+rotation expressed as "rotate every N seconds" with calendar events carrying
+RRULE recurrence, `effective_since`, and explicit start and end times. That is
+a more expressive model and a more dangerous one: **a mis-specified RRULE does
+not fail, it leaves a gap**, and the gap is found when an incident at 3am on a
+Tuesday pages nobody.
+
+Writing it safely needs a verification step that queries actual on-call
+coverage across a full week after applying — and neither that step nor the
+migration can be run until PagerDuty credentials exist. Clearing a deprecation
+warning by writing an unverifiable schedule trades a notice for a silent
+coverage hole.
+
+**Close when** — credentials exist and the configuration has been applied once.
+Migrate then, and verify with `GET /oncalls` over a seven-day window rather
+than by reading the plan.
+
+---
+
+## B-019 · The PagerDuty provider panics on a documented-optional block
+
+**Observed** — 2026-09-17, provider `PagerDuty/pagerduty` v3.36.0.
+
+`pagerduty_alert_grouping_setting` — the provider's own recommended replacement
+for the deprecated inline `alert_grouping_parameters` — **panics with a nil
+pointer dereference** when the `config` block is omitted. Terraform reports
+`Plugin did not respond` and a Go stack trace, neither of which names the
+missing block.
+
+Compounding it: the obvious field to put in `config` is `timeout`, which the
+provider then rejects with *"'timeout' is only applicable when type is time"*.
+The correct field for intelligent grouping is `time_window`. So the path from
+the deprecation warning to working configuration runs through a crash and a
+misleading field name.
+
+**Recorded rather than fixed** because the fix is upstream. The working
+configuration is in `pagerduty/main.tf` with the reason in a comment, so the
+next person does not repeat the hour. Worth reporting to the provider
+maintainers; not worth blocking on.
 
 ---
 

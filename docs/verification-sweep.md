@@ -155,6 +155,46 @@ AWS will mention it.
 
 ---
 
+### V-G · An alarm can actually reach the alerting topic
+
+**Automated** — `scripts/test-alert-path.sh --alarm <name> --alarm-account <alias>`.
+
+Design doc 13's check 2 is *"a synthetic test alarm actually reached PagerDuty
+and paged the correct rotation"*. This is the first half of it, and the half
+that can be tested before PagerDuty exists.
+
+**Assert on the receiving side.** `set-alarm-state` returns success whether or
+not the publish behind it is permitted, so a green command proves nothing. The
+signal is `NumberOfMessagesPublished` on the topic, read from the **topic
+owner's** account — the publishing account cannot see it.
+
+Three things can refuse the publish, and all three fail identically and
+silently:
+
+1. the SNS topic policy does not admit the publisher
+2. the KMS key policy does not admit the publisher — the message is encrypted,
+   so a topic grant without a key grant fails after passing SNS
+3. the condition key scoping either policy is never populated for the calling
+   service principal, so it cannot ever match
+
+(3) is the one to watch. `aws:PrincipalOrgID` against a service principal can
+never match and cost a working day on the CloudTrail key. `aws:SourceOrgID` is
+the correct key and is now verified for `cloudwatch.amazonaws.com` — but it was
+verified, not assumed, and any new service principal added to those policies
+needs the same treatment.
+
+**Run it from two positions, not one.** A platform account (Log Archive) and a
+member account (the canary) sit in different OUs under different SCPs. Proving
+one does not prove the other, and the member account is the one that matters:
+it is where every tenant alarm will come from.
+
+**Still unproven until a routing key exists** — that the topic delivers to
+PagerDuty and pages a human. A wrong routing key returns `200` to the
+subscription confirmation and then discards every message, so `Confirmed` is
+not evidence. Only an incident appearing in PagerDuty is.
+
+---
+
 ## What the sweep cannot check yet
 
 Stated so the gap is visible rather than assumed closed:

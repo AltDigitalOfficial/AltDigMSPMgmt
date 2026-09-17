@@ -20,6 +20,21 @@ data "pagerduty_user" "responder" {
 #
 # The layer is a 24/7 rotation because there is currently no rotation. When
 # there is, this becomes a real handoff and nothing downstream changes.
+#
+# DEPRECATED RESOURCE, KEPT DELIBERATELY. The provider wants
+# pagerduty_schedulev2, and this will have to move before v1 is removed.
+#
+# Not moved now because v2 replaces the simple "rotate every N seconds" model
+# with calendar events carrying RRULE recurrence, effective_since and explicit
+# start and end times. A mis-specified RRULE does not fail — it produces a
+# schedule with a GAP, and the gap is discovered when an incident at 3am on a
+# Tuesday pages nobody.
+#
+# That is only safe to write alongside a verification step that queries actual
+# on-call coverage across a full week after applying, and that step cannot be
+# written or run until PagerDuty credentials exist. Migrating blind, to clear a
+# warning, would trade a deprecation notice for a silent coverage hole.
+# Tracked as B-018.
 
 resource "pagerduty_schedule" "platform" {
   name      = "AltDigital Platform On-Call"
@@ -90,16 +105,46 @@ resource "pagerduty_service" "platform" {
   auto_resolve_timeout    = var.auto_resolve_timeout_minutes == 0 ? "null" : tostring(var.auto_resolve_timeout_minutes * 60)
   acknowledgement_timeout = tostring(var.acknowledgement_timeout_minutes * 60)
 
-  # Group alerts by the alarm that raised them rather than by time. Time-based
-  # grouping folds an unrelated second failure into the first incident, and the
-  # second failure is then acknowledged without anyone having looked at it.
-  alert_grouping_parameters {
-    type = "intelligent"
-  }
-
   incident_urgency_rule {
     type    = "constant"
     urgency = "high"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Alert grouping
+# ---------------------------------------------------------------------------
+# A separate resource rather than an alert_grouping_parameters block on the
+# service. The inline block is deprecated and this is the provider's
+# replacement — note that the direction inverts: the SETTING names the
+# services, the service does not name the setting.
+#
+# "intelligent" rather than "time". Time-based grouping folds an unrelated
+# second failure into the first incident, and the second failure is then
+# acknowledged by someone who only read the first — which on this service could
+# mean acknowledging away the alarm saying the evidence archive has stopped
+# replicating.
+#
+# The config block is REQUIRED even though the documentation reads as though it
+# is optional. Omitting it does not produce a validation error — provider
+# v3.36.0 panics with a nil pointer dereference and terraform reports "Plugin
+# did not respond". Worth knowing before spending time looking for the mistake
+# in this file.
+#
+# `time_window`, not `timeout`. The provider rejects `timeout` here with
+# "'timeout' is only applicable when type is time", so the two names are not
+# interchangeable: `timeout` is how long a time-grouped incident stays open,
+# `time_window` is the window intelligent grouping considers. 900 seconds
+# matches the CloudWatch alarm period plus SNS lag, so a flapping alarm
+# produces one incident rather than a page per cycle.
+
+resource "pagerduty_alert_grouping_setting" "platform" {
+  name     = "AltDigital Platform Grouping"
+  type     = "intelligent"
+  services = [pagerduty_service.platform.id]
+
+  config {
+    time_window = 900
   }
 }
 
@@ -111,9 +156,9 @@ resource "pagerduty_service" "platform" {
 # integration understands the SNS envelope and produces an incident whose title
 # is the alarm name and whose body is the alarm description.
 #
-# That is why the alarm descriptions in security/10-log-archive.yaml are
-# written as instructions to a woken engineer rather than as labels. They are
-# the page.
+# That is why the alarm descriptions in security/10-log-archive.yaml and
+# alerting/10-alert-topic.yaml are written as instructions to a woken engineer
+# rather than as labels. They are the page.
 
 data "pagerduty_vendor" "cloudwatch" {
   name = "Amazon CloudWatch"

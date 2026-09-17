@@ -66,6 +66,22 @@ Parameters:
       first time an application writes a card number to stdout is worth
       knowing about, not the hundredth.
 
+  AlertTopicArn:
+    Type: String
+    Default: ''
+    Description: >-
+      SNS topic in the Audit account that this alarm publishes to. Deliberately
+      cross-account: a topic in every member account would mean the PagerDuty
+      routing key in every member account, and member accounts are the ones a
+      tenant application can compromise. See alerting/10-alert-topic.yaml.
+
+      Empty leaves the alarm without an action, which is the state every alarm
+      in the platform was in until 2026-09-17 (B-015). An actionless alarm
+      evaluates, turns red in a console nobody has open, and notifies no one.
+
+Conditions:
+  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+
 Resources:
 
   # -------------------------------------------------------------------------
@@ -228,6 +244,11 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       # Absence of findings is the normal state and must not read as a problem.
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+      # No OKActions. A sensitive-data finding does not "recover" — the value
+      # was written, the masking contained it, and the code path still exists.
+      # An auto-resolving incident here would close the ticket that is the
+      # only durable record that an application leaked.
 
 Outputs:
 
