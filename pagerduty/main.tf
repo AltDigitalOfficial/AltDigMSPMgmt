@@ -145,10 +145,23 @@ resource "pagerduty_alert_grouping_setting" "platform" {
   type     = var.alert_grouping_type
   services = [pagerduty_service.platform.id]
 
+  # Each grouping type takes a DIFFERENT set of config fields, and supplying
+  # one that does not belong to the active type is rejected rather than
+  # ignored. Hence the nulls: every field is present in the block and only the
+  # relevant ones carry a value.
+  #
+  #   intelligent    time_window            (403 on non-AIOps accounts)
+  #   content_based  aggregate, fields, time_window
+  #   time           timeout
   config {
-    # time_window applies to intelligent and content_based; timeout applies to
-    # time. Setting the wrong one is rejected outright, so they are switched
-    # rather than both supplied.
+    # Group on the alert summary, which for the CloudWatch vendor integration
+    # IS the alarm name. So repeats of one alarm collapse into one incident,
+    # and two different alarms stay two incidents — which is the behaviour
+    # that matters on a service carrying "the evidence archive has stopped
+    # replicating".
+    aggregate = var.alert_grouping_type == "content_based" ? "all" : null
+    fields    = var.alert_grouping_type == "content_based" ? ["summary"] : null
+
     time_window = var.alert_grouping_type == "time" ? null : 900
     timeout     = var.alert_grouping_type == "time" ? 900 : null
   }

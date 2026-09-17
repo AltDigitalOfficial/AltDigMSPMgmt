@@ -232,6 +232,45 @@ maintainers; not worth blocking on.
 
 ---
 
+## B-020 · PagerDuty Service Graph — wanted for customer demonstrations
+
+**Asked for** — 2026-09-17, by Jamie: *"I'm still going to want the nice big
+services map inside PagerDuty as we build out — it's a cool impressive thing to
+show customers."*
+
+Recorded because it is a **stated commercial requirement**, not a technical
+one, and those are the ones that get lost between phases and then reappear as
+an expectation a week before a prospect meeting.
+
+**What it is** — PagerDuty's Service Graph: `pagerduty_business_service`
+resources with `pagerduty_service_dependency` edges to technical services.
+Fully declarative in the provider, so it belongs in `pagerduty/` alongside
+everything else.
+
+**Already in the design** — doc 12 asks for a business service for the
+client-conversation event class, with notification rules rather than paging
+rules. Doc 13 repeats it in the onboarding task set. So this is scoped work
+that happens to also be a demonstration asset, which is the good case.
+
+**Two things that must be true before it is worth building:**
+
+1. **Tier.** Business services are a Business / Digital Operations feature.
+   This account returned `403 Access Denied` creating an Intelligent Alert
+   Grouping setting on 2026-09-17, which places it below that line. The map is
+   therefore a **pricing decision**, not a build decision, and finding that out
+   the week of a prospect meeting would be bad.
+2. **Content.** Today the graph would be one business service pointing at one
+   technical service — a picture of a single box. It earns the description
+   "impressive" once Arc8, Avergent's application and the platform's own
+   services are all present with real dependency edges.
+
+**Build it with** — the per-tenant PagerDuty module in phase 12.2, so a graph
+node is a by-product of onboarding a tenant rather than a diagram somebody
+maintains by hand. A hand-maintained graph is wrong within two tenants, and a
+wrong dependency map shown to a customer is worse than no map.
+
+---
+
 ## B-013 · Detective consoles are still single-region after D-011
 
 **Observed** — 2026-09-17, closing D-011. Replication put the *evidence* in two
