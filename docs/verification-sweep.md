@@ -97,6 +97,26 @@ weakened, every other denial becomes bypassable by naming a role.
 
 The harness tests this directly and it must stay in the sweep.
 
+### V-E · Sensitive data masking is actually masking
+
+**Manual.** Write a Luhn-valid card number and an SSN to a log group created
+*after* the policy, then read the group back without `logs:Unmask`.
+
+Must use a NON-CANONICAL test number. AWS excludes the textbook values —
+`4111111111111111`, `5555555555554444`, `378282246310005`, and its own
+documentation example keys — so testing with them produces a false negative
+that looks exactly like a broken control (B-009). `4532015112830366` works.
+
+Assert three things, not one:
+
+1. the value reads as `****` without `logs:Unmask`
+2. a finding appears in `/aws/platform/data-protection-findings` naming the
+   identifier and the source log group, and **not** containing the value
+3. the `platform-sensitive-data-in-logs` alarm moves to ALARM
+
+Masking without the finding is containment without detection; the code path
+that wrote the data still exists and will write it again.
+
 ---
 
 ## What the sweep cannot check yet

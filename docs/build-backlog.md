@@ -106,6 +106,46 @@ detector present, Security Hub `hub/default`, Macie `ENABLED`.
 
 ---
 
+## B-009 · Canonical test values are excluded from data protection detection
+
+**Observed** — 2026-09-17, testing CloudWatch Logs data protection on the
+canary.
+
+These were **not** masked:
+
+```
+4111111111111111          the textbook test Visa
+5555555555554444          the textbook test Mastercard
+378282246310005           the textbook test Amex
+AKIAIOSFODNN7EXAMPLE      AWS documentation example access key
+wJalrXUtnFEMI/K7MDENG/…   AWS documentation example secret key
+```
+
+These **were**, immediately:
+
+```
+4532015112830366   ->  ****************
+4539578763621486   ->  ****************   (and its CVV)
+123-45-6789        ->  ***********
+```
+
+**AWS excludes well-known test and documentation values**, which is sensible —
+it stops every CI pipeline and tutorial generating findings. But the
+consequence is sharp: **verifying this control with textbook values produces a
+false negative and reads exactly like a broken control.** I spent two rounds
+believing the card identifier was not working.
+
+**Recorded so nobody repeats it.** Any test of data protection — in the
+verification sweep, in a tabletop, in a demonstration to an auditor — must use
+Luhn-valid numbers that are not the canonical examples. `4532015112830366`
+works and is in no documentation.
+
+**Not a gap in the control.** Real cardholder data is not a test number. But it
+is a gap in how the control can be *demonstrated*, and demonstrating controls
+to auditors is the product.
+
+---
+
 ## B-001 · SCP policy 01 is close to the 5,120-byte quota
 
 **Observed** — 2026-09-17. `01-protect-detective-controls.json` is **4,983 of

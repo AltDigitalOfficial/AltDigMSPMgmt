@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — CloudWatch Logs data protection. Masks
+  sensitive data at write time across every log group in the account, records
+  every detection, and alarms on it. Part of the member baseline.
+
+# ---------------------------------------------------------------------------
+# What this actually does, and why it is the only control that works
+# ---------------------------------------------------------------------------
+# An application writes a card number or an SSN to stdout. It reaches CloudWatch
+# Logs. From there it is in the evidence pipeline, and under the log archive's
+# COMPLIANCE Object Lock it cannot be deleted for six years.
+#
+# There is no cleanup path. Masking at the point of write is not the best
+# available control, it is the ONLY one — which is why this is a platform
+# baseline rather than a per-tenant option.
+#
+# Two halves, and both are needed:
+#
+#   Redact  replaces the matched value with asterisks in the stored log. The
+#           leak is neutralised for anyone reading the log afterwards.
+#   Audit   records THAT a detection happened — log group, timestamp, which
+#           identifier matched — without recording the value. Safe to
+#           centralise, and it is what turns masking into monitoring.
+#
+# Masked data is still recoverable by a principal holding
+# logs:Unmask, which is deliberate: an incident responder may need the original.
+# That permission is not granted by the baseline and should be JIT-elevated.
+#
+# ---------------------------------------------------------------------------
+# Account-level, not per log group
+# ---------------------------------------------------------------------------
+# PutAccountPolicy with scope ALL applies to every log group in the account
+# INCLUDING ones created later. A per-log-group policy would protect exactly the
+# log groups someone remembered, which in practice means the ones that existed
+# on the day the platform was built.
+#
+# ---------------------------------------------------------------------------
+# Cost
+# ---------------------------------------------------------------------------
+# Data protection is charged per GB scanned, roughly $0.12/GB, on top of
+# ingestion. On a chatty application this is not trivial and it scales with log
+# volume rather than with account count.
+#
+# It is applied to dev and test as well as production deliberately. Design doc
+# 02: "Sensitive data appears in non-production environments more often than
+# anyone admits, so detective controls are uniform." Dev and test are where
+# debug logging gets left on, which is precisely where this earns its cost.
+
+Parameters:
+
+  FindingsRetentionDays:
+    Type: Number
+    Default: 365
+    Description: >-
+      Retention for the findings log group. Findings record that a detection
+      occurred, not the value detected, so they are safe to keep and useful for
+      showing an auditor the control has been operating.
+
+  AlarmThreshold:
+    Type: Number
+    Default: 1
+    Description: >-
+      Findings in the evaluation period before the alarm fires. Default 1: the
+      first time an application writes a card number to stdout is worth
+      knowing about, not the hundredth.
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Logs encryption key
+  # -------------------------------------------------------------------------
+  # Added because cfn-guard's LOG_GROUP_ENCRYPTED rule rejected the findings
+  # log group without one — a rule written in phase 0 catching phase 2 code,
+  # which is the first time the guard rules have earned their keep on something
+  # unwritten when they were authored.
+  #
+  # It was tempting to argue the exception: findings record THAT a detection
+  # occurred, not the value detected, so this log group holds no sensitive
+  # data. That reasoning is exactly how controls erode. The key costs $1/month.
+  #
+  # This is the 'logs' key of the four-key standard set in design doc 04
+  # (storage, database, secrets, logs). Prompt 2.2 should EXTEND this template
+  # with the other three rather than create a parallel stack — two stacks each
+  # creating a logs key in the same account is a collision waiting to happen.
+  PlatformLogsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Platform logs encryption key
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          # CloudWatch Logs encrypts with this key on the account's behalf.
+          # kms:ViaService does not apply — Logs calls KMS directly — so the
+          # grant is scoped by encryption context to this account's log groups,
+          # which is the equivalent control.
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal: { Service: !Sub 'logs.${AWS::Region}.amazonaws.com' }
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn':
+                  !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+
+  PlatformLogsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-logs
+      TargetKeyId: !Ref PlatformLogsKey
+
+  # Findings destination. Created explicitly rather than implicitly so it
+  # carries encryption and retention like any other platform log group.
+  DataProtectionFindings:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/platform/data-protection-findings
+      RetentionInDays: !Ref FindingsRetentionDays
+      KmsKeyId: !GetAtt PlatformLogsKey.Arn
+
+  DataProtectionPolicy:
+    Type: AWS::Logs::AccountPolicy
+    Properties:
+      PolicyName: PlatformDataProtection
+      PolicyType: DATA_PROTECTION_POLICY
+      Scope: ALL
+      PolicyDocument: !Sub |
+        {
+          "Name": "PlatformDataProtection",
+          "Description": "Mask sensitive data in all log groups and record detections",
+          "Version": "2021-06-01",
+          "Statement": [
+            {
+              "Sid": "audit",
+              "DataIdentifier": [
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/CreditCardNumber",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/CreditCardSecurityCode",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/BankAccountNumber-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/Ssn-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/DriversLicense-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/PassportNumber-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/AwsSecretKey",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/OpenSshPrivateKey",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/PgpPrivateKey",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/HealthInsuranceClaimNumber-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/MedicareBeneficiaryNumber-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/NationalProviderId-US"
+              ],
+              "Operation": {
+                "Audit": {
+                  "FindingsDestination": {
+                    "CloudWatchLogs": { "LogGroup": "${DataProtectionFindings}" }
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "redact",
+              "DataIdentifier": [
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/CreditCardNumber",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/CreditCardSecurityCode",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/BankAccountNumber-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/Ssn-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/DriversLicense-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/PassportNumber-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/AwsSecretKey",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/OpenSshPrivateKey",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/PgpPrivateKey",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/HealthInsuranceClaimNumber-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/MedicareBeneficiaryNumber-US",
+                "arn:${AWS::Partition}:dataprotection::aws:data-identifier/NationalProviderId-US"
+              ],
+              "Operation": { "Deidentify": { "MaskConfig": {} } }
+            }
+          ]
+        }
+
+  # Masking without noticing is only half a control. This turns a finding into
+  # a number, and the number into an alarm — the difference between "the data
+  # was masked" and "somebody found out it was being written".
+  DataProtectionFindingMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref DataProtectionFindings
+      FilterName: PlatformSensitiveDataDetected
+      # Every audit finding carries a resourceArn. Matching on its presence
+      # counts findings without depending on which identifier matched.
+      FilterPattern: '{ $.resourceArn = "*" }'
+      MetricTransformations:
+        - MetricNamespace: AltDigital/Platform
+          MetricName: SensitiveDataInLogs
+          MetricValue: '1'
+          DefaultValue: 0
+
+  SensitiveDataAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-sensitive-data-in-logs
+      AlarmDescription: >-
+        An application wrote data matching a sensitive data identifier to logs.
+        The value was masked at write time, so the leak is contained — but the
+        code path that produced it still exists and will produce it again.
+        Treat as an application defect, not an infrastructure incident.
+      Namespace: AltDigital/Platform
+      MetricName: SensitiveDataInLogs
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref AlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # Absence of findings is the normal state and must not read as a problem.
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  FindingsLogGroup:
+    Description: Where data protection findings are recorded
+    Value: !Ref DataProtectionFindings
+
+  AlarmName:
+    Description: Alarm that fires when sensitive data is detected in logs
+    Value: !Ref SensitiveDataAlarm
+
+  LogsKeyArn:
+    Description: Platform logs encryption key, for other baseline stacks to reference
+    Value: !GetAtt PlatformLogsKey.Arn
