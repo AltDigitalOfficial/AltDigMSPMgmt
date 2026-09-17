@@ -420,6 +420,11 @@ Resources:
                 Bucket: !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-replica-${AWS::AccountId}'
                 EncryptionConfiguration:
                   ReplicaKmsKeyID: !Ref ReplicaKeyArn
+                # Without this, OperationsFailedReplication is never
+                # published, and a rule that has stopped working is
+                # indistinguishable from one with nothing to do.
+                Metrics:
+                  Status: Enabled
               SourceSelectionCriteria:
                 SseKmsEncryptedObjects: { Status: Enabled }
         - !Ref AWS::NoValue
@@ -513,6 +518,11 @@ Resources:
                 Bucket: !Sub 'arn:${AWS::Partition}:s3:::altdig-config-archive-replica-${AWS::AccountId}'
                 EncryptionConfiguration:
                   ReplicaKmsKeyID: !Ref ReplicaKeyArn
+                # Without this, OperationsFailedReplication is never
+                # published, and a rule that has stopped working is
+                # indistinguishable from one with nothing to do.
+                Metrics:
+                  Status: Enabled
               SourceSelectionCriteria:
                 SseKmsEncryptedObjects: { Status: Enabled }
         - !Ref AWS::NoValue
@@ -637,6 +647,11 @@ Resources:
                 Bucket: !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-replica-${AWS::AccountId}'
                 EncryptionConfiguration:
                   ReplicaKmsKeyID: !Ref ReplicaKeyArn
+                # Without this, OperationsFailedReplication is never
+                # published, and a rule that has stopped working is
+                # indistinguishable from one with nothing to do.
+                Metrics:
+                  Status: Enabled
               SourceSelectionCriteria:
                 SseKmsEncryptedObjects: { Status: Enabled }
         - !Ref AWS::NoValue
@@ -773,6 +788,114 @@ Resources:
               StringLike:
                 'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cloudtrail:*:${ManagementAccountId}:trail/*'
 
+
+  # -------------------------------------------------------------------------
+  # Detection for the replication itself
+  # -------------------------------------------------------------------------
+  # A replication rule fails silently. The source bucket keeps accepting
+  # writes, the replica keeps holding whatever arrived before the failure, and
+  # every API that describes the configuration keeps returning it unchanged.
+  # The only signal is a per-object ReplicationStatus nobody reads.
+  #
+  # These alarms have NO AlarmActions, because the platform has no alerting
+  # path yet — see B-015. That is a real limitation and is recorded as one
+  # rather than papered over: an unrouted alarm is visible in the console and
+  # nowhere else, which is better than nothing and much worse than an alert.
+  LogArchiveReplicationFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: WantReplication
+    Properties:
+      AlarmName: platform-replication-failed-log-archive
+      AlarmDescription: >-
+        Replication of the log-archive bucket to its cross-region replica is
+        failing. The source copy is intact, so nothing is lost yet — what is
+        lost is the second region, and with it the guarantee D-011 was closed
+        on. For the Config archive it is also the immutable copy (B-006), so
+        the window during which configuration history is deletable is open
+        again for as long as this alarm is firing.
+        Diagnose with head-object ReplicationStatus on a recent object, then
+        re-run scripts/backfill-replication.sh once the cause is fixed.
+      Namespace: AWS/S3
+      MetricName: OperationsFailedReplication
+      Dimensions:
+        - Name: SourceBucket
+          Value: !Sub 'altdig-log-archive-${AWS::AccountId}'
+        - Name: DestinationBucket
+          Value: !Sub 'altdig-log-archive-replica-${AWS::AccountId}'
+        - Name: RuleId
+          Value: CrossRegion
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # No failures is the normal state, and for the flow log bucket no
+      # ACTIVITY is also normal. Neither must read as a problem.
+      TreatMissingData: notBreaching
+
+  ConfigArchiveReplicationFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: WantReplication
+    Properties:
+      AlarmName: platform-replication-failed-config-archive
+      AlarmDescription: >-
+        Replication of the config-archive bucket to its cross-region replica is
+        failing. The source copy is intact, so nothing is lost yet — what is
+        lost is the second region, and with it the guarantee D-011 was closed
+        on. For the Config archive it is also the immutable copy (B-006), so
+        the window during which configuration history is deletable is open
+        again for as long as this alarm is firing.
+        Diagnose with head-object ReplicationStatus on a recent object, then
+        re-run scripts/backfill-replication.sh once the cause is fixed.
+      Namespace: AWS/S3
+      MetricName: OperationsFailedReplication
+      Dimensions:
+        - Name: SourceBucket
+          Value: !Sub 'altdig-config-archive-${AWS::AccountId}'
+        - Name: DestinationBucket
+          Value: !Sub 'altdig-config-archive-replica-${AWS::AccountId}'
+        - Name: RuleId
+          Value: CrossRegion
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # No failures is the normal state, and for the flow log bucket no
+      # ACTIVITY is also normal. Neither must read as a problem.
+      TreatMissingData: notBreaching
+
+  FlowLogReplicationFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: WantReplication
+    Properties:
+      AlarmName: platform-replication-failed-flow-logs
+      AlarmDescription: >-
+        Replication of the flow-logs bucket to its cross-region replica is
+        failing. The source copy is intact, so nothing is lost yet — what is
+        lost is the second region, and with it the guarantee D-011 was closed
+        on. For the Config archive it is also the immutable copy (B-006), so
+        the window during which configuration history is deletable is open
+        again for as long as this alarm is firing.
+        Diagnose with head-object ReplicationStatus on a recent object, then
+        re-run scripts/backfill-replication.sh once the cause is fixed.
+      Namespace: AWS/S3
+      MetricName: OperationsFailedReplication
+      Dimensions:
+        - Name: SourceBucket
+          Value: !Sub 'altdig-flow-logs-${AWS::AccountId}'
+        - Name: DestinationBucket
+          Value: !Sub 'altdig-flow-logs-replica-${AWS::AccountId}'
+        - Name: RuleId
+          Value: CrossRegion
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # No failures is the normal state, and for the flow log bucket no
+      # ACTIVITY is also normal. Neither must read as a problem.
+      TreatMissingData: notBreaching
 
 Outputs:
 

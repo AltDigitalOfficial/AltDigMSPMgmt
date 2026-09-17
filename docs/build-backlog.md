@@ -80,6 +80,46 @@ covered by it. See D-011 and
 
 ---
 
+## B-015 · Every alarm in the platform has no action
+
+**Observed** — 2026-09-17, adding replication failure alarms and finding there
+was nowhere to send them.
+
+| Alarm | Account | Actions |
+|---|---|---|
+| `platform-sensitive-data-in-logs` | every member | **none** |
+| `platform-replication-failed-log-archive` | Log Archive | **none** |
+| `platform-replication-failed-config-archive` | Log Archive | **none** |
+| `platform-replication-failed-flow-logs` | Log Archive | **none** |
+
+Verified: `describe-alarms` returns `length(AlarmActions) == 0` for all four.
+
+**Why this is worse than it looks** — this file's sibling
+[verification-sweep.md](verification-sweep.md) opens by naming the failure mode
+the platform is built against: *"configuration that looks right and does
+nothing."* An alarm with no action is the cleanest possible example. It
+evaluates, it transitions to ALARM, it shows red in a console nobody has open,
+and it notifies no one. Design doc 13's check 2 — "a synthetic test alarm
+reached PagerDuty and paged the correct rotation" — cannot pass for any alarm
+in the platform.
+
+**Why they were still worth building** — the alarm is the part that has to be
+defined per resource and is easy to forget when the routing arrives. Routing is
+one topic and one subscription applied to all of them. Building the alarms
+first is the right order; leaving them unrouted indefinitely is not.
+
+**What it needs** — an SNS topic per platform account (or one in Audit with
+cross-account publish), a subscription, and `AlarmActions` on every alarm
+resource. The destination is a phase 5 decision — PagerDuty per design doc 13,
+but email to a monitored mailbox would close the "notifies no one" gap in an
+afternoon and is worth doing first.
+
+**Close before** — the first tenant carrying an incident-response commitment.
+Committing to a detection-and-response SLA while no detection reaches a human
+is the kind of gap that turns a control failure into a contractual one.
+
+---
+
 ## B-013 · Detective consoles are still single-region after D-011
 
 **Observed** — 2026-09-17, closing D-011. Replication put the *evidence* in two
