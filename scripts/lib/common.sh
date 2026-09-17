@@ -202,25 +202,25 @@ find_ou() {
 # mid-saga.
 #
 #   AWS account alias, max 63 — keeps the full environment word:
-#     ad-  partner  -  client  -  app  - env    = total
-#      3  +   20   + 1 +  20  + 1 + 12 + 1 + 4  =  62
+#     altdig-  partner  -  client  -  app  - env    = total
+#        7    +   18   + 1 +  18  + 1 + 10 + 1 + 4  =  60
 #
 #   Email local part, max 64 octets (RFC 5321 s4.5.3.1.1) — short base, no
 #   'ad-' prefix, one-character tier:
 #     mspr  +  partner  -  client  -  app  - tier  = total
-#      4   + 1 +  20   + 1 +  20  + 1 + 12 + 1 + 1 =  61
+#      4   + 1 +  18   + 1 +  18  + 1 + 10 + 1 + 1 =  55
 #
-# The email is short deliberately so the slug caps can be generous. Dropping
-# 'msp-mgmt' for 'mspr' buys 4 octets, dropping 'ad-' buys 3, and a
-# single-character tier buys another 3 — which is what funds 20/20/12 instead
-# of 18/18/10.
+# The ALIAS is now the binding constraint, not the email. The 'altdig' prefix
+# costs four characters over 'ad' and buys collision resistance that 'ad' did
+# not provide — see config/platform.env. The email carries no prefix at all, so
+# it has 9 characters of slack.
 #
 # These caps must not be raised independently of each other, and account_email
 # enforces the limit rather than trusting them.
 ACCOUNT_ALIAS_MAX=63
 EMAIL_LOCAL_MAX=64
-SLUG_RE='^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$'       # 1-20 chars
-APP_SLUG_RE='^[a-z0-9]([a-z0-9-]{0,10}[a-z0-9])?$'   # 1-12 chars
+SLUG_RE='^[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$'       # 1-18 chars
+APP_SLUG_RE='^[a-z0-9]([a-z0-9-]{0,8}[a-z0-9])?$'    # 1-10 chars
 
 validate_slug() {
   local kind="$1" value="$2"

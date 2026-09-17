@@ -31,15 +31,15 @@ Parameters:
       <partner> segment of every account alias beneath it. Lowercase
       alphanumeric and hyphens only — account aliases permit nothing else.
       Strip dots: oeight.io becomes oeight.
-    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$'
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$'
     MinLength: 1
-    MaxLength: 20
+    MaxLength: 18
     ConstraintDescription: >-
-      1-20 chars, lowercase alphanumeric and hyphens, must start and end
+      1-18 chars, lowercase alphanumeric and hyphens, must start and end
       alphanumeric. The cap is a fixed budget against TWO limits, of which the
       email is the tighter: the 63-char account alias
-      (3 + 20 + 1 + 20 + 1 + 12 + 1 + 4 = 62) and the 64-octet RFC 5321 email
-      local part (4 + 1 + 20 + 1 + 20 + 1 + 12 + 1 + 1 = 61, using the short
+      (7 + 18 + 1 + 18 + 1 + 10 + 1 + 4 = 60) and the 64-octet RFC 5321 email
+      local part (4 + 1 + 18 + 1 + 18 + 1 + 10 + 1 + 1 = 55, using the short
       'mspr' base and a one-character tier). Do not raise it in isolation.
 
   PartnerLegalName:

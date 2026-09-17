@@ -66,7 +66,8 @@ the script reports success. Redirect to a file and read the file.
 | Management account | `738815759702` | Holds the Organization and nothing else. |
 | Home region | `us-east-2` | Also the IAM Identity Center home region, which cannot be changed without deleting the instance. |
 | Allowed regions | `us-east-1`, `us-east-2`, `us-west-2` | us-west-1 dropped from design doc 02's list — two AZs and lagging service coverage. us-east-1 retained for global service endpoints. |
-| Account naming | `ad-<partner>-<client>[-<app>]-<env>` | Enforced in `validate_slug` and by template `AllowedPattern`. |
+| Account naming | `altdig-<partner>-<client>[-<app>]-<env>`, slugs 18/18/10 | `ad-` was too short: `ad-security-audit` is taken by another AWS customer (D-009). Enforced in `validate_slug` and by template `AllowedPattern`. |
+| Member root email | `mspr+<partner>-<client>[-<app>]-<tier>@altdigital.ai` | Separate mailbox from the management account root. Tier is one character: d/t/u/p. |
 | IaC | CloudFormation + StackSets | Terraform only for PagerDuty (design doc 13). |
 | Commercial scope | Billing mechanics only | Pricing, SLA, margin and contract work are out of scope for this build. Everything required for exact per-partner and per-client billing is in. |
 

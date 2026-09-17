@@ -27,7 +27,7 @@ Root  r-t7wy
 ├── Members          ou-t7wy-w4bt7t9p      (no SCPs attached yet)
 │   └── direct       ou-t7wy-4mjvd5lu
 └── Sandbox          ou-t7wy-tue14x6e      SCPs attached, harness passing
-    └── ad-sandbox-canary  754280127660
+    └── altdig-sandbox-canary  754280127660
 ```
 
 Guardrails are live **in the Sandbox OU only** and proven by
@@ -111,10 +111,10 @@ Root
 ├── Members
 │   ├── <partner>/
 │   │   └── <client>/
-│   │       ├── ad-<partner>-<client>-dev
-│   │       ├── ad-<partner>-<client>-test
-│   │       ├── ad-<partner>-<client>-uat     (opt-in)
-│   │       └── ad-<partner>-<client>-prod
+│   │       ├── altdig-<partner>-<client>-dev
+│   │       ├── altdig-<partner>-<client>-test
+│   │       ├── altdig-<partner>-<client>-uat     (opt-in)
+│   │       └── altdig-<partner>-<client>-prod
 │   └── direct/                 AltDigital's own clients, no partner
 └── Sandbox                     baseline canary · guardrail test target
 ```

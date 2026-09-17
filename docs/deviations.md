@@ -7,6 +7,57 @@ itself.
 
 ---
 
+## D-009 · Account alias prefix is `altdig-`, not `ad-`
+
+**Design position** — [15-partner-model.md](../starter_docs/15-partner-model.md)
+specifies `ad-<partner>-<client>-<env>`, justifying the prefix as: *"Account
+aliases are globally unique across all of AWS; the prefix avoids collision and
+makes ownership obvious in a support ticket."* Open item B15 records the prefix
+as assumed rather than confirmed.
+
+**Actual** — `altdig-<partner>-<client>[-<app>]-<env>`, with partner and client
+slugs capped at 18 and application short codes at 10.
+
+**Reason — the assumption was tested and failed.** Creating the Audit account
+on 2026-09-16, `ad-security-audit` was rejected: already held by an unrelated
+AWS customer. Two characters is not enough to make a generic name unique across
+every AWS account in existence.
+
+Member aliases were never really at risk — `ad-oeight-arc8-prod` carries
+distinctive partner and client slugs. The exposure is concentrated in platform
+accounts, whose names are ordinary words: audit, backup, shared, tooling.
+
+**Why `altdig` rather than `altd`** — collision resistance comes from
+distinctiveness, and `altd-security-audit` is only marginally less guessable
+than `ad-security-audit`. `altdig` is implausible as anyone else's choice.
+
+**Cost** — four characters against the 63-character alias limit, which is why
+partner and client caps drop from 20 to 18 and application codes from 12 to 10:
+
+```
+altdig- + 18 partner + 1 + 18 client + 1 + 10 app + 1 + 4 env = 60 of 63
+mspr+     18 partner + 1 + 18 client + 1 + 10 app + 1 + 1 tier = 55 of 64
+```
+
+The alias is now the binding constraint; the email has 9 characters of slack
+because it carries no prefix at all. Against real values — `oeight` (6),
+`avergent` (8), `arc8` (4) — the tighter caps are not a practical limit.
+
+**Applied** — three live aliases renamed (`altdig-sandbox-canary`,
+`altdig-security-logarchive`, `altdig-security-audit`), the SSM account registry
+re-keyed, and `altdig-security-audit` confirmed available. No accounts had been
+vested, so nothing downstream referenced the old names.
+
+**Retained** — the numeric fallback in `create-platform-account.sh`, which
+appends the last four digits of the account id on collision. With `altdig` it
+should never fire; if it does, that is a signal worth investigating rather than
+a routine outcome.
+
+**Close when** — design doc 15 and open item B15 are updated to match, or the
+decision is reversed.
+
+---
+
 ## D-001 · Root mailbox is a personal alias, not a monitored distribution list
 
 **Design position** — [15-partner-model.md](../starter_docs/15-partner-model.md),

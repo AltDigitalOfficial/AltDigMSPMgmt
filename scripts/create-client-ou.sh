@@ -26,7 +26,7 @@ Usage: create-client-ou.sh --partner <slug> --slug <slug> --legal-name <name>
 
   --partner                Partner slug this client sits beneath, or 'direct'
                            for an AltDigital client with no partner.
-  --slug                   Machine-safe client id, 1-20 chars.
+  --slug                   Machine-safe client id, 1-18 chars.
   --legal-name             Client legal or trading name.
   --app-owner              Who owns the application IP: client | partner.
                            Default client. 'partner' means doc 10's "the
@@ -73,10 +73,11 @@ fi
 # Account alias length check, done here at the point the segments are chosen
 # rather than at account creation where a failure is far more expensive to
 # unwind. Worst case is a client with multiple applications:
-# ad-<partner>-<client>-<app>-<env> with a full-length 12-char app code.
+# altdig-<partner>-<client>-<app>-<env> with a full-length 10-char app code.
 # Chained through account_email because the 64-octet local part is the TIGHTER
 # of the two limits; both functions die on overflow, so this is the whole check.
-account_email "${PARTNER}" "${SLUG}" "xxxxxxxxxxxx" "prod" >/dev/null
+account_email "${PARTNER}" "${SLUG}" "xxxxxxxxxx" "prod" >/dev/null
+account_alias "${PARTNER}" "${SLUG}" "xxxxxxxxxx" "prod" >/dev/null
 
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 
