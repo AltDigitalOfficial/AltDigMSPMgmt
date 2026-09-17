@@ -149,8 +149,22 @@ Resources:
                   !Sub 'arn:aws:cloudtrail:*:${ManagementAccountId}:trail/*'
 
           # Config and VPC flow log delivery act on behalf of each member
-          # account, so they are scoped by source organization: no account list
-          # to maintain, and a newly vested account works immediately.
+          # account, so they are scoped by source organization rather than by an
+          # account list: nothing to maintain, and a newly vested account works
+          # immediately.
+          #
+          # An earlier revision removed this condition, on a bisection that
+          # concluded aws:SourceOrgID was unpopulated for Config -> KMS. That
+          # conclusion was wrong. The bisection was invalid because the Config
+          # RECORDER kept being deleted underneath it, and Config checks for a
+          # recorder BEFORE it checks the delivery policy — so
+          # NoAvailableConfigurationRecorderException was mistaken for the
+          # policy check passing.
+          #
+          # Isolating properly, with a recorder present throughout, showed
+          # delivery failing identically whether or not a KMS key was supplied
+          # ("provided kms key is 'null'"). KMS was never involved. The real
+          # cause was S3 Object Lock, which Config cannot write to at all.
           - Sid: AllowLogDeliveryToEncrypt
             Effect: Allow
             Principal:
@@ -221,6 +235,121 @@ Resources:
         - { Key: Purpose,          Value: log-archive }
         - { Key: DataClassification, Value: regulated }
 
+  # -------------------------------------------------------------------------
+  # Config archive — a SECOND bucket, without Object Lock
+  # -------------------------------------------------------------------------
+  # AWS Config cannot deliver to a bucket with Object Lock enabled. Established
+  # by elimination, because the error says nothing of the sort:
+  # PutDeliveryChannel returned InsufficientDeliveryPolicyException against the
+  # locked bucket with every condition stripped from the policy, and succeeded
+  # immediately against an identical scratch bucket whose only difference was
+  # Object Lock. Object Lock requires Content-MD5 on PutObject and Config does
+  # not send it.
+  #
+  # Design doc 02 asks for an immutable log destination AND for Config to
+  # deliver there. Those are mutually exclusive, so the archive splits:
+  #
+  #   CloudTrail -> locked bucket    COMPLIANCE, genuinely immutable
+  #   Config     -> this bucket      versioned, delete-denied, NOT immutable
+  #
+  # The difference is real and should not be papered over. What narrows it:
+  #
+  #   * Deleting an object here is denied by bucket policy to every principal
+  #     except platform deployment roles — the same control as the locked
+  #     bucket. What is missing is the guarantee that survives a compromised
+  #     platform role, which is exactly what Object Lock provides and this
+  #     cannot.
+  #   * Config is not the only copy. The Config aggregator in the Audit account
+  #     holds queryable configuration history independently of S3.
+  #
+  # The route to genuine immutability, if it is wanted: S3 Replication from
+  # this bucket into a locked destination. Replication CAN write to an Object
+  # Lock bucket where Config cannot. That adds replication cost and a delivery
+  # delay, so it is recorded as a decision rather than assumed.
+  ConfigArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-config-archive-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref LogArchiveKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: !Ref TransitionToGlacierDays
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: config-archive }
+        - { Key: Immutable,        Value: 'false' }
+
+  ConfigArchiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ConfigArchiveBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ConfigArchiveBucket.Arn
+              - !Sub '${ConfigArchiveBucket.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': false }
+
+          # Without Object Lock this is the only thing standing between a
+          # mistake and the loss of configuration history.
+          - Sid: DenyDeletion
+            Effect: Deny
+            Principal: '*'
+            Action: [ 's3:DeleteObject', 's3:DeleteObjectVersion' ]
+            Resource: !Sub '${ConfigArchiveBucket.Arn}/*'
+            Condition:
+              ArnNotLike:
+                'aws:PrincipalArn':
+                  - 'arn:aws:sts::*:assumed-role/Platform*/*'
+                  - 'arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*'
+                  - 'arn:aws:sts::*:assumed-role/stacksets-exec-*/*'
+
+          - Sid: ConfigCheckAcl
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: [ 's3:GetBucketAcl', 's3:ListBucket' ]
+            Resource: !GetAtt ConfigArchiveBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
+
+          - Sid: ConfigWrite
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub '${ConfigArchiveBucket.Arn}/AWSLogs/*'
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
+
   LogArchiveBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -239,7 +368,21 @@ Resources:
             Condition:
               Bool: { 'aws:SecureTransport': false }
 
-          - Sid: DenyUnencryptedUploads
+          # Denies only an upload that ASKS for the wrong encryption, not one
+          # that asks for nothing.
+          #
+          # Without the Null guard this denied any PutObject lacking an explicit
+          # s3:x-amz-server-side-encryption header — and bucket default
+          # encryption never gets a chance, because the Deny is evaluated first.
+          # CloudTrail sets the header and worked. AWS Config does not, and
+          # failed with InsufficientDeliveryPolicyException: "unable to write to
+          # bucket", which names neither the header nor this statement.
+          #
+          # This does not weaken the control. The bucket's default encryption is
+          # aws:kms with the platform key, so a header-less upload is still
+          # encrypted with it. What remains denied is the case that matters:
+          # a caller explicitly requesting AES256 or no encryption.
+          - Sid: DenyWrongEncryptionIfSpecified
             Effect: Deny
             Principal: '*'
             Action: 's3:PutObject'
@@ -247,6 +390,10 @@ Resources:
             Condition:
               StringNotEquals:
                 's3:x-amz-server-side-encryption': 'aws:kms'
+              # Quoted: YAML reads a bare Null as the null value, not the
+              # string, and CloudFormation rejects it as a malformed key.
+              'Null':
+                's3:x-amz-server-side-encryption': 'false'
 
           # Object Lock stops a VERSION being deleted. It does not stop a
           # delete marker being created over it.
@@ -300,30 +447,16 @@ Resources:
               StringLike:
                 'aws:SourceArn': !Sub 'arn:aws:cloudtrail:*:${ManagementAccountId}:trail/*'
 
-          - Sid: ConfigCheckAcl
-            Effect: Allow
-            Principal: { Service: config.amazonaws.com }
-            Action: [ 's3:GetBucketAcl', 's3:ListBucket' ]
-            Resource: !GetAtt LogArchiveBucket.Arn
-            Condition:
-              StringEquals:
-                'aws:SourceOrgID': !Ref OrganizationId
-
-          - Sid: ConfigWrite
-            Effect: Allow
-            Principal: { Service: config.amazonaws.com }
-            Action: 's3:PutObject'
-            Resource: !Sub '${LogArchiveBucket.Arn}/AWSLogs/*'
-            Condition:
-              StringEquals:
-                's3:x-amz-acl': 'bucket-owner-full-control'
-                'aws:SourceOrgID': !Ref OrganizationId
 
 Outputs:
 
   BucketName:
-    Description: Log archive bucket name
+    Description: Log archive bucket name (CloudTrail, Object Lock COMPLIANCE)
     Value: !Ref LogArchiveBucket
+
+  ConfigBucketName:
+    Description: Config archive bucket name (versioned, NOT Object Lock)
+    Value: !Ref ConfigArchiveBucket
 
   BucketArn:
     Description: Log archive bucket ARN

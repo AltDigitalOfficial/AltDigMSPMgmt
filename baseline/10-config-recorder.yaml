@@ -69,9 +69,13 @@ Description: >-
 
 Parameters:
 
-  LogArchiveBucketName:
+  ConfigArchiveBucketName:
     Type: String
-    Description: Destination bucket in the Log Archive account.
+    Description: >-
+      Destination bucket in the Log Archive account. This is the CONFIG
+      archive, not the CloudTrail one. AWS Config cannot deliver to a bucket
+      with Object Lock enabled, so the two are separate buckets with different
+      immutability guarantees — see security/10-log-archive.yaml.
     MinLength: 3
 
   LogArchiveKeyArn:
@@ -117,13 +121,13 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: 's3:PutObject'
-                Resource: !Sub 'arn:aws:s3:::${LogArchiveBucketName}/AWSLogs/${AWS::AccountId}/Config/*'
+                Resource: !Sub 'arn:aws:s3:::${ConfigArchiveBucketName}/AWSLogs/${AWS::AccountId}/Config/*'
                 Condition:
                   StringEquals:
                     's3:x-amz-acl': 'bucket-owner-full-control'
               - Effect: Allow
                 Action: 's3:GetBucketAcl'
-                Resource: !Sub 'arn:aws:s3:::${LogArchiveBucketName}'
+                Resource: !Sub 'arn:aws:s3:::${ConfigArchiveBucketName}'
               - Effect: Allow
                 Action: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:DescribeKey']
                 Resource: !Ref LogArchiveKeyArn
@@ -251,7 +255,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt ConfigSetupFunction.Arn
       RecorderRoleArn: !GetAtt ConfigRecorderRole.Arn
-      BucketName: !Ref LogArchiveBucketName
+      BucketName: !Ref ConfigArchiveBucketName
       KeyArn: !Ref LogArchiveKeyArn
       IsHomeRegion: !Ref IsHomeRegion
       DeliveryFrequency: !Ref DeliveryFrequency

@@ -145,6 +145,33 @@ fi
 
 # Instances are separate from the set. Creating the set defines the template;
 # creating instances is what actually deploys anything.
+#
+# But update-stack-set ALSO redeploys to every existing instance. Calling
+# create-stack-instances straight afterwards collides with that operation —
+# OperationInProgressException — and the collision looks like a failure when
+# the update is in fact doing the work. So only create instances that are not
+# already there.
+EXISTING_INSTANCES="$(aws cloudformation list-stack-instances --stack-set-name "${NAME}"   --query 'length(Summaries)' --output text 2>/dev/null | no_cr || echo 0)"
+
+if [[ "${EXISTING_INSTANCES}" != "0" && -n "${EXISTS}" ]]; then
+  skip "${EXISTING_INSTANCES} instance(s) already exist; the stack set update redeploys to them"
+  info "Waiting for the update to complete"
+  for _ in $(seq 1 80); do
+    STATUS="$(aws cloudformation list-stack-set-operations --stack-set-name "${NAME}"       --query 'Summaries[0].Status' --output text 2>/dev/null | no_cr)"
+    case "${STATUS}" in
+      SUCCEEDED) ok "operation SUCCEEDED"; break ;;
+      FAILED|STOPPED) warn "operation ${STATUS}"; break ;;
+      *) printf '  %s ...
+' "${STATUS}"; sleep 15 ;;
+    esac
+  done
+  hr
+  log "Stack instances:"
+  aws cloudformation list-stack-instances --stack-set-name "${NAME}"     --query 'Summaries[].[Account,Region,Status,StatusReason]' --output text 2>/dev/null     | no_cr | cut -c1-140 | sed 's/^/  /'
+  hr
+  exit 0
+fi
+
 info "Creating stack instances in ${OU}"
 OP_ID="$(aws cloudformation create-stack-instances \
   --stack-set-name "${NAME}" \

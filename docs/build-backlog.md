@@ -13,6 +13,47 @@ asked for yet.
 
 ---
 
+## B-006 · Config archive is not immutable
+
+**Established** — 2026-09-17. **AWS Config cannot deliver to an S3 bucket with
+Object Lock enabled.** Proved by elimination: `PutDeliveryChannel` failed
+against the locked bucket with every condition stripped from the bucket policy,
+and succeeded immediately against an identical scratch bucket whose only
+difference was Object Lock. Object Lock requires `Content-MD5` on `PutObject`;
+Config does not send it. No error message says any of this — the failure is
+`InsufficientDeliveryPolicyException`, which points at the policy.
+
+**Consequence** — design doc 02 wants an immutable log destination AND wants
+Config delivering to it. Those are mutually exclusive, so the archive splits:
+
+| Destination | Contents | Guarantee |
+|---|---|---|
+| `altdig-log-archive-<acct>` | CloudTrail | Object Lock COMPLIANCE, 2190 days |
+| `altdig-config-archive-<acct>` | Config | Versioned, delete-denied, **not immutable** |
+
+**What is actually missing** — the Config bucket denies `DeleteObject` and
+`DeleteObjectVersion` to every principal except the platform deployment roles,
+which is the same control the locked bucket has. The gap is the guarantee that
+survives a *compromised platform role*. Object Lock holds against any principal
+including account root; a bucket policy does not, because whoever can change
+the policy can remove the deny.
+
+**Partially mitigated** — Config is not the only copy. The Config aggregator in
+the Audit account holds queryable configuration history independently of S3,
+with its own retention.
+
+**The route to genuine immutability** — S3 Replication from the Config bucket
+into a locked destination. Replication CAN write to an Object Lock bucket where
+Config cannot. Costs replication charges plus a delivery delay, and doubles
+storage. Worth doing if an auditor challenges the asymmetry, or before a
+tenant whose framework demands immutable configuration history.
+
+**Decide before** — the first HIPAA or PCI tenant is vested, since that is when
+someone asks what "immutable evidence" covers and the honest answer is
+"CloudTrail, not Config".
+
+---
+
 ## B-001 · SCP policy 01 is close to the 5,120-byte quota
 
 **Observed** — 2026-09-17. `01-protect-detective-controls.json` is **4,983 of
