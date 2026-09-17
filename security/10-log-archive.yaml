@@ -246,11 +246,22 @@ Resources:
   # Object Lock. Object Lock requires Content-MD5 on PutObject and Config does
   # not send it.
   #
+  # This is not a Config quirk. VPC Flow Logs fails against the same bucket with
+  # "LogDestination: <bucket> is undeliverable". The rule generalises:
+  #
+  #   AWS log delivery services cannot write to an Object Lock bucket.
+  #   CloudTrail is the exception, because it sends Content-MD5.
+  #
   # Design doc 02 asks for an immutable log destination AND for Config to
   # deliver there. Those are mutually exclusive, so the archive splits:
   #
-  #   CloudTrail -> locked bucket    COMPLIANCE, genuinely immutable
-  #   Config     -> this bucket      versioned, delete-denied, NOT immutable
+  #   CloudTrail          -> locked bucket   COMPLIANCE, genuinely immutable
+  #   Config, flow logs   -> this bucket     versioned, delete-denied,
+  #                                          NOT immutable
+  #
+  # The name says 'config-archive' and it now also holds flow logs. The name is
+  # narrower than the role; renaming means a new bucket and a migration, which
+  # is not worth it for a label. Treat it as "everything Object Lock refuses".
   #
   # The difference is real and should not be papered over. What narrows it:
   #
@@ -332,27 +343,6 @@ Resources:
                   - 'arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*'
                   - 'arn:aws:sts::*:assumed-role/stacksets-exec-*/*'
 
-          # VPC flow log delivery. Absent until now, which is why the first
-          # flow log deployment failed — the bucket policy admitted CloudTrail
-          # and Config and nothing else.
-          - Sid: FlowLogsCheckAcl
-            Effect: Allow
-            Principal: { Service: delivery.logs.amazonaws.com }
-            Action: [ 's3:GetBucketAcl', 's3:ListBucket' ]
-            Resource: !GetAtt LogArchiveBucket.Arn
-            Condition:
-              StringEquals:
-                'aws:SourceOrgID': !Ref OrganizationId
-
-          - Sid: FlowLogsWrite
-            Effect: Allow
-            Principal: { Service: delivery.logs.amazonaws.com }
-            Action: 's3:PutObject'
-            Resource: !Sub '${LogArchiveBucket.Arn}/AWSLogs/*'
-            Condition:
-              StringEquals:
-                'aws:SourceOrgID': !Ref OrganizationId
-
           - Sid: ConfigCheckAcl
             Effect: Allow
             Principal: { Service: config.amazonaws.com }
@@ -370,6 +360,100 @@ Resources:
             Condition:
               StringEquals:
                 'aws:SourceOrgID': !Ref OrganizationId
+
+  # -------------------------------------------------------------------------
+  # Flow log archive — a THIRD bucket
+  # -------------------------------------------------------------------------
+  # VPC Flow Logs would not deliver to either existing bucket:
+  # "LogDestination: <bucket> is undeliverable", against the locked bucket AND
+  # against the non-locked Config archive.
+  #
+  # The cause was not isolated. A bare probe bucket with AWS's documented
+  # flow-log policy worked immediately, and stayed working as each suspected
+  # difference was added back to it one at a time — SSE-KMS with the platform
+  # key, DenyInsecureTransport, a delete-deny conditioned on aws:PrincipalArn,
+  # and versioning. All four were exonerated. Something in the accumulated
+  # Config-archive policy is responsible and it was not worth more bisection to
+  # find out which.
+  #
+  # A dedicated bucket is the better answer regardless. The Config archive had
+  # grown statements for Config and then flow logs, and the locked bucket for
+  # CloudTrail and then flow logs; each addition risks the previous one, and a
+  # policy serving three delivery services is a policy nobody can reason about.
+  # One bucket per delivery service, each with the minimal documented policy.
+  #
+  # Modelled exactly on the configuration proved to work, not on what ought to.
+  FlowLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-flow-logs-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref LogArchiveKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # Flow logs are voluminous and their value is operational — tracing an
+          # incident — not evidentiary. Shorter retention than the audit trail.
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: !Ref TransitionToGlacierDays
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: flow-logs }
+        - { Key: Immutable,        Value: 'false' }
+
+  FlowLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FlowLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt FlowLogBucket.Arn
+              - !Sub '${FlowLogBucket.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': false }
+
+          # AWS's documented flow-log grants, verbatim. The ACL condition is
+          # kept because it is what the working probe carried; removing it was
+          # not tested and this is not the place to find out.
+          - Sid: AWSLogDeliveryAclCheck
+            Effect: Allow
+            Principal: { Service: delivery.logs.amazonaws.com }
+            Action: 's3:GetBucketAcl'
+            Resource: !GetAtt FlowLogBucket.Arn
+
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal: { Service: delivery.logs.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub '${FlowLogBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
 
   LogArchiveBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -478,6 +562,10 @@ Outputs:
   ConfigBucketName:
     Description: Config archive bucket name (versioned, NOT Object Lock)
     Value: !Ref ConfigArchiveBucket
+
+  FlowLogBucketName:
+    Description: Flow log bucket name (versioned, NOT Object Lock)
+    Value: !Ref FlowLogBucket
 
   BucketArn:
     Description: Log archive bucket ARN

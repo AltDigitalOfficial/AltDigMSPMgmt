@@ -201,6 +201,54 @@ health checks) and a generic scaffold would be rebuilt anyway.
 
 ---
 
+## B-012 · VPC flow log delivery to S3 fails — UNRESOLVED
+
+**Status** — blocking flow logs only. `EnableFlowLogs` defaults to `false` in
+`baseline/40-network.yaml` so the VPC deploys without them. **The network
+baseline has no flow logs.**
+
+**Symptom** — every attempt returns
+`LogDestination: <bucket> is undeliverable`, from CloudFormation and from a
+direct `create-flow-logs` call alike. The message names nothing useful.
+
+**What was ruled out**, each tested individually against a bare probe bucket
+that worked, by adding the suspected difference back and confirming delivery
+still succeeded:
+
+| Suspected cause | Verdict |
+|---|---|
+| S3 Object Lock | not it — fails against non-locked buckets too |
+| SSE-KMS with the platform key | not it — probe worked with it |
+| `DenyInsecureTransport` | not it |
+| Delete-deny conditioned on `aws:PrincipalArn` | not it |
+| Bucket versioning | not it |
+| `aws:SourceOrgID` on the bucket grants | not it |
+| `aws:SourceOrgID` on the KMS grant | not it |
+| The `AWSLogs/` prefix in the destination | real, and fixed — but not the cause of this |
+
+**What is known to work** — a bucket created by `aws s3api create-bucket` with
+AWS's documented two-statement flow-log policy, SSE-S3 or SSE-KMS, versioning
+on, and a delete-deny. It accepted flow logs immediately and kept accepting
+them as each difference was added.
+
+**What does not work** — a CloudFormation-created bucket with the same policy
+and the same settings. That is the part that makes no sense yet, and it is
+where the next session should start: diff the two buckets exhaustively with
+`get-bucket-*` across every sub-resource, rather than reasoning about which
+difference ought to matter. Candidates not yet compared: `ObjectOwnership`,
+the public access block, bucket ACL, and ownership controls.
+
+**Cost of the gap** — flow logs are how design doc 11 distinguishes "instance
+alive, telemetry silent" from an instance that is simply off. Without them that
+diagnosis is unavailable, and so is most network-level incident reconstruction.
+Not blocking for vesting, but it should not reach a production tenant unsolved.
+
+**Time spent** — considerable, and the bisection was the wrong approach once
+the third hypothesis failed. Diffing the working and broken artifacts directly
+would have been faster than reasoning about them one property at a time.
+
+---
+
 ## B-001 · SCP policy 01 is close to the 5,120-byte quota
 
 **Observed** — 2026-09-17. `01-protect-detective-controls.json` is **4,983 of

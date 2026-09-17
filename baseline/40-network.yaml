@@ -93,9 +93,25 @@ Parameters:
       pipeline. Accounts never peer, so overlap between accounts is harmless —
       but distinct ranges keep flow logs readable during an incident.
 
-  LogArchiveBucketName:
+  EnableFlowLogs:
     Type: String
-    Description: Flow log destination in the Log Archive account.
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Default FALSE because flow log delivery to S3 is currently BROKEN and
+      unresolved — see B-012. Every attempt returns "LogDestination: <bucket>
+      is undeliverable" against three different buckets, including one built to
+      match a bare probe bucket that worked. Leaving this on would fail every
+      deployment of the network baseline, so the VPC ships without flow logs
+      rather than not shipping.
+
+  FlowLogBucketName:
+    Type: String
+    Description: >-
+      Flow log destination in the Log Archive account. This is the NON-LOCKED
+      archive, not the CloudTrail one: VPC Flow Logs cannot deliver to a bucket
+      with Object Lock enabled — "LogDestination: <bucket> is undeliverable" —
+      exactly as AWS Config cannot. See security/10-log-archive.yaml.
     MinLength: 3
 
   ForensicsAccountId:
@@ -110,6 +126,7 @@ Parameters:
 Conditions:
   HasForensics:  !Not [!Equals [!Ref ForensicsAccountId, '']]
   WantSecondAz:  !Equals [!Ref MultiAz, 'true']
+  WantFlowLogs:  !Equals [!Ref EnableFlowLogs, 'true']
 
 Resources:
 
@@ -313,6 +330,7 @@ Resources:
   # losing them costs a diagnosis.
   FlowLog:
     Type: AWS::EC2::FlowLog
+    Condition: WantFlowLogs
     Properties:
       ResourceType: VPC
       ResourceId: !Ref Vpc
@@ -322,7 +340,7 @@ Resources:
       # rejects a destination containing it —
       # "LogDestination prefix contains characters 'AWSLogs/' that are not
       # allowed." Objects land at <bucket>/AWSLogs/<account>/vpcflowlogs/...
-      LogDestination: !Sub 'arn:${AWS::Partition}:s3:::${LogArchiveBucketName}'
+      LogDestination: !Sub 'arn:${AWS::Partition}:s3:::${FlowLogBucketName}'
       MaxAggregationInterval: 60
       Tags:
         - { Key: platform-managed, Value: 'true' }
