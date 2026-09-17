@@ -252,6 +252,17 @@ client-conversation event class, with notification rules rather than paging
 rules. Doc 13 repeats it in the onboarding task set. So this is scoped work
 that happens to also be a demonstration asset, which is the good case.
 
+**Live state, 2026-09-17** — alert grouping is **off** on the platform service
+(`alert_grouping_type = "none"`). Recorded here because `terraform.tfvars` is
+gitignored, so the repository otherwise shows a default of `intelligent` that
+is not what is running and cannot run on this account.
+
+The cost of `none` is bounded but real: a flapping alarm raises an incident per
+evaluation cycle rather than one incident. Acceptable while nothing generates
+alarms; worth revisiting before the first tenant. `content_based` may work on
+this tier — it was not tested, so that is an open question rather than a known
+limitation.
+
 **Two things that must be true before it is worth building:**
 
 1. **Tier.** Business services are a Business / Digital Operations feature.
