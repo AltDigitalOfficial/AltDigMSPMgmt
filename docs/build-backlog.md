@@ -146,6 +146,61 @@ to auditors is the product.
 
 ---
 
+## B-010 · The `locked` egress profile is not implemented
+
+**Status** — deliberately **not selectable**. `AllowedValues` on
+`baseline/40-network.yaml` offers only `controlled` and `public-facing`.
+
+**Why it is blocked rather than half-built.** The locked profile routes
+`0.0.0.0/0` at a Network Firewall endpoint instead of NAT, so every egress
+passes a domain allow-list. Without the firewall, selecting `locked` would
+produce private subnets with **no default route at all**: no egress, no Session
+Manager, no log delivery. A broken VPC wearing the name of a security profile
+is worse than an option that is honestly absent — someone would select it,
+observe that nothing reached the internet, and reasonably conclude the control
+was working.
+
+**What implementing it requires**, all in one change:
+
+- an `AWS::NetworkFirewall::Firewall` with dedicated firewall subnets per AZ
+- a firewall policy and a stateful rule group carrying the domain allow-list
+- the private default route pointed at the firewall's VPC endpoint
+- a return route so firewall-inspected traffic reaches the internet gateway
+- re-adding `locked` to `AllowedValues` in the same commit
+
+**Cost is the reason this is not urgent.** Network Firewall is roughly **$288
+per endpoint per AZ per month** — about $576/month for a multi-AZ account,
+before any data processing. A multi-AZ locked account runs near $700/month in
+networking alone.
+
+That makes the locked profile a deliberate, **priced** decision per tenant
+rather than a default anyone drifts into. Design doc 02 lists it for
+"internal-only apps, high-sensitivity data"; design doc 10 treats egress
+profile as a vesting parameter. It belongs in the commercial conversation
+before it belongs in a template.
+
+**Build when** — a tenant's questionnaire 3.2 answer requires it and the cost
+has been priced into their contract.
+
+---
+
+## B-011 · Public-facing ingress scaffolding not built
+
+`public-facing` is selectable and currently behaves identically to
+`controlled`: NAT egress, no ingress scaffolding. Design doc 02 expects public
+accounts to terminate at CloudFront and/or ALB with AWS WAF, Shield Standard by
+default.
+
+Less dangerous than B-010 — the profile produces a working VPC, just without
+the ingress path — but an account tagged `public-facing` that has no WAF is a
+misleading label. The tag currently records intent, not configuration.
+
+**Build with** the first tenant that actually serves public traffic, since ALB
+and CloudFront configuration is application-shaped (certificates, origins,
+health checks) and a generic scaffold would be rebuilt anyway.
+
+---
+
 ## B-001 · SCP policy 01 is close to the 5,120-byte quota
 
 **Observed** — 2026-09-17. `01-protect-detective-controls.json` is **4,983 of

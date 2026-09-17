@@ -1,0 +1,492 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — VPC baseline with three egress profiles,
+  flow logs, VPC endpoints and a pre-staged isolation security group. Part of
+  the member baseline, deployed per account by StackSet with per-account
+  parameter overrides.
+
+# ---------------------------------------------------------------------------
+# One template, three profiles, per-account overrides
+# ---------------------------------------------------------------------------
+# Egress posture is a property of the ACCOUNT, selected at vesting (design doc
+# 02), so it cannot be a StackSet-wide parameter — those are uniform across
+# every instance. It is supplied per account via
+# create-stack-instances --parameter-overrides, which is the mechanism that
+# lets one StackSet express three profiles.
+#
+#   locked          explicit domain allow-list via Network Firewall, default
+#                   deny. Internal-only apps, high-sensitivity data.
+#   controlled      NAT with restricted routing, logged, broad but not open.
+#                   THE DEFAULT.
+#   public-facing   permissive egress; ingress via ALB/CloudFront/WAF.
+#
+# The value of the profile is not the routing. It is being able to tell an
+# auditor "this account runs profile X, here is what that means" instead of
+# reasoning about route tables one at a time.
+#
+# ---------------------------------------------------------------------------
+# What is deliberately absent
+# ---------------------------------------------------------------------------
+# No VPC peering. No Transit Gateway. No private connectivity of any kind
+# between member accounts. If one application calls another it does so over the
+# public internet against a published API endpoint, exactly as it would call any
+# third-party SaaS. This keeps the isolation story identical to the account
+# story, and adding a single peering connection later would quietly undo it.
+#
+# No bastions and no VPN. Engineer access to instances is Systems Manager
+# Session Manager: no inbound ports, no SSH keys, no jump hosts. That is why the
+# SSM interface endpoints below are not optional — without them Session Manager
+# either fails or is forced out through NAT.
+#
+# ---------------------------------------------------------------------------
+# Cost, because this is the most expensive template in the baseline
+# ---------------------------------------------------------------------------
+# Per account per month, roughly:
+#
+#   NAT Gateway            ~$32 each, plus data processing
+#   Interface endpoints    ~$7.30 each PER AZ
+#   Network Firewall       ~$288 PER ENDPOINT PER AZ   <- the locked profile
+#
+# A single-AZ dev account on the controlled profile runs about $60/month before
+# any workload. A multi-AZ production account is about $120. A multi-AZ LOCKED
+# account is about $700, nearly all of it Network Firewall.
+#
+# The locked profile should be a deliberate, priced decision per tenant, not a
+# default anyone drifts into. Design doc 10 treats egress profile as a vesting
+# parameter; this is why it also belongs in the commercial conversation.
+
+Parameters:
+
+  EgressProfile:
+    Type: String
+    Default: controlled
+    # 'locked' is NOT selectable. Network Firewall is not built yet, and
+    # without it the locked path produces private subnets with no default route
+    # at all — no egress, no Session Manager, no log delivery. That is a broken
+    # VPC wearing the name of a security profile, which is worse than an
+    # honestly absent option.
+    #
+    # Re-add 'locked' in the same change that adds the firewall, its policy,
+    # its dedicated subnets and the route that points 0.0.0.0/0 at the firewall
+    # endpoint. See B-010.
+    AllowedValues: [controlled, public-facing]
+    Description: >-
+      Egress posture for this account (questionnaire 3.2). 'locked' is
+      deliberately absent until Network Firewall is implemented — see B-010.
+
+  MultiAz:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      True for production, false for dev, test and UAT. Design doc 02: only
+      production is multi-AZ. UAT is deliberately single-AZ despite being in
+      compliance scope — it splits data handling from resilience.
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    AllowedPattern: '^10\.[0-9]{1,3}\.0\.0/16$'
+    Description: >-
+      /16 from RFC1918 10.0.0.0/8. Allocated per account by the vesting
+      pipeline. Accounts never peer, so overlap between accounts is harmless —
+      but distinct ranges keep flow logs readable during an incident.
+
+  LogArchiveBucketName:
+    Type: String
+    Description: Flow log destination in the Log Archive account.
+    MinLength: 3
+
+  ForensicsAccountId:
+    Type: String
+    Default: ''
+    Description: >-
+      Forensics account, permitted to reach isolated instances for evidence
+      collection. Empty until the Forensics account exists (phase 7); the
+      isolation group is created either way, because retrofitting it during an
+      incident is not possible.
+
+Conditions:
+  HasForensics:  !Not [!Equals [!Ref ForensicsAccountId, '']]
+  WantSecondAz:  !Equals [!Ref MultiAz, 'true']
+
+Resources:
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      # Required for interface endpoints to resolve to private addresses.
+      # Without it, SSM traffic resolves publicly and leaves through NAT,
+      # defeating the endpoints entirely.
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub 'platform-${EgressProfile}' }
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: EgressProfile, Value: !Ref EgressProfile }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # --- subnets -------------------------------------------------------------
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 8, 12]]
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: platform-public-a }
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Tier, Value: public }
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [4, !Cidr [!Ref VpcCidr, 8, 12]]
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - { Key: Name, Value: platform-private-a }
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Tier, Value: private }
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: WantSecondAz
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 8, 12]]
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: platform-public-b }
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Tier, Value: public }
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: WantSecondAz
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [5, !Cidr [!Ref VpcCidr, 8, 12]]
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - { Key: Name, Value: platform-private-b }
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Tier, Value: private }
+
+  # --- egress --------------------------------------------------------------
+
+  NatEipA:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  NatEipB:
+    Type: AWS::EC2::EIP
+    Condition: WantSecondAz
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  # A NAT gateway per AZ, not one shared. A shared NAT makes the other AZ's
+  # egress depend on the first AZ surviving, which converts a single-AZ event
+  # into a multi-AZ outage — the precise thing multi-AZ is bought to avoid.
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Condition: WantSecondAz
+    Properties:
+      AllocationId: !GetAtt NatEipB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  # --- routing -------------------------------------------------------------
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: platform-public }
+        - { Key: platform-managed, Value: 'true' }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: WantSecondAz
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: platform-private-a }
+        - { Key: platform-managed, Value: 'true' }
+
+  # When the locked profile lands, this route points at the firewall endpoint
+  # instead of NAT, so nothing reaches the internet without passing an
+  # allow-list. Until then every selectable profile routes through NAT.
+  PrivateDefaultRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Condition: WantSecondAz
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: platform-private-b }
+        - { Key: platform-managed, Value: 'true' }
+
+  PrivateDefaultRouteB:
+    Type: AWS::EC2::Route
+    Condition: WantSecondAz
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: WantSecondAz
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
+
+  # --- flow logs -----------------------------------------------------------
+  # Straight to the Log Archive bucket rather than via CloudWatch Logs: cheaper
+  # at volume, and it puts flow logs in the same immutable destination as the
+  # audit trail. Flow logs are how "instance alive, telemetry silent" is
+  # distinguished during a telemetry-gap investigation (design doc 11), so
+  # losing them costs a diagnosis.
+  FlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceId: !Ref Vpc
+      TrafficType: ALL
+      LogDestinationType: s3
+      # No AWSLogs/ prefix: VPC Flow Logs builds that hierarchy itself and
+      # rejects a destination containing it —
+      # "LogDestination prefix contains characters 'AWSLogs/' that are not
+      # allowed." Objects land at <bucket>/AWSLogs/<account>/vpcflowlogs/...
+      LogDestination: !Sub 'arn:${AWS::Partition}:s3:::${LogArchiveBucketName}'
+      MaxAggregationInterval: 60
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  # --- isolation security group --------------------------------------------
+  # Created in every VPC, attached to nothing, ready for incident use.
+  #
+  # Design doc 07: containment applies this group to a compromised instance so
+  # that the instance STAYS RUNNING and only its reachability changes —
+  # terminating it would destroy the evidence needed to understand what
+  # happened. Retrofitting this during an incident is not possible, which is
+  # why it is provisioned on day one and left unattached.
+  #
+  # It deliberately has NO ingress rules and exactly one egress rule: the
+  # Forensics account collection path. Until the Forensics account exists there
+  # is no egress rule at all, which is correct — fully isolated is the safe
+  # default and a partially isolated instance is worse than either extreme.
+  IsolationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: platform-isolation
+      GroupDescription: >-
+        Incident containment. Applied by automation to isolate a compromised
+        instance while keeping it running for evidence collection. Attached to
+        nothing in normal operation. Do not modify by hand.
+      VpcId: !Ref Vpc
+      # No SecurityGroupIngress at all: nothing may reach an isolated instance.
+      SecurityGroupEgress:
+        - Description: Deny-all placeholder; replaced when Forensics exists
+          IpProtocol: '-1'
+          CidrIp: 127.0.0.1/32
+      Tags:
+        - { Key: Name, Value: platform-isolation }
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose, Value: incident-containment }
+
+  # Egress to the Forensics account's collection endpoint, added only once that
+  # account exists. HTTPS only.
+  IsolationForensicsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: HasForensics
+    Properties:
+      GroupId: !Ref IsolationSecurityGroup
+      Description: Forensics collection path
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+
+  # --- VPC endpoints -------------------------------------------------------
+  # Keeps platform traffic off NAT. Two reasons, and the second is the one that
+  # matters:
+  #
+  #   cost      NAT charges per GB processed. SSM, CloudWatch Logs and S3 are
+  #             the chattiest things in a baselined account.
+  #   control   on the LOCKED profile everything egressing passes a domain
+  #             allow-list. Without endpoints, Session Manager and log delivery
+  #             would have to be allow-listed as internet destinations, which
+  #             widens the hole the profile exists to close.
+  #
+  # S3 is a GATEWAY endpoint: free, route-table based. The rest are INTERFACE
+  # endpoints at roughly $7.30 per AZ per month each, which is why the list is
+  # the minimum that keeps the baseline working rather than every service that
+  # offers one.
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: platform-vpc-endpoints
+      GroupDescription: HTTPS from inside the VPC to interface endpoints
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: HTTPS from within the VPC only
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds: !If
+        - WantSecondAz
+        - [!Ref PrivateRouteTableA, !Ref PrivateRouteTableB]
+        - [!Ref PrivateRouteTableA]
+
+  # Session Manager needs all three of ssm, ssmmessages and ec2messages. Miss
+  # one and sessions fail with an error that names none of them — and since
+  # Session Manager is the ONLY engineer access path in this architecture
+  # (no bastions, no VPN, no SSH), that is a total loss of access to the
+  # instance rather than an inconvenience.
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      SubnetIds: !If
+        - WantSecondAz
+        - [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+        - [!Ref PrivateSubnetA]
+
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      SubnetIds: !If
+        - WantSecondAz
+        - [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+        - [!Ref PrivateSubnetA]
+
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      SubnetIds: !If
+        - WantSecondAz
+        - [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+        - [!Ref PrivateSubnetA]
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      SubnetIds: !If
+        - WantSecondAz
+        - [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+        - [!Ref PrivateSubnetA]
+
+Outputs:
+
+  VpcId:
+    Description: Platform VPC
+    Value: !Ref Vpc
+
+  EgressProfileOut:
+    Description: Egress profile this account runs
+    Value: !Ref EgressProfile
+
+  IsolationSecurityGroupId:
+    Description: Pre-staged isolation group for incident containment
+    Value: !Ref IsolationSecurityGroup
+
+  PrivateSubnets:
+    Description: Private subnets
+    Value: !If
+      - WantSecondAz
+      - !Sub '${PrivateSubnetA},${PrivateSubnetB}'
+      - !Ref PrivateSubnetA

@@ -332,6 +332,27 @@ Resources:
                   - 'arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*'
                   - 'arn:aws:sts::*:assumed-role/stacksets-exec-*/*'
 
+          # VPC flow log delivery. Absent until now, which is why the first
+          # flow log deployment failed — the bucket policy admitted CloudTrail
+          # and Config and nothing else.
+          - Sid: FlowLogsCheckAcl
+            Effect: Allow
+            Principal: { Service: delivery.logs.amazonaws.com }
+            Action: [ 's3:GetBucketAcl', 's3:ListBucket' ]
+            Resource: !GetAtt LogArchiveBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
+
+          - Sid: FlowLogsWrite
+            Effect: Allow
+            Principal: { Service: delivery.logs.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogArchiveBucket.Arn}/AWSLogs/*'
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
+
           - Sid: ConfigCheckAcl
             Effect: Allow
             Principal: { Service: config.amazonaws.com }
