@@ -15,11 +15,23 @@ Description: >-
 # create-stack-instances --parameter-overrides, which is the mechanism that
 # lets one StackSet express three profiles.
 #
-#   locked          explicit domain allow-list via Network Firewall, default
-#                   deny. Internal-only apps, high-sensitivity data.
+#   isolated        NO egress at all. VPC endpoints reach AWS services; nothing
+#                   reaches the internet. CHEAPEST and STRONGEST.
 #   controlled      NAT with restricted routing, logged, broad but not open.
 #                   THE DEFAULT.
+#   dns-filtered    NAT plus Route 53 Resolver DNS Firewall. Domain blocking at
+#                   resolution time for roughly 2% of a Network Firewall.
 #   public-facing   permissive egress; ingress via ALB/CloudFront/WAF.
+#   locked          Network Firewall with an L7 allow-list. NOT IMPLEMENTED —
+#                   see B-010 and docs/isolation-tiers.md.
+#
+# 'isolated' is listed first because it is the option design doc 02's own
+# description implies and the original three profiles did not offer. Doc 02
+# describes the locked profile as being for "internal-only apps,
+# high-sensitivity data" — and if an application is genuinely internal-only, an
+# egress allow-list is answering a question that should not arise. No NAT means
+# there is no list to get wrong, no rule to drift, and no appliance to pay for.
+# It costs LESS than controlled.
 #
 # The value of the profile is not the routing. It is being able to tell an
 # auditor "this account runs profile X, here is what that means" instead of
@@ -61,19 +73,13 @@ Parameters:
   EgressProfile:
     Type: String
     Default: controlled
-    # 'locked' is NOT selectable. Network Firewall is not built yet, and
-    # without it the locked path produces private subnets with no default route
-    # at all — no egress, no Session Manager, no log delivery. That is a broken
-    # VPC wearing the name of a security profile, which is worse than an
-    # honestly absent option.
-    #
-    # Re-add 'locked' in the same change that adds the firewall, its policy,
-    # its dedicated subnets and the route that points 0.0.0.0/0 at the firewall
-    # endpoint. See B-010.
-    AllowedValues: [controlled, public-facing]
+    # 'locked' remains absent until Network Firewall is implemented (B-010).
+    # Without it that path produces private subnets with no default route at
+    # all, which is a broken VPC wearing the name of a security profile.
+    AllowedValues: [isolated, controlled, dns-filtered, public-facing]
     Description: >-
-      Egress posture for this account (questionnaire 3.2). 'locked' is
-      deliberately absent until Network Firewall is implemented — see B-010.
+      Egress posture for this account (questionnaire 3.2). See
+      docs/isolation-tiers.md for the cost and the client conversation.
 
   MultiAz:
     Type: String
@@ -114,6 +120,24 @@ Parameters:
       exactly as AWS Config cannot. See security/10-log-archive.yaml.
     MinLength: 3
 
+  BlockedDomains:
+    Type: CommaDelimitedList
+    Default: '*.bit,*.onion,*.top'
+    Description: >-
+      dns-filtered profile only. Domains blocked at resolution.
+      The default is a deliberately small starting set of TLDs with poor
+      reputation and little legitimate business use, NOT a threat feed.
+      .bit is blockchain DNS and a common C2 channel; .onion should never
+      resolve from an AWS workload at all.
+
+      The real value is in AWS's MANAGED domain lists —
+      AWSManagedDomainsMalwareDomainList and
+      AWSManagedDomainsBotnetCommandandControl — which are maintained by AWS
+      and cost nothing extra. They are referenced by an ID that differs per
+      region, so they need a lookup rather than a literal and are not wired in
+      yet. Add them before this profile is sold to anyone as malware
+      protection; on its own this list is close to decorative.
+
   ForensicsAccountId:
     Type: String
     Default: ''
@@ -127,6 +151,13 @@ Conditions:
   HasForensics:  !Not [!Equals [!Ref ForensicsAccountId, '']]
   WantSecondAz:  !Equals [!Ref MultiAz, 'true']
   WantFlowLogs:  !Equals [!Ref EnableFlowLogs, 'true']
+  # 'isolated' has no NAT gateway, no elastic IP and no default route out of
+  # the private subnets. That is the entire implementation of the profile.
+  WantNat:       !Not [!Equals [!Ref EgressProfile, 'isolated']]
+  WantNatAzB: !And
+    - !Equals [!Ref MultiAz, 'true']
+    - !Not [!Equals [!Ref EgressProfile, 'isolated']]
+  WantDnsFirewall: !Equals [!Ref EgressProfile, 'dns-filtered']
 
 Resources:
 
@@ -209,6 +240,7 @@ Resources:
   # --- egress --------------------------------------------------------------
 
   NatEipA:
+    Condition: WantNat
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
@@ -216,6 +248,7 @@ Resources:
         - { Key: platform-managed, Value: 'true' }
 
   NatGatewayA:
+    Condition: WantNat
     Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt NatEipA.AllocationId
@@ -225,7 +258,7 @@ Resources:
 
   NatEipB:
     Type: AWS::EC2::EIP
-    Condition: WantSecondAz
+    Condition: WantNatAzB
     Properties:
       Domain: vpc
       Tags:
@@ -236,7 +269,7 @@ Resources:
   # into a multi-AZ outage — the precise thing multi-AZ is bought to avoid.
   NatGatewayB:
     Type: AWS::EC2::NatGateway
-    Condition: WantSecondAz
+    Condition: WantNatAzB
     Properties:
       AllocationId: !GetAtt NatEipB.AllocationId
       SubnetId: !Ref PublicSubnetB
@@ -286,6 +319,7 @@ Resources:
   # instead of NAT, so nothing reaches the internet without passing an
   # allow-list. Until then every selectable profile routes through NAT.
   PrivateDefaultRouteA:
+    Condition: WantNat
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PrivateRouteTableA
@@ -309,7 +343,7 @@ Resources:
 
   PrivateDefaultRouteB:
     Type: AWS::EC2::Route
-    Condition: WantSecondAz
+    Condition: WantNatAzB
     Properties:
       RouteTableId: !Ref PrivateRouteTableB
       DestinationCidrBlock: 0.0.0.0/0
@@ -342,6 +376,62 @@ Resources:
       # allowed." Objects land at <bucket>/AWSLogs/<account>/vpcflowlogs/...
       LogDestination: !Sub 'arn:${AWS::Partition}:s3:::${FlowLogBucketName}'
       MaxAggregationInterval: 60
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  # --- DNS firewall (dns-filtered profile) ---------------------------------
+  # Route 53 Resolver DNS Firewall blocks at name resolution, before a
+  # connection is attempted. It catches the large majority of command-and-
+  # control and data-exfiltration paths, because almost everything resolves a
+  # name first.
+  #
+  # What it does NOT do, stated plainly so nobody oversells it to an auditor:
+  # no traffic inspection, no TLS SNI filtering, and nothing at all against a
+  # connection made to a hard-coded IP address. It is not equivalent to
+  # Network Firewall.
+  #
+  # It costs roughly $1 per rule group per month plus $0.60 per million
+  # queries — call it $5-10 per account, against $288 per AZ for Network
+  # Firewall. Most of the value at about two percent of the price, which is
+  # why it exists as its own tier rather than as a cheaper 'locked'.
+  DnsBlockList:
+    Type: AWS::Route53Resolver::FirewallDomainList
+    Condition: WantDnsFirewall
+    Properties:
+      Name: !Sub 'platform-blocked-${AWS::AccountId}'
+      Domains: !Ref BlockedDomains
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  DnsFirewallRuleGroup:
+    Type: AWS::Route53Resolver::FirewallRuleGroup
+    Condition: WantDnsFirewall
+    Properties:
+      Name: !Sub 'platform-dns-firewall-${AWS::AccountId}'
+      FirewallRules:
+        - FirewallDomainListId: !Ref DnsBlockList
+          Priority: 100
+          # BLOCK with NODATA rather than NXDOMAIN: NXDOMAIN tells the client
+          # the name does not exist, which some malware treats as a signal to
+          # try its next fallback domain. NODATA is quieter.
+          Action: BLOCK
+          BlockResponse: NODATA
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  DnsFirewallAssociation:
+    Type: AWS::Route53Resolver::FirewallRuleGroupAssociation
+    Condition: WantDnsFirewall
+    Properties:
+      Name: !Sub 'platform-dns-${AWS::AccountId}'
+      FirewallRuleGroupId: !Ref DnsFirewallRuleGroup
+      VpcId: !Ref Vpc
+      Priority: 101
+      # FirewallFailOpen is NOT set, so it defaults to closed: if the firewall
+      # cannot evaluate, resolution fails rather than proceeding unfiltered.
+      # An egress control that fails open is a control that fails exactly when
+      # something is wrong.
+      MutationProtection: ENABLED
       Tags:
         - { Key: platform-managed, Value: 'true' }
 

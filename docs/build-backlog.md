@@ -148,8 +148,32 @@ to auditors is the product.
 
 ## B-010 · The `locked` egress profile is not implemented
 
-**Status** — deliberately **not selectable**. `AllowedValues` on
-`baseline/40-network.yaml` offers only `controlled` and `public-facing`.
+**Status** — still not selectable, but **materially less urgent**. Two new tiers
+now cover most of what `locked` was being asked to do:
+
+| Tier | single-AZ | vs locked |
+|---|---|---|
+| `isolated` — no NAT at all | $29 | 12x cheaper, and stricter |
+| `dns-filtered` — Resolver DNS Firewall | ~$70 | 5x cheaper, ~2% of the appliance cost |
+| `locked` — Network Firewall | $350 | — |
+
+`isolated` is the one that changes the picture. Design doc 02 describes the
+locked profile as being for "internal-only apps, high-sensitivity data" — and
+if an application is genuinely internal-only, removing NAT entirely is both
+stronger than an allow-list and cheaper than the default. There is no list to
+maintain and no rule to drift.
+
+Build `locked` only when a client's framework or contract specifically requires
+L7 egress inspection, and price it at signing. See
+[isolation-tiers.md](isolation-tiers.md).
+
+**Still outstanding for the dns-filtered tier:** it uses a hand-written domain
+list, which is close to decorative. AWS's managed lists —
+`AWSManagedDomainsMalwareDomainList` and
+`AWSManagedDomainsBotnetCommandandControl` — are free and maintained by AWS, but
+are referenced by a region-specific ID that needs a lookup rather than a
+literal. Wire them in before this tier is described to anyone as malware
+protection.
 
 **Why it is blocked rather than half-built.** The locked profile routes
 `0.0.0.0/0` at a Network Firewall endpoint instead of NAT, so every egress
