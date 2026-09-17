@@ -186,6 +186,23 @@ for sp in "${SERVICE_PRINCIPALS[@]}"; do
 done
 hr
 
+# --- 4b. CloudFormation organizations access ------------------------------
+#
+# Distinct from trusted access for member.org.stacksets.cloudformation.amazonaws.com
+# above, and easy to conflate. Trusted access lets StackSets act within the
+# Organization; THIS enables service-managed stack sets specifically. Without
+# it, create-stack-set --permission-model SERVICE_MANAGED fails with
+# "You must enable organizations access to operate a service managed stack set",
+# which does not point at this call.
+
+CFN_ORG_ACCESS="$(aws cloudformation describe-organizations-access --call-as SELF   --query Status --output text 2>/dev/null | no_cr || true)"
+if [[ "${CFN_ORG_ACCESS}" == "ENABLED" ]]; then
+  skip "CloudFormation organizations access already enabled"
+else
+  run "Enable CloudFormation organizations access"     aws cloudformation activate-organizations-access
+fi
+hr
+
 # --- 5. account alias ------------------------------------------------------
 
 CURRENT_ALIAS="$(aws iam list-account-aliases --query 'AccountAliases[0]' \
