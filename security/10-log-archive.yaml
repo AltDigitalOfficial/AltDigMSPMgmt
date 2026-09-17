@@ -114,7 +114,7 @@ Resources:
           # policies/scp/README.md.
           - Sid: EnableIAMPolicyDelegation
             Effect: Allow
-            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
             Action: 'kms:*'
             Resource: '*'
           # aws:PrincipalOrgID does NOT work for a service principal.
@@ -146,7 +146,7 @@ Resources:
             Condition:
               StringLike:
                 'kms:EncryptionContext:aws:cloudtrail:arn':
-                  !Sub 'arn:aws:cloudtrail:*:${ManagementAccountId}:trail/*'
+                  !Sub 'arn:${AWS::Partition}:cloudtrail:*:${ManagementAccountId}:trail/*'
 
           # Config and VPC flow log delivery act on behalf of each member
           # account, so they are scoped by source organization rather than by an
@@ -434,7 +434,7 @@ Resources:
             Resource: !GetAtt LogArchiveBucket.Arn
             Condition:
               StringLike:
-                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:*:${ManagementAccountId}:trail/*'
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cloudtrail:*:${ManagementAccountId}:trail/*'
 
           - Sid: CloudTrailWrite
             Effect: Allow
@@ -445,7 +445,7 @@ Resources:
               StringEquals:
                 's3:x-amz-acl': 'bucket-owner-full-control'
               StringLike:
-                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:*:${ManagementAccountId}:trail/*'
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cloudtrail:*:${ManagementAccountId}:trail/*'
 
 
 Outputs:

@@ -65,6 +65,30 @@ win_path() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
 }
 
+# --- tool discovery --------------------------------------------------------
+#
+# pip --user on Windows installs console scripts to
+# %APPDATA%/Python/PythonXY/Scripts, which is not on PATH by default, and a
+# downloaded binary lands wherever it was put. Rather than require every
+# workstation to fix its PATH — and silently skip validation wherever it has
+# not been fixed — look in the usual places.
+#
+# find_tool <name> -> absolute path on stdout, non-zero if not found
+find_tool() {
+  local name="$1" c
+  if command -v "${name}" >/dev/null 2>&1; then command -v "${name}"; return 0; fi
+  for c in \
+    "${HOME}/.local/bin/${name}.exe" \
+    "${HOME}/.local/bin/${name}" \
+    "${APPDATA:-${HOME}/AppData/Roaming}/Python/Python313/Scripts/${name}.exe" \
+    "${APPDATA:-${HOME}/AppData/Roaming}/Python/Python312/Scripts/${name}.exe" \
+    "${APPDATA:-${HOME}/AppData/Roaming}/Python/Scripts/${name}.exe"
+  do
+    [[ -x "${c}" ]] && { printf '%s' "${c}"; return 0; }
+  done
+  return 1
+}
+
 log()   { printf '%s\n' "$*"; }
 info()  { printf '%s==>%s %s\n' "${C_BLUE}" "${C_RESET}" "$*"; }
 ok()    { printf '%s  ok%s  %s\n' "${C_GREEN}" "${C_RESET}" "$*"; }

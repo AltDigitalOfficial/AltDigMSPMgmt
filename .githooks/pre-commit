@@ -1,40 +1,72 @@
 #!/usr/bin/env bash
 # Pre-commit: validate templates and refuse to commit personal data.
+#
+# This hook FAILS when cfn-lint or cfn-guard are missing. It used to skip them
+# with a warning, which was the wrong behaviour and quietly wrong for a whole
+# session: every commit printed "skipping" and exited zero, so the output looked
+# like validation had run. Fourteen guard rules sat unexecuted against six
+# templates.
+#
+# Skipping is defensible while a tool is genuinely optional. Once it is part of
+# the definition of done, a hook that passes without running it is worse than no
+# hook, because it manufactures confidence.
+#
+# SKIP_VALIDATION=1 git commit  bypasses deliberately and visibly.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+# shellcheck source=/dev/null
+source "${REPO_ROOT}/scripts/lib/common.sh"
 
-# Hard stop: these hold names, emails and phone numbers.
-#
-# Matched as whole lines against an explicit list rather than a pattern, so a
-# new config file is only ever protected by being added here deliberately. A
-# pattern like 'config/*.env' would silently also block platform.env, which is
-# meant to be committed.
-for PROTECTED in config/contacts.env config/identity.env; do
-  if git diff --cached --name-only | grep -qx "${PROTECTED}"; then
-    echo "BLOCKED: ${PROTECTED} contains personal data and must not be committed." >&2
-    echo "         git restore --staged ${PROTECTED}" >&2
-    exit 1
-  fi
-done
-
-CHANGED="$(git diff --cached --name-only --diff-filter=ACM | grep -E '^(org|identity|baseline)/.*\.ya?ml$' || true)"
-[[ -n "${CHANGED}" ]] || exit 0
-
-if command -v cfn-lint >/dev/null 2>&1; then
-  echo "pre-commit: cfn-lint"
-  # shellcheck disable=SC2086
-  (cd "${REPO_ROOT}" && cfn-lint ${CHANGED})
-else
-  echo "pre-commit: cfn-lint not installed — skipping (run scripts/setup-tooling.sh)" >&2
+# Hard stop: contacts.env holds names, emails and phone numbers.
+if git diff --cached --name-only | grep -qx 'config/contacts.env'; then
+  echo "BLOCKED: config/contacts.env contains personal data and must not be committed." >&2
+  echo "         git restore --staged config/contacts.env" >&2
+  exit 1
 fi
 
-if command -v cfn-guard >/dev/null 2>&1; then
+CHANGED="$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -E '^(org|baseline|security)/.*\.ya?ml$' || true)"
+POLICIES="$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -E '^policies/(scp|rcp)/.*\.json$' || true)"
+
+[[ -n "${CHANGED}" || -n "${POLICIES}" ]] || exit 0
+
+if [[ "${SKIP_VALIDATION:-0}" == "1" ]]; then
+  echo "pre-commit: SKIP_VALIDATION=1 — validation deliberately bypassed" >&2
+  exit 0
+fi
+
+if [[ -n "${CHANGED}" ]]; then
+  LINT="$(find_tool cfn-lint)" || {
+    echo "pre-commit: cfn-lint not found. Run scripts/setup-tooling.sh," >&2
+    echo "            or SKIP_VALIDATION=1 git commit to bypass deliberately." >&2
+    exit 1; }
+  GUARD="$(find_tool cfn-guard)" || {
+    echo "pre-commit: cfn-guard not found. Run scripts/setup-tooling.sh," >&2
+    echo "            or SKIP_VALIDATION=1 git commit to bypass deliberately." >&2
+    exit 1; }
+
+  echo "pre-commit: cfn-lint"
+  # shellcheck disable=SC2086
+  (cd "${REPO_ROOT}" && "${LINT}" ${CHANGED})
+
   echo "pre-commit: cfn-guard"
   for t in ${CHANGED}; do
-    (cd "${REPO_ROOT}" && cfn-guard validate \
-      --rules policies/guard --data "${t}" --show-summary fail)
+    (cd "${REPO_ROOT}" && "${GUARD}" validate \
+      --rules "$(win_path "${REPO_ROOT}/policies/guard")" \
+      --data "$(win_path "${REPO_ROOT}/${t}")" --show-summary fail)
   done
-else
-  echo "pre-commit: cfn-guard not installed — skipping (run scripts/setup-tooling.sh)" >&2
+fi
+
+# Policy documents are not CloudFormation; Access Analyzer is what understands
+# them. It needs credentials, so absence of credentials is a skip rather than a
+# failure — unlike the local tools, this one cannot be installed away.
+if [[ -n "${POLICIES}" ]]; then
+  if aws sts get-caller-identity >/dev/null 2>&1; then
+    echo "pre-commit: validate-policies"
+    (cd "${REPO_ROOT}" && bash scripts/validate-policies.sh ${POLICIES})
+  else
+    echo "pre-commit: no AWS credentials — policy validation skipped" >&2
+  fi
 fi

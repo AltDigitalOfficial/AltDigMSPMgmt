@@ -2,7 +2,7 @@
 # Validate every CloudFormation template against policies/guard/.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-command -v cfn-guard >/dev/null 2>&1 \
+TOOL="$(find_tool cfn-guard)" \
   || die "cfn-guard not found. Run scripts/setup-tooling.sh"
 
 # win_path for the same reason as the templates -- see find_templates in
@@ -17,7 +17,7 @@ mapfile -t TEMPLATES < <(find_templates)
 FAILED=0
 for t in "${TEMPLATES[@]}"; do
   info "guard: $(basename "${t}")"
-  if ! cfn-guard validate --rules "${RULES_DIR}" --data "${t}" --show-summary fail; then
+  if ! "${TOOL}" validate --rules "$(win_path "${RULES_DIR}")" --data "$(win_path "${t}")" --show-summary fail; then
     FAILED=1
   fi
 done

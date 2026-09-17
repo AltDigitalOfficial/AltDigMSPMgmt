@@ -121,13 +121,13 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: 's3:PutObject'
-                Resource: !Sub 'arn:aws:s3:::${ConfigArchiveBucketName}/AWSLogs/${AWS::AccountId}/Config/*'
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ConfigArchiveBucketName}/AWSLogs/${AWS::AccountId}/Config/*'
                 Condition:
                   StringEquals:
                     's3:x-amz-acl': 'bucket-owner-full-control'
               - Effect: Allow
                 Action: 's3:GetBucketAcl'
-                Resource: !Sub 'arn:aws:s3:::${ConfigArchiveBucketName}'
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ConfigArchiveBucketName}'
               - Effect: Allow
                 Action: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:DescribeKey']
                 Resource: !Ref LogArchiveKeyArn

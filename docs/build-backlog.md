@@ -95,29 +95,68 @@ production policy update.
 
 ---
 
-## B-002 · cfn-lint and cfn-guard are not installed
+## B-002 · cfn-lint and cfn-guard — CLOSED
 
-**Observed** — every commit so far. The pre-commit hook reports
-`cfn-lint not installed — skipping` and `cfn-guard not installed — skipping`,
-then exits zero.
+**Was** — neither tool installed, so the pre-commit hook printed
+`cfn-lint not installed — skipping` and exited zero on every commit. Fourteen
+guard rules had never executed against six templates. A hook that skips is worse
+than no hook: the output looks like validation ran.
 
-**Why it matters** — a hook that skips silently is worse than no hook, because
-it looks like validation is happening. No template in this repository has ever
-been checked against `policies/guard/baseline.guard`, so those rules are
-unverified — including the ones that would catch an unencrypted bucket or a
-missing `RetentionInDays`.
+**Closed 2026-09-17.** cfn-lint 1.56.3 via `pip --user`, cfn-guard 3.2.1 from
+the GitHub release.
 
-The CloudFormation `ValidateTemplate` API (`scripts/validate.sh`) and IAM
-Access Analyzer (`scripts/validate-policies.sh`) both run and both have caught
-real defects, so this is not a total gap — but neither understands the house
-rules in `baseline.guard`.
+**Results of the first run** — better than expected, but the run itself was the
+point:
 
-**Fix** — `scripts/setup-tooling.sh` prints the commands. `pip install --user
-cfn-lint`; cfn-guard is a binary download or `cargo install cfn-guard`.
+- **cfn-guard: 6 of 6 templates pass all 14 rules.**
+- **cfn-lint: no errors, no warnings.** Six informational `I3042` findings,
+  all hardcoded `arn:aws:` partitions. Fixed to `arn:${AWS::Partition}:` —
+  identical output in the `aws` partition, so redeployment is a no-op, but
+  AltDigital does CMMC work and GovCloud is not hypothetical.
 
-**Consider also** making the hook fail rather than skip when the tools are
-absent, once they are installed — the current behaviour was right while they
-were genuinely optional and is wrong afterwards.
+**Negative control run, and it mattered.** A validator that passes everything is
+indistinguishable from one that is not running — the same trap as the guardrail
+harness. A deliberately bad template (unencrypted bucket, no rotation, 7-day KMS
+window, port 22 open to the world, `Action: '*'`, no log retention, OU without
+Retain) triggered **9 rules across 6 non-compliant resources**. The clean pass on
+real templates is therefore real.
+
+**Follow-on, now open as B-007.** `IAM_NO_WILDCARD_ACTION_AND_RESOURCE` checks
+only `Action`, not `Resource`, despite its name. The Config setup Lambda holds
+enumerated actions on `Resource: '*'` and passes. The rule is narrower than it
+claims.
+
+**Hook hardened** — missing tools now FAIL the commit rather than skip.
+`SKIP_VALIDATION=1 git commit` bypasses deliberately and visibly. Policy
+documents are also validated on commit via Access Analyzer, which skips only
+when credentials are absent, since that one cannot be installed away.
+
+---
+
+## B-007 · Guard rule names overclaim what they check
+
+**Observed** — 2026-09-17, on the first cfn-guard run.
+
+`IAM_NO_WILDCARD_ACTION_AND_RESOURCE` tests `Action != '*'` and nothing about
+`Resource`. A policy with enumerated actions on `Resource: '*'` passes — which
+is most of the real over-permissioning risk, and exactly what the name promises
+to catch.
+
+Live examples that pass today and arguably should not, or should carry a
+documented exception:
+
+- `PlatformConfigSetupRole` — six enumerated `config:*` actions on `Resource: '*'`
+- `PlatformConfigRecorderRole` — `AWS_ConfigRole` managed policy, AWS-authored
+  and broad
+- The log archive key policy's `kms:*` root delegation — not caught at all,
+  because the rules only inspect `AWS::IAM::Policy`, `AWS::IAM::ManagedPolicy`
+  and `AWS::IAM::Role` inline policies. **KMS key policies are outside every
+  rule in the file.**
+
+**Worth doing** — either rename the rule to match what it does, or extend it to
+flag `Resource: '*'` with an allow-list of documented exceptions. The second is
+better and more work. Add a key-policy rule either way; a resource policy
+granting `kms:*` is worth a deliberate look even when it is correct.
 
 ---
 
