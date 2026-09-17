@@ -82,7 +82,7 @@ find_tool() {
     "${HOME}/.local/bin/${name}" \
     "${APPDATA:-${HOME}/AppData/Roaming}/Python/Python313/Scripts/${name}.exe" \
     "${APPDATA:-${HOME}/AppData/Roaming}/Python/Python312/Scripts/${name}.exe" \
-    "${APPDATA:-${HOME}/AppData/Roaming}/Python/Scripts/${name}.exe"
+    "${APPDATA:-${HOME}/AppData/Roaming}/Python/Scripts/${name}.exe"     "${LOCALAPPDATA:-${HOME}/AppData/Local}/Microsoft/WinGet/Links/${name}.exe"     "${LOCALAPPDATA:-${HOME}/AppData/Local}/Microsoft/WinGet/Packages/Hashicorp.Terraform_Microsoft.Winget.Source_8wekyb3d8bbwe/${name}.exe"
   do
     [[ -x "${c}" ]] && { printf '%s' "${c}"; return 0; }
   done

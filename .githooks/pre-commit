@@ -18,19 +18,40 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 # shellcheck source=/dev/null
 source "${REPO_ROOT}/scripts/lib/common.sh"
 
-# Hard stop: contacts.env holds names, emails and phone numbers.
-if git diff --cached --name-only | grep -qx 'config/contacts.env'; then
-  echo "BLOCKED: config/contacts.env contains personal data and must not be committed." >&2
-  echo "         git restore --staged config/contacts.env" >&2
+# ---------------------------------------------------------------------------
+# Hard stop: files carrying personal data or credentials
+# ---------------------------------------------------------------------------
+# This was a single exact-match test for config/contacts.env.
+# config/identity.env holds the same class of data and was never added.
+# terraform.tfvars holds responder email addresses, and terraform.tfstate holds
+# PagerDuty routing keys in cleartext — neither existed when the line was
+# written, and neither would have been caught.
+#
+# .gitignore already covers all four. This is the second layer, for the case
+# where someone used `git add -f` or edited the ignore rule. Both layers are
+# pattern-based now, for the same reason scripts/validate.sh stopped
+# enumerating directories by name: a list that has to be remembered eventually
+# will not be.
+BLOCKED="$(git diff --cached --name-only \
+  | grep -Ei '(^|/)(contacts|identity)\.env($|\.)|\.tfvars(\.json)?$|\.tfstate($|\.)|(^|/)\.env$' \
+  | grep -v '\.example$' || true)"
+if [[ -n "${BLOCKED}" ]]; then
+  echo "BLOCKED: these staged files carry personal data or credentials:" >&2
+  echo "${BLOCKED}" | sed 's/^/         /' >&2
+  echo "" >&2
+  echo "         git restore --staged <path>" >&2
+  echo "         There is no SKIP_VALIDATION bypass for this check." >&2
   exit 1
 fi
 
 CHANGED="$(git diff --cached --name-only --diff-filter=ACM \
-  | grep -E '^(org|baseline|security)/.*\.ya?ml$' || true)"
+  | grep -E '^(org|baseline|security|alerting)/.*\.ya?ml$' || true)"
 POLICIES="$(git diff --cached --name-only --diff-filter=ACM \
   | grep -E '^policies/(scp|rcp)/.*\.json$' || true)"
+TFFILES="$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -E '\.tf$' || true)"
 
-[[ -n "${CHANGED}" || -n "${POLICIES}" ]] || exit 0
+[[ -n "${CHANGED}" || -n "${POLICIES}" || -n "${TFFILES}" ]] || exit 0
 
 if [[ "${SKIP_VALIDATION:-0}" == "1" ]]; then
   echo "pre-commit: SKIP_VALIDATION=1 — validation deliberately bypassed" >&2
@@ -57,6 +78,30 @@ if [[ -n "${CHANGED}" ]]; then
       --rules "$(win_path "${REPO_ROOT}/policies/guard")" \
       --data "$(win_path "${REPO_ROOT}/${t}")" --show-summary fail)
   done
+fi
+
+# Terraform: formatting only, not `validate`.
+#
+# `terraform validate` requires an initialised working directory, which means a
+# provider download on any machine that has not run init — turning a commit
+# into a network operation that fails offline. `fmt -check` needs nothing and
+# catches the thing that actually causes noise in review: a diff where half the
+# changed lines are realignment.
+#
+# Correctness of the PagerDuty configuration is established by `terraform plan`
+# in scripts/pagerduty-apply.sh, which is where it belongs — against real
+# credentials and real remote state.
+if [[ -n "${TFFILES}" ]]; then
+  if TF="$(find_tool terraform)"; then
+    echo "pre-commit: terraform fmt"
+    (cd "${REPO_ROOT}" && "${TF}" fmt -check -recursive pagerduty) || {
+      echo "pre-commit: run 'terraform fmt -recursive pagerduty' and restage." >&2
+      exit 1; }
+  else
+    echo "pre-commit: terraform not found. Run scripts/setup-tooling.sh," >&2
+    echo "            or SKIP_VALIDATION=1 git commit to bypass deliberately." >&2
+    exit 1
+  fi
 fi
 
 # Policy documents are not CloudFormation; Access Analyzer is what understands

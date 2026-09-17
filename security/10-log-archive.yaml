@@ -76,6 +76,18 @@ Parameters:
     Default: ''
     Description: KMS key encrypting the replicas. Empty disables replication.
 
+  AlertTopicArn:
+    Type: String
+    Default: ''
+    Description: >-
+      SNS topic in the Audit account that alarms publish to. Cross-account on
+      purpose: the PagerDuty routing key then exists in one account rather
+      than in every account that has an alarm. See alerting/10-alert-topic.yaml.
+
+      Empty leaves the alarms actionless, which is the pre-B-015 state and is
+      still better than no alarm — but it is not alerting, and nothing in the
+      console distinguishes the two.
+
   ManagementAccountId:
     Type: String
     Description: >-
@@ -85,6 +97,8 @@ Parameters:
     AllowedPattern: '^[0-9]{12}$'
 
 Conditions:
+  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+
   # Replication is off until the destination stack exists in the replica
   # region. Both parameters must be supplied; a half-configured rule is worse
   # than none because it fails the stack on every subsequent deployment.
@@ -832,6 +846,8 @@ Resources:
       # No failures is the normal state, and for the flow log bucket no
       # ACTIVITY is also normal. Neither must read as a problem.
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
 
   ConfigArchiveReplicationFailureAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -864,6 +880,8 @@ Resources:
       # No failures is the normal state, and for the flow log bucket no
       # ACTIVITY is also normal. Neither must read as a problem.
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
 
   FlowLogReplicationFailureAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -896,6 +914,8 @@ Resources:
       # No failures is the normal state, and for the flow log bucket no
       # ACTIVITY is also normal. Neither must read as a problem.
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
 
 Outputs:
 

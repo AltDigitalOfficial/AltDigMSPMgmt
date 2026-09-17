@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored:
+# these are direct email addresses, which the repository rules treat as
+# personal data.
+
+responder_emails = [
+  "you@example.com",
+]
+
+# Optional — defaults are in variables.tf and are documented there.
+# escalation_timeout_minutes      = 15
+# acknowledgement_timeout_minutes = 30
+# auto_resolve_timeout_minutes    = 0

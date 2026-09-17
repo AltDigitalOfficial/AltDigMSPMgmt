@@ -1,0 +1,284 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the single alerting destination. An SNS topic
+  in the Audit account that every platform and member alarm publishes to, and
+  which forwards to PagerDuty. Deployed once per region, into the Audit
+  account.
+
+# ---------------------------------------------------------------------------
+# Why one topic in one account rather than a topic per account
+# ---------------------------------------------------------------------------
+# The obvious design is a topic in every account, each subscribed to
+# PagerDuty. It is worse in the way that matters: the PagerDuty routing key is
+# a credential, and that design copies it into every account in the
+# Organization — including member accounts, which are the ones most likely to
+# be compromised. Rotating it then means touching every account.
+#
+# CloudWatch alarms can publish cross-account when the topic policy allows it,
+# so the key lives in exactly one account, rotates in one place, and a member
+# account holds nothing but permission to publish.
+#
+# Design doc 02 puts Security Hub, Config and GuardDuty aggregation in the
+# Audit account. Alerting converges to the same place for the same reason.
+#
+# ---------------------------------------------------------------------------
+# This topic is regional, and that is a real limitation
+# ---------------------------------------------------------------------------
+# CloudWatch is regional, so alarms in us-east-2 can only be evaluated by
+# us-east-2. A second topic in us-west-2 does not make us-east-2's alarms
+# survive a us-east-2 outage — it only helps alarms that live in us-west-2,
+# and there are none yet.
+#
+# So this is deployed to the home region only, and the replica region gets a
+# copy when it gets alarms. Recorded as B-017 rather than left as an unstated
+# assumption, because "alerting is multi-region" is exactly the sort of thing
+# that gets believed without being true.
+
+Parameters:
+
+  OrganizationId:
+    Type: String
+    Description: >-
+      Organization id (o-xxxx). Scopes who may publish. Every account in the
+      Organization may publish; nothing outside it may.
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+
+  PagerDutySecretName:
+    Type: String
+    Default: ''
+    Description: >-
+      Secrets Manager secret holding the PagerDuty CloudWatch routing key,
+      under the key `integration_key`. Written by
+      scripts/sync-pagerduty-secrets.sh from the Terraform output.
+
+      Empty deploys the topic with NO subscription. That is a deliberate and
+      useful state: the cross-account publish path can be proved before any
+      credential exists, by pushing an alarm to ALARM and reading the topic's
+      NumberOfMessagesPublished metric. An unsubscribed topic that accepts
+      publishes is a known-good half; a subscribed topic that silently drops
+      them is not distinguishable from a working one.
+
+Conditions:
+  HasPagerDuty: !Not [!Equals [!Ref PagerDutySecretName, '']]
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Encryption
+  # -------------------------------------------------------------------------
+  # The payload is alarm names, descriptions, account ids and state
+  # transitions — not regulated data. Encrypting it is a posture decision, not
+  # a control that protects anything specific, and it carries a genuine cost:
+  # a cross-account publisher needs KMS access as well as SNS access, and the
+  # KMS grant is the half that fails silently.
+  #
+  # Done anyway, because "everything at rest is encrypted with a
+  # platform-managed key" is a sentence AltDigital says to clients, and an
+  # exception that exists only in a template comment is an exception nobody
+  # will remember when an auditor asks.
+  AlertsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts the platform alerting topic
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+
+          # CloudWatch in a MEMBER account calls KMS in THIS account to encrypt
+          # the message it is publishing. The caller is the service principal
+          # cloudwatch.amazonaws.com, which belongs to no account, so
+          # aws:PrincipalOrgID can never match — that mistake cost a working
+          # day on the CloudTrail key in security/10-log-archive.yaml.
+          #
+          # aws:SourceOrgID is the correct condition for a service principal:
+          # it describes the organization of the resource the service is acting
+          # for, not the caller.
+          #
+          # VERIFIED 2026-09-17, not assumed. An alarm in the Log Archive
+          # account (868150784436) was driven to ALARM and the Audit account's
+          # NumberOfMessagesPublished went 0 -> 1, which is only possible if
+          # both this key policy and the topic policy admitted the publish.
+          # Re-check with scripts/test-alert-path.sh after any edit to either.
+          #
+          # This was worth testing rather than asserting: aws:SourceOrgID is
+          # confirmed for config.amazonaws.com and delivery.logs.amazonaws.com
+          # elsewhere in this repository, but "confirmed for two service
+          # principals" is not "confirmed for service principals", and the
+          # failure mode is a policy that can never match.
+          - Sid: AllowCloudWatchToEncrypt
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudwatch.amazonaws.com
+                - events.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  AlertsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-alerts
+      TargetKeyId: !Ref AlertsKey
+
+  # -------------------------------------------------------------------------
+  # The topic
+  # -------------------------------------------------------------------------
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: platform-alerts
+      DisplayName: AltDigital Platform Alerts
+      KmsMasterKeyId: !Ref AlertsKey
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  AlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertsTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Publish is granted to the CloudWatch service principal, scoped to
+          # the Organization — not to account principals. An alarm publishes as
+          # the service, never as a role, so a grant to member account roles
+          # would be both useless and an unnecessary widening.
+          - Sid: AllowOrganizationAlarmsToPublish
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudwatch.amazonaws.com
+                - events.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref AlertsTopic
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
+
+          # Subscribing is a separate and much more dangerous permission than
+          # publishing: a subscriber reads every alarm in the platform,
+          # including the resource names in the descriptions. Restricted to
+          # this account, which is where the PagerDuty subscription is created.
+          #
+          # sns:Subscribe alone, not sns:Subscribe + sns:Receive. cfn-lint
+          # rejects sns:Receive: it appears in older AWS documentation but is
+          # absent from the current service authorization reference, so a deny
+          # naming it is a deny on an action that may not exist. Subscribe is
+          # the real control regardless — nothing receives without having
+          # subscribed first.
+          - Sid: DenySubscribeFromOutsideThisAccount
+            Effect: Deny
+            Principal: { AWS: '*' }
+            Action: 'sns:Subscribe'
+            Resource: !Ref AlertsTopic
+            Condition:
+              StringNotEquals:
+                'aws:PrincipalAccount': !Ref AWS::AccountId
+
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: { AWS: '*' }
+            Action: 'sns:Publish'
+            Resource: !Ref AlertsTopic
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # -------------------------------------------------------------------------
+  # PagerDuty
+  # -------------------------------------------------------------------------
+  # The routing key is read with a dynamic reference, so it is resolved at
+  # deploy time and never becomes a stack parameter. A NoEcho parameter would
+  # have been simpler and would have put the key in the changeset, where it is
+  # readable by anyone who can describe the stack.
+  #
+  # The vendor endpoint is the v1 CloudWatch integration URL, not Events API
+  # v2. That is deliberate: PagerDuty's CloudWatch vendor integration parses
+  # the SNS envelope and renders the alarm name as the incident title and the
+  # alarm description as the body. Events v2 would accept the same POST and
+  # produce an incident whose body is an unparsed JSON blob.
+  PagerDutySubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasPagerDuty
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: https
+      Endpoint: !Sub
+        - 'https://events.pagerduty.com/integration/${Key}/enqueue'
+        - Key: !Sub '{{resolve:secretsmanager:${PagerDutySecretName}:SecretString:integration_key}}'
+      # PagerDuty confirms the subscription automatically. If this sits in
+      # PendingConfirmation, the key is wrong — a bad key returns 200 to the
+      # confirmation POST and then discards everything, which is the single
+      # most misleading failure in this whole path.
+      DeliveryPolicy:
+        healthyRetryPolicy:
+          numRetries: 10
+          minDelayTarget: 10
+          maxDelayTarget: 300
+          numMinDelayRetries: 3
+          numMaxDelayRetries: 3
+          backoffFunction: exponential
+
+  # -------------------------------------------------------------------------
+  # Alerting on the alerting
+  # -------------------------------------------------------------------------
+  # If delivery to PagerDuty fails, every other alarm in the platform becomes
+  # silent and nothing says so. This alarm cannot page through the path it is
+  # monitoring, so it is the one place where a second channel is not optional.
+  # It currently has no action either — B-015 — but it is the first one that
+  # should get a non-PagerDuty destination.
+  NotificationFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasPagerDuty
+    Properties:
+      AlarmName: platform-alert-delivery-failed
+      AlarmDescription: >-
+        SNS could not deliver a platform alarm to PagerDuty. Every alarm in the
+        platform routes through this topic, so while this is firing the
+        platform is not alerting at all — treat it as the highest-severity
+        condition here, above whatever alarm failed to deliver.
+        Check the subscription is Confirmed rather than PendingConfirmation,
+        then the routing key in Secrets Manager.
+      Namespace: AWS/SNS
+      MetricName: NumberOfNotificationsFailed
+      Dimensions:
+        - Name: TopicName
+          Value: !GetAtt AlertsTopic.TopicName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  AlertsTopicArn:
+    Description: Publish platform alarms here. Referenced cross-account by alarm stacks.
+    Value: !Ref AlertsTopic
+
+  AlertsKeyArn:
+    Description: Key encrypting the alerting topic
+    Value: !GetAtt AlertsKey.Arn
+
+  SubscriptionState:
+    Description: Whether a PagerDuty subscription was created
+    Value: !If [HasPagerDuty, 'subscribed', 'no-subscription-topic-only']

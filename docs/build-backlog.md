@@ -108,15 +108,80 @@ defined per resource and is easy to forget when the routing arrives. Routing is
 one topic and one subscription applied to all of them. Building the alarms
 first is the right order; leaving them unrouted indefinitely is not.
 
-**What it needs** — an SNS topic per platform account (or one in Audit with
-cross-account publish), a subscription, and `AlarmActions` on every alarm
-resource. The destination is a phase 5 decision — PagerDuty per design doc 13,
-but email to a monitored mailbox would close the "notifies no one" gap in an
-afternoon and is worth doing first.
+**Progress, 2026-09-17** — the AWS half is built and proved; the PagerDuty
+half is waiting on a credential.
+
+| Step | State |
+|---|---|
+| SNS topic in Audit, org-scoped publish | **Done** — `alerting/10-alert-topic.yaml` |
+| Cross-account alarm can actually publish | **Verified** — `scripts/test-alert-path.sh`, 0 → 1 |
+| `AlarmActions` on the Log Archive alarms | **Done** |
+| `AlarmActions` on the member-baseline alarm | Not done — needs the StackSet pass |
+| PagerDuty service, schedule, escalation policy | **Written** — `pagerduty/`, not applied |
+| Routing key in Secrets Manager, subscription | Blocked on `PAGERDUTY_TOKEN` |
+
+**One topic, not one per account.** The obvious design puts a topic in every
+account, which copies the PagerDuty routing key into every account in the
+Organization — including member accounts, which are the ones a tenant
+application can compromise. Alarms publish cross-account instead, so the
+credential exists once and rotates in one place.
 
 **Close before** — the first tenant carrying an incident-response commitment.
 Committing to a detection-and-response SLA while no detection reaches a human
 is the kind of gap that turns a control failure into a contractual one.
+
+---
+
+## B-016 · Terraform state for PagerDuty is local and unlocked
+
+**Observed** — 2026-09-17, building `pagerduty/`.
+
+State is a local file. Two consequences, of different sizes:
+
+**It holds the routing key in cleartext.** Not a Terraform defect — a routing
+key *is* the credential, and anything that can create one can read it back.
+Mitigated by `.gitignore` and by a pre-commit block that has no bypass, both
+verified to fire. The residual risk is a laptop backup, not a repository.
+
+**There is no locking, and Jamie runs concurrent sessions on this repo.** Two
+applies at once against one PagerDuty account is the realistic failure, and
+the symptom would be an escalation policy pointing somewhere unexpected —
+discovered during an incident, which is the worst possible time.
+
+**Fix** — S3 backend in the Log Archive account with versioning and the same
+KMS key as the rest of the evidence, plus DynamoDB or S3 native locking. Not
+done here because a backend block pointing at a bucket that does not exist
+fails `terraform init` outright rather than degrading, so it has to land with
+the bucket in the same change.
+
+---
+
+## B-017 · Alerting is single-region, and a second topic would not fix it
+
+**Observed** — 2026-09-17, deploying `alerting/10-alert-topic.yaml`.
+
+The topic is in `us-east-2` only. The obvious remedy — a second topic in
+`us-west-2` — **does not do what it appears to**, and that is the part worth
+recording.
+
+CloudWatch is regional. An alarm in `us-east-2` is evaluated by `us-east-2`,
+so if that region is impaired the alarm does not fire at all and the existence
+of a topic elsewhere is irrelevant. A second topic only helps alarms that
+themselves live in `us-west-2`, and there are none.
+
+**What would actually help**, in increasing order of effort:
+
+1. Alarms in `us-west-2` watching the replica buckets, publishing to a
+   `us-west-2` topic. Narrow but real: it covers the case where replication
+   breaks because the destination is impaired.
+2. An external heartbeat — something outside AWS that pages when it stops
+   hearing from the platform. This is the only construct that survives a
+   region taking the alerting path down with it, and it is also what catches
+   "the alarm was deleted" and "the topic policy was edited".
+
+(2) is the right answer and is a phase 5 conversation, not a template change.
+
+**Related** — B-013, which is the same shape for the detective consoles.
 
 ---
 

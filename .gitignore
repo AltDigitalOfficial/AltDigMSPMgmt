@@ -17,6 +17,15 @@ config/identity.env*
 *.tfstate
 *.tfstate.*
 .terraform/
+.terraform.lock.hcl.bak
+
+# Terraform variable files hold responder email addresses — personal data by
+# the same rule as config/contacts.env. Same glob-not-exact-match reasoning:
+# a terraform.tfvars.bak must not survive the rule. The .example file holds
+# placeholders only and is re-included.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
 
 # Editor / OS
 .vscode/
