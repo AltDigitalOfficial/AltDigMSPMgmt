@@ -54,6 +54,48 @@ someone asks what "immutable evidence" covers and the honest answer is
 
 ---
 
+## B-008 · Auto-enable does not cover accounts that already exist
+
+**Observed** — 2026-09-17, enabling GuardDuty, Security Hub, Macie and
+Inspector organization-wide.
+
+After delegating administration, enabling all four services in the Audit
+account, and setting `--auto-enable` / `--auto-enable-organization-members ALL`
+in every region, the Audit account listed **zero members** and the canary had
+**no GuardDuty detector and no Security Hub**.
+
+Every console showed the services enabled. Nothing reported a gap.
+
+**Two distinct traps, both now handled in `scripts/enable-security-services.sh`:**
+
+1. **Auto-enable is prospective only.** It governs accounts that join in
+   future; it does nothing for accounts that already exist. Existing accounts
+   must be enrolled explicitly via `create-members` / `associate-member`.
+
+2. **The management account must enable each service itself first.**
+   `create-members` rejects it with *"your organization master must first
+   enable GuardDuty to be added as a member"*. Miss this and the one account
+   no SCP can constrain — the highest-value target in the Organization — is
+   the only account without detection. Exactly backwards.
+
+**Why it is worth a backlog entry rather than just a fix** — the shape recurs.
+Delegation names an administrator; enablement turns a service on; enrolment
+covers accounts. Three separate steps, each of which looks like completion from
+the console, and the first two produce a system that appears monitored and is
+not.
+
+**Standing check** — coverage should be asserted rather than assumed. Member
+count per service per region should equal (accounts in organization − 1), and
+that belongs in the phase 12.5 verification sweep alongside the evidence and
+paging checks. Until then it is a manual `list-members` after any account
+change.
+
+**Verified after fixing** — 3 of 3 members enrolled for all four services in
+all three regions, and the canary confirmed from inside itself: GuardDuty
+detector present, Security Hub `hub/default`, Macie `ENABLED`.
+
+---
+
 ## B-001 · SCP policy 01 is close to the 5,120-byte quota
 
 **Observed** — 2026-09-17. `01-protect-detective-controls.json` is **4,983 of
