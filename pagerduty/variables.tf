@@ -67,3 +67,33 @@ variable "platform_service_name" {
     that says the platform can no longer prove anything.
   EOT
 }
+
+variable "alert_grouping_type" {
+  type    = string
+  default = "intelligent"
+
+  description = <<-EOT
+    How PagerDuty groups alerts on the platform service, or "none" to disable.
+
+    THIS IS PLAN-TIER DEPENDENT, and that is the only reason it is a variable.
+    Intelligent Alert Grouping is a Business / AIOps feature. On a lower plan
+    the apply fails at this resource with a permissions or feature error rather
+    than a configuration error, which reads like a mistake in the Terraform and
+    is not one.
+
+      intelligent   — Business / AIOps. Groups on observed alert behaviour.
+      content_based — Professional and up. Groups on matching fields.
+      time          — Professional and up. Groups anything within a window.
+      none          — creates no grouping resource at all.
+
+    "time" is the one to avoid on this service if it can be helped: it folds an
+    unrelated second failure into the first incident, and the second is then
+    acknowledged by someone who only read the first. On a service that carries
+    "the evidence archive has stopped replicating", that matters.
+  EOT
+
+  validation {
+    condition     = contains(["intelligent", "content_based", "time", "none"], var.alert_grouping_type)
+    error_message = "alert_grouping_type must be intelligent, content_based, time, or none."
+  }
+}

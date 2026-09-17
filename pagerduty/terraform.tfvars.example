@@ -1,12 +1,25 @@
-# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored:
-# these are direct email addresses, which the repository rules treat as
-# personal data.
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored and
+# blocked by the pre-commit hook: it holds direct email addresses, which the
+# repository rules treat as personal data.
 
+# PagerDuty LOGIN email of each person to page, in escalation order.
+# These users must already exist in PagerDuty — this configuration looks them
+# up rather than creating them, so that `terraform destroy` cannot delete a
+# person.
 responder_emails = [
   "you@example.com",
 ]
 
-# Optional — defaults are in variables.tf and are documented there.
+# Alert grouping is PLAN-TIER dependent and is the one setting likely to fail
+# an otherwise-clean apply:
+#   intelligent    Business / AIOps  (default)
+#   content_based  Professional and up
+#   time           Professional and up
+#   none           no grouping resource at all
+# If apply fails on pagerduty_alert_grouping_setting, this is why.
+# alert_grouping_type = "intelligent"
+
+# Optional — defaults and reasoning are in variables.tf.
 # escalation_timeout_minutes      = 15
 # acknowledgement_timeout_minutes = 30
 # auto_resolve_timeout_minutes    = 0

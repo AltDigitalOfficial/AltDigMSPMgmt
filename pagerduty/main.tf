@@ -139,12 +139,18 @@ resource "pagerduty_service" "platform" {
 # produces one incident rather than a page per cycle.
 
 resource "pagerduty_alert_grouping_setting" "platform" {
+  count = var.alert_grouping_type == "none" ? 0 : 1
+
   name     = "AltDigital Platform Grouping"
-  type     = "intelligent"
+  type     = var.alert_grouping_type
   services = [pagerduty_service.platform.id]
 
   config {
-    time_window = 900
+    # time_window applies to intelligent and content_based; timeout applies to
+    # time. Setting the wrong one is rejected outright, so they are switched
+    # rather than both supplied.
+    time_window = var.alert_grouping_type == "time" ? null : 900
+    timeout     = var.alert_grouping_type == "time" ? 900 : null
   }
 }
 

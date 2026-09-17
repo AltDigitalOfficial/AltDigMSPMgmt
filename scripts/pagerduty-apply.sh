@@ -36,10 +36,18 @@ TF="$(find_tool terraform)" || die "terraform not found. Run scripts/setup-tooli
 TFDIR="${REPO_ROOT}/pagerduty"
 
 [[ -n "${PAGERDUTY_TOKEN:-}" ]] || die "PAGERDUTY_TOKEN is not set.
-      Create a token in PagerDuty under Integrations -> API Access Keys.
-      A read/write key is required: this configuration creates a schedule, an
-      escalation policy, a service and an integration.
-      Prefer a service account key over a personal one — open item B10."
+
+      PagerDuty -> Integrations -> API Access Keys -> Create New API Key.
+      Leave 'Read-only API Key' UNCHECKED: this configuration creates a
+      schedule, an escalation policy, a service and an integration.
+
+      Create a GENERAL ACCESS key, not a User token (My Profile -> User
+      Settings -> API Access). A General Access key belongs to the account
+      rather than to a person, so platform automation does not stop working
+      when someone leaves and does not silently inherit their permissions.
+      That is open item B10, and this is what closes it for PagerDuty.
+
+      PagerDuty displays the key once. There is no way to read it back."
 
 [[ -f "${TFDIR}/terraform.tfvars" ]] || die "pagerduty/terraform.tfvars does not exist.
       cp pagerduty/terraform.tfvars.example pagerduty/terraform.tfvars
