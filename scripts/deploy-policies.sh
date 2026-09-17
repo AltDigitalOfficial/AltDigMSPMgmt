@@ -164,8 +164,10 @@ resolve_target() {
     root)    get_param /org/root-id ;;
     sandbox) get_param /org/ou/sandbox ;;
     members) get_param /org/ou/members ;;
+    security) get_param /org/ou/security ;;
+    infra)   get_param /org/ou/infrastructure ;;
     *) die "Unknown attachment target '$1' in $(basename "${MANIFEST}").
-      Expected root, sandbox or members." ;;
+      Expected root, sandbox, members, security or infra." ;;
   esac
 }
 
@@ -180,9 +182,12 @@ done < "${MANIFEST}"
 [[ ${NEEDS_CONFIRM} -eq 0 ]] || confirm_production
 
 while IFS=$'\t' read -r pfile ptargets; do
-  [[ "${pfile}" =~ ^#.*$ || -z "${pfile}" ]] && continue
+  # Strip before testing, not after. A trailing carriage return makes an
+  # otherwise-blank line non-empty, so the skip never fired and the loop
+  # reported a phantom manifest entry with no policy document.
   pfile="$(printf '%s' "${pfile}" | tr -d ' \r')"
   ptargets="$(printf '%s' "${ptargets}" | tr -d ' \r')"
+  [[ "${pfile}" =~ ^#.*$ || -z "${pfile}" ]] && continue
 
   # Find the id computed during create/update, by file.
   pid=""; pname=""

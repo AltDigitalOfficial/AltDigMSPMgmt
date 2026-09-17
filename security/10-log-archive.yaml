@@ -78,18 +78,36 @@ Resources:
       KeyPolicy:
         Version: '2012-10-17'
         Statement:
-          - Sid: AccountAdministration
+          # Delegates key access control to IAM in this account, which is the
+          # AWS-recommended baseline for every customer-managed key.
+          #
+          # An earlier version enumerated a narrower set (Create*, Describe*,
+          # Enable*, List*, Put*, Update*) on the theory that less is safer.
+          # It was not: 'Get*' was missing, so kms:GetKeyRotationStatus was
+          # denied and rotation status became unverifiable — the precise
+          # evidence the Config rule cmk-backing-key-rotation-enabled and any
+          # auditor asks for. A key policy that cannot answer questions about
+          # itself is a compliance gap, not a hardening measure.
+          #
+          # More seriously, a customer-managed key whose policy omits something
+          # needed later can become permanently unmanageable: key policy is the
+          # only way in, and if it does not grant kms:PutKeyPolicy to anyone
+          # reachable, nobody can fix it. The root delegation removes that
+          # class of failure entirely.
+          #
+          # Destructive actions are NOT protected here by omission. They are
+          # denied by SCP — kms:ScheduleKeyDeletion, DisableKey,
+          # DisableKeyRotation, PutKeyPolicy — which is the right layer,
+          # because an SCP cannot be edited from inside the account.
+          #
+          # NOTE: that SCP is attached to the Sandbox and Members OUs, NOT to
+          # Security where this account lives. Until it is, this key is
+          # protected by its policy alone. See the Security OU gap in
+          # policies/scp/README.md.
+          - Sid: EnableIAMPolicyDelegation
             Effect: Allow
             Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
-            Action:
-              - kms:Create*
-              - kms:Describe*
-              - kms:Enable*
-              - kms:List*
-              - kms:Put*
-              - kms:Update*
-              - kms:TagResource
-              - kms:UntagResource
+            Action: 'kms:*'
             Resource: '*'
           # CloudTrail and Config encrypt with this key from the management
           # account and from every member account, so the grant is scoped by
@@ -110,11 +128,6 @@ Resources:
             Condition:
               StringEquals:
                 'aws:PrincipalOrgID': !Ref OrganizationId
-          - Sid: AllowAuditAccountToRead
-            Effect: Allow
-            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
-            Action: [ kms:Decrypt, kms:DescribeKey ]
-            Resource: '*'
 
   LogArchiveKeyAlias:
     Type: AWS::KMS::Alias

@@ -20,7 +20,11 @@
         "ArnNotLike": {
           "aws:PrincipalArn": [
             "arn:aws:iam::*:role/Platform*",
-            "arn:aws:sts::*:assumed-role/Platform*/*"
+            "arn:aws:sts::*:assumed-role/Platform*/*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:sts::*:assumed-role/stacksets-exec-*/*"
           ]
         }
       }
@@ -49,7 +53,11 @@
         "ArnNotLike": {
           "aws:PrincipalArn": [
             "arn:aws:iam::*:role/Platform*",
-            "arn:aws:sts::*:assumed-role/Platform*/*"
+            "arn:aws:sts::*:assumed-role/Platform*/*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:sts::*:assumed-role/stacksets-exec-*/*"
           ]
         }
       }
@@ -67,7 +75,11 @@
         "ArnNotLike": {
           "aws:PrincipalArn": [
             "arn:aws:iam::*:role/Platform*",
-            "arn:aws:sts::*:assumed-role/Platform*/*"
+            "arn:aws:sts::*:assumed-role/Platform*/*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:sts::*:assumed-role/stacksets-exec-*/*"
           ]
         },
         "StringEquals": {
@@ -96,7 +108,11 @@
         "ArnNotLike": {
           "aws:PrincipalArn": [
             "arn:aws:iam::*:role/Platform*",
-            "arn:aws:sts::*:assumed-role/Platform*/*"
+            "arn:aws:sts::*:assumed-role/Platform*/*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:sts::*:assumed-role/stacksets-exec-*/*"
           ]
         },
         "StringEquals": {

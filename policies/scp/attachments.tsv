@@ -16,10 +16,14 @@
 #   sandbox   the Sandbox OU — baseline canary, guardrail harness target
 #   members   the Members OU — every partner, client and tenant account.
 #             Requires --confirm-production.
+#   security  the Security OU — Log Archive, Audit, Forensics. These hold the
+#             evidence everything else is judged against, so they get the same
+#             control protection as tenants rather than less.
+#   infra     the Infrastructure OU — Platform Tooling, Shared Services, Backup.
 #
 # Columns: <policy file>  <TAB>  <comma-separated targets>
 
 00-deny-leave-and-close-account.json	root
-01-protect-detective-controls.json	sandbox,members
-02-protect-data-protection.json	sandbox,members
-03-protect-platform-identity.json	sandbox,members
+01-protect-detective-controls.json	sandbox,members,security,infra
+02-protect-data-protection.json	sandbox,members,security,infra
+03-protect-platform-identity.json	sandbox,members,security,infra

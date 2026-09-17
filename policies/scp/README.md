@@ -1,10 +1,46 @@
 # Service Control Policies
 
-**Status: attached to the Sandbox OU and verified. NOT attached to Members.**
+**Status: attached to every OU and verified.** Sandbox, Members, Security and
+Infrastructure each carry all three control-protection policies;
+`PlatformDenyLeaveAndCloseAccount` sits at the root.
 
 The Phase 1.3 harness passes 8 of 9 assertions against a live account, with the
-ninth ambiguous by choice — see [Verified against a live account](#verified-against-a-live-account).
-Members remains unattached pending a decision to vest tenant accounts.
+ninth ambiguous by choice — see
+[Verified against a live account](#verified-against-a-live-account).
+
+Attachment topology is declared in [attachments.tsv](attachments.tsv), not
+passed on a command line.
+
+## Why Security and Infrastructure are protected too
+
+An earlier version attached only to Sandbox and Members, on the reasoning that
+those are where tenant risk lives. That was wrong twice over.
+
+The Security OU holds Log Archive and Audit — **the accounts containing the
+evidence every other control is judged against.** Leaving them unprotected
+meant the immutable log destination was defended by its bucket policy alone,
+while member accounts holding ordinary workloads had four layers. The asymmetry
+was exactly backwards.
+
+Extending coverage there required aligning the exclusion sets. Policies 01 and
+02 excluded only `Platform*`; policy 03 already also excluded
+`OrganizationAccountAccessRole` and `stacksets-exec-*`, because something has to
+be able to create platform roles in a fresh account. With 01 and 02 attached to
+Security, CloudFormation deploying the log archive stack as
+`OrganizationAccountAccessRole` would have been denied `s3:PutBucketPolicy` on a
+`platform-managed` bucket — the protection blocking the deployment mechanism.
+
+**This does not weaken the threat model.** The assumption under test is that *a
+member account with full local administrator* cannot remove detective controls.
+`OrganizationAccountAccessRole` trusts the management account only, so a member
+administrator cannot assume it — and a principal who can already holds
+management-account access, which no SCP constrains anyway. The harness confirms
+it: `GuardrailTestAdmin` is still denied everything, 8 passed, 0 failed, after
+the change.
+
+**Watch the size.** Policy 01 is now 4,983 bytes against the 5,120-byte quota.
+Adding exclusions costs roughly 220 bytes per statement. The Phase 10.2 bypass
+controls will need a fifth policy rather than extending this one.
 
 ---
 
