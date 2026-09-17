@@ -111,6 +111,50 @@ years, so masking at the source is the only control that actually works.
 
 ---
 
+## D-011 · Platform services are single-region
+
+**Design position** — [02-platform-architecture.md](../starter_docs/02-platform-architecture.md):
+*"Platform services (Log Archive, Audit, Truveon evidence store) are
+multi-region regardless of tenant tier. A regional event must not blind us
+across every tenant simultaneously."*
+
+**Actual** — everything is in `us-east-2` only. Verified:
+`get-bucket-replication` on the log archive returns
+`ReplicationConfigurationNotFoundError`. No cross-region replication on any
+bucket; the Audit account's aggregation is regional.
+
+**Decision** — Not deliberate. This was an omission, surfaced by a question
+about what is backed up rather than by any check.
+
+**Risk while open** — a `us-east-2` event removes the audit trail for every
+tenant at once, which is the exact scenario the requirement names. This is
+about **availability during a regional event, not durability**: S3 is
+eleven-nines durable within a region and the data is not at risk of loss. But
+"we cannot read our evidence today" is a poor answer during an incident, and a
+worse one if the incident is the regional event.
+
+**Why it also matters for immutability** — S3 Replication **can** write to an
+Object Lock bucket, where AWS Config cannot (B-006). Replicating the Config
+archive into a locked destination in a second region closes the immutability
+gap and the regional gap in one change. That makes replication better value
+than it first appears.
+
+**Cost** — replication charges per GB transferred plus storage in the
+destination, so roughly double the storage cost of whatever is replicated, plus
+transfer. Real but modest at current volumes, and it scales with evidence
+volume rather than account count.
+
+**Close when** — the log archive, Config archive and flow log buckets replicate
+to a second region, and the Config archive's destination has Object Lock
+enabled. Sequence it with the first tenant that carries a regulatory
+availability commitment.
+
+**Note on scope** — this is separate from tenant workload backup (design doc 05,
+phase 5), which does not exist at all yet. There is no tenant data to protect
+today; that changes with the first vested application.
+
+---
+
 ## D-001 · Root mailbox is a personal alias, not a monitored distribution list
 
 **Design position** — [15-partner-model.md](../starter_docs/15-partner-model.md),
