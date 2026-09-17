@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — cross-region replica buckets for the evidence
+  archives. Deployed to the REPLICA region in the Log Archive account. The
+  source buckets and their replication rules live in security/10-log-archive.yaml
+  in the home region.
+
+# ---------------------------------------------------------------------------
+# Two problems, one mechanism
+# ---------------------------------------------------------------------------
+# D-011 — design doc 02 requires platform services to be multi-region
+# "regardless of tenant tier", because "a regional event must not blind us
+# across every tenant simultaneously". Everything was in us-east-2.
+#
+# B-006 — the Config archive is not immutable, because AWS Config refuses to
+# deliver to a bucket with Object Lock enabled.
+#
+# Replication closes both. S3 Replication CAN write into an Object Lock bucket
+# where Config cannot, so the Config replica here is lock-enabled even though
+# its source is not. The authoritative copy for retention purposes becomes the
+# replica, not the source.
+#
+# THAT CLAIM IS TESTED, NOT ASSUMED. If replication into a lock-enabled
+# destination does not work, this template still delivers D-011 and B-006 stays
+# open — which is why the two are recorded separately rather than as one item.
+#
+# ---------------------------------------------------------------------------
+# Why a separate template
+# ---------------------------------------------------------------------------
+# A CloudFormation stack is regional. A cross-region pair is necessarily two
+# stacks, and the destination must exist before the source's replication rule
+# can reference it. Deploy this one first.
+
+Parameters:
+
+  ReplicaRetentionDays:
+    Type: Number
+    Default: 2190
+    Description: >-
+      Object Lock retention on the replicas, matching the source archive.
+      Six years, per the HIPAA documentation retention expectation.
+
+Resources:
+
+  ReplicaKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts the cross-region evidence replicas
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  ReplicaKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-archive-replica
+      TargetKeyId: !Ref ReplicaKey
+
+  # Replica of the CloudTrail archive. Source is already Object Lock
+  # COMPLIANCE; the replica matches it.
+  LogArchiveReplica:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-log-archive-replica-${AWS::AccountId}'
+      ObjectLockEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: COMPLIANCE
+            Days: !Ref ReplicaRetentionDays
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ReplicaKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: log-archive-replica }
+
+  # Replica of the Config archive, WITH Object Lock — which its source cannot
+  # have. This is the B-006 fix, and the reason to care about replication
+  # beyond the regional argument.
+  ConfigArchiveReplica:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-config-archive-replica-${AWS::AccountId}'
+      ObjectLockEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: COMPLIANCE
+            Days: !Ref ReplicaRetentionDays
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ReplicaKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: config-archive-replica }
+        - { Key: Immutable,        Value: 'true' }
+
+  # Flow logs replicate for the regional argument only. No Object Lock: flow
+  # logs are operational rather than evidentiary, voluminous, and locking six
+  # years of them would cost more than the diagnosis is worth.
+  FlowLogReplica:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-flow-logs-replica-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ReplicaKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: flow-log-replica }
+
+Outputs:
+
+  LogArchiveReplicaArn:
+    Description: CloudTrail archive replica
+    Value: !GetAtt LogArchiveReplica.Arn
+
+  ConfigArchiveReplicaArn:
+    Description: Config archive replica, Object Lock enabled
+    Value: !GetAtt ConfigArchiveReplica.Arn
+
+  FlowLogReplicaArn:
+    Description: Flow log replica
+    Value: !GetAtt FlowLogReplica.Arn
+
+  ReplicaKeyArn:
+    Description: Replica encryption key
+    Value: !GetAtt ReplicaKey.Arn

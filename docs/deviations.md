@@ -111,7 +111,7 @@ years, so masking at the source is the only control that actually works.
 
 ---
 
-## D-011 · Platform services are single-region
+## D-011 · Platform services are single-region — CLOSED
 
 **Design position** — [02-platform-architecture.md](../starter_docs/02-platform-architecture.md):
 *"Platform services (Log Archive, Audit, Truveon evidence store) are
@@ -144,10 +144,35 @@ destination, so roughly double the storage cost of whatever is replicated, plus
 transfer. Real but modest at current volumes, and it scales with evidence
 volume rather than account count.
 
-**Close when** — the log archive, Config archive and flow log buckets replicate
-to a second region, and the Config archive's destination has Object Lock
-enabled. Sequence it with the first tenant that carries a regulatory
-availability commitment.
+**Status** — Closed 2026-09-17. Cross-region replication from `us-east-2` to
+`us-west-2` on all three archive buckets, via
+[security/20-archive-replicas.yaml](../security/20-archive-replicas.yaml) for
+the destinations and the `ReplicationConfiguration` blocks in
+[security/10-log-archive.yaml](../security/10-log-archive.yaml) for the rules.
+
+**Verified, not assumed** — a CloudTrail object written at 20:31:23Z reached
+`altdig-log-archive-replica-868150784436` with `ObjectLockMode=COMPLIANCE` and
+`ObjectLockRetainUntilDate=2032-09-15`, inside one ten-second poll. The same
+held for the Config archive. Both checks are in
+[verification-sweep.md](verification-sweep.md).
+
+**What nearly went unnoticed** — a replication rule is not retroactive. At the
+moment the rule was created the log archive held 922 objects and the Config
+archive 46, none of which the rule would ever touch. `get-bucket-replication`
+would have returned a valid configuration, the console would have shown
+replication enabled, and the replica would have contained objects — with nine
+months of evidence still single-region and nothing anywhere saying so.
+
+The backfill runs through S3 Batch Replication
+([scripts/backfill-replication.sh](../scripts/backfill-replication.sh)), whose
+manifest is filtered to replication status `NONE` or `FAILED` so it is safe to
+re-run. **Re-run it after any change to a replication rule**, since the same
+silent gap opens every time one is edited.
+
+**Still regional** — the Audit account's Config aggregator and Security Hub
+findings. The evidence in S3 survives a regional event; the ability to query it
+through those consoles does not. Narrower than the original deviation and
+recorded as its own item rather than left inside a closed one.
 
 **Note on scope** — this is separate from tenant workload backup (design doc 05,
 phase 5), which does not exist at all yet. There is no tenant data to protect

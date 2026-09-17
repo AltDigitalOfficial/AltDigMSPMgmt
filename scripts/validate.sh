@@ -15,9 +15,19 @@
 # rejected in an Output. They were never caught because only the template that
 # happened to be deployed was ever validated.
 #
-# Run this over ALL templates, not just the one being deployed.
+# ---------------------------------------------------------------------------
+# Why discovery is by CONTENT and not by a directory list
+# ---------------------------------------------------------------------------
+# The first version of this script enumerated org/, baseline/ and policies/.
+# security/ was added to the repository afterwards and was never added here, so
+# the two templates holding the log archive — the most consequential templates
+# in the repo — were excluded from the sweep that exists to stop exactly that.
+# A malformed Fn::If sat in one of them until a deploy caught it.
 #
-# Usage: scripts/validate.sh [path ...]
+# A directory list is a thing to remember. Remembering is the failure mode this
+# script was written to remove, so it cannot be part of the mechanism. Anything
+# carrying AWSTemplateFormatVersion is a template and gets validated, wherever
+# it lives and whenever it is added.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -26,8 +36,18 @@ require_cli
 if [[ $# -gt 0 ]]; then
   TEMPLATES=("$@")
 else
-  mapfile -t TEMPLATES < <(find "${REPO_ROOT}/org" "${REPO_ROOT}/baseline" \
-    "${REPO_ROOT}/policies" -name '*.yaml' -o -name '*.yml' 2>/dev/null | sort)
+  mapfile -t TEMPLATES < <(
+    find "${REPO_ROOT}" \
+      \( -name .git -o -name node_modules -o -name .venv \) -prune -o \
+      \( -name '*.yaml' -o -name '*.yml' \) -print 2>/dev/null \
+    | sort \
+    | while read -r f; do
+        # head, not grep over the whole file: the marker is required to be the
+        # first line, and this keeps a large policy document from matching on
+        # an incidental mention in a comment.
+        head -n 5 "${f}" | grep -q 'AWSTemplateFormatVersion' && printf '%s\n' "${f}"
+      done
+  )
 fi
 
 [[ ${#TEMPLATES[@]} -gt 0 ]] || { warn "No templates found."; exit 0; }

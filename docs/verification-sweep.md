@@ -119,6 +119,42 @@ that wrote the data still exists and will write it again.
 
 ---
 
+### V-F · Cross-region replication covers the PAST, not just the future
+
+**Manual, and the two halves fail differently.**
+
+**Half one — the rule works.** Write an object to each archive source, then
+`head-object` the same key in the replica and assert on the *replica's* lock
+state, not the source's:
+
+```
+aws s3api head-object --bucket altdig-config-archive-replica-<acct>   --key <key> --region us-west-2   --query '[ObjectLockMode,ObjectLockRetainUntilDate]'
+```
+
+Expect `COMPLIANCE` and a date roughly `RetentionDays` out. For the Config
+archive this is the whole of B-006: the source has no lock, so a retention date
+on the replica can only have been applied by replication.
+
+**Half two — the backlog was carried across, and this is the half that gets
+missed.** A replication rule is not retroactive. Every object written before
+the rule existed stays where it is, permanently, while every signal reports
+success: `get-bucket-replication` returns a valid configuration, the console
+shows replication enabled, and the replica genuinely does contain objects.
+
+So counting objects in the replica proves nothing. Compare counts:
+
+```
+aws s3 ls s3://altdig-log-archive-<acct>         --recursive | wc -l
+aws s3 ls s3://altdig-log-archive-replica-<acct> --recursive --region us-west-2 | wc -l
+```
+
+A shortfall means `scripts/backfill-replication.sh` has not run, or has not
+finished, or failed some tasks. **Re-run it after any edit to a replication
+rule** — the same silent gap reopens every time one is changed, and nothing in
+AWS will mention it.
+
+---
+
 ## What the sweep cannot check yet
 
 Stated so the gap is visible rather than assumed closed:

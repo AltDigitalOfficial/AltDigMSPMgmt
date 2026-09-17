@@ -13,7 +13,7 @@ asked for yet.
 
 ---
 
-## B-006 · Config archive is not immutable
+## B-006 · Config archive is not immutable — CLOSED
 
 **Established** — 2026-09-17. **AWS Config cannot deliver to an S3 bucket with
 Object Lock enabled.** Proved by elimination: `PutDeliveryChannel` failed
@@ -42,15 +42,91 @@ the policy can remove the deny.
 the Audit account holds queryable configuration history independently of S3,
 with its own retention.
 
-**The route to genuine immutability** — S3 Replication from the Config bucket
-into a locked destination. Replication CAN write to an Object Lock bucket where
-Config cannot. Costs replication charges plus a delivery delay, and doubles
-storage. Worth doing if an auditor challenges the asymmetry, or before a
-tenant whose framework demands immutable configuration history.
+**Resolved by replication** — Closed 2026-09-17. The Config archive replicates
+to `altdig-config-archive-replica-868150784436` in `us-west-2`, and **that
+bucket has Object Lock COMPLIANCE enabled even though its source cannot**.
 
-**Decide before** — the first HIPAA or PCI tenant is vested, since that is when
-someone asks what "immutable evidence" covers and the honest answer is
-"CloudTrail, not Config".
+**The load-bearing claim was tested before it was relied on.** The premise —
+that S3 Replication can write into a locked bucket where AWS Config cannot — is
+the entire design, and asserting it would have been the third assumption about
+AWS behaviour to be wrong in a day. So an object was written to the unlocked
+source and traced:
+
+```
+source  altdig-config-archive-868150784436          ReplicationStatus COMPLETED
+replica altdig-config-archive-replica-...  COMPLIANCE  2032-09-15T20:30:51Z
+```
+
+The retention date was applied by replication, to an object whose source copy
+carries no retention at all. The claim holds.
+
+**What the guarantee now is, stated precisely** — the source Config bucket is
+still mutable by a sufficiently privileged principal; that has not changed and
+is not fixable, because Config will not deliver anywhere else. What changed is
+that a second copy exists which **no principal can alter, including account
+root**, for six years. An attacker who compromises the platform role can still
+delete configuration history from `us-east-2`. They cannot delete it from
+`us-west-2`, and the deletion itself is a CloudTrail event in an archive they
+also cannot alter.
+
+So the honest answer to "what does immutable evidence cover" is now
+"CloudTrail and Config, the latter in the replica" — which is a sentence that
+needs saying rather than a checkbox, and belongs in the auditor-facing
+description of the archive.
+
+**Depends on the backfill** — the 46 Config objects predating the rule were not
+covered by it. See D-011 and
+[scripts/backfill-replication.sh](../scripts/backfill-replication.sh).
+
+---
+
+## B-013 · Detective consoles are still single-region after D-011
+
+**Observed** — 2026-09-17, closing D-011. Replication put the *evidence* in two
+regions. It did not do the same for the tools used to read it.
+
+| Thing | Regional? | What a `us-east-2` outage costs |
+|---|---|---|
+| CloudTrail archive (S3) | No — replicated | Nothing; readable from `us-west-2` |
+| Config archive (S3) | No — replicated | Nothing |
+| Config **aggregator** (Audit acct) | **Yes** | Cannot query configuration history |
+| Security Hub findings | **Yes** | Cannot see findings; no new ones arrive |
+| GuardDuty findings | **Yes** | Same |
+
+**Why this is narrower than it sounds** — the data survives, and it is the data
+an auditor asks for. What is lost is the convenient query path, during exactly
+the window when someone wants it. Raw CloudTrail JSON in `us-west-2` answers
+"what happened" without Security Hub; it just answers it slowly.
+
+**Why it is not simply "turn them on in us-west-2"** — the detective services
+are already enabled in all three allowed regions and aggregate to `us-east-2`.
+The single-region part is the AGGREGATION, and a second aggregator is not a
+supported configuration for Security Hub — there is one aggregation region per
+account. The realistic options are to accept it, or to move aggregation to a
+region and accept the same exposure there.
+
+**Close when** — a tenant carries a contractual availability commitment on
+evidence *retrieval* rather than evidence retention, which is a meaningfully
+rarer clause. Until then this is documented exposure, not a gap.
+
+---
+
+## B-014 · Two deviation IDs are used twice
+
+**Observed** — 2026-09-17. `docs/deviations.md` contains two different D-009
+entries (account alias prefix; `CommercialReadOnly` assignment) and two
+different D-010 entries (per-application Object Lock mode; Identity Center users
+created outside Entra).
+
+**Why it matters more than tidiness** — these IDs are cited from other
+documents and from template comments. "See D-010" currently resolves to two
+unrelated decisions, and the reader has no way to know which. The register is
+the artefact an auditor is handed to show that departures from the design were
+deliberate; an ambiguous identifier undermines exactly that.
+
+**Fix** — renumber the later duplicates and update inbound references. Small,
+but it must be done in one pass across the repository rather than in the file
+alone, or the references break silently.
 
 ---
 

@@ -16,7 +16,7 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-ACCOUNT_KEY=""; TEMPLATE=""; STACK=""; PARAMS=()
+ACCOUNT_KEY=""; TEMPLATE=""; STACK=""; PARAMS=(); REGION=""
 
 usage() {
   cat <<'USAGE'
@@ -27,6 +27,10 @@ Usage: deploy-to-account.sh --account <canonical-alias> --template <path>
               Resolved via /platform/org/account/<name>.
   --template  Template path, relative to the repository root.
   --stack     Stack name to create or update.
+  --region    Target region. Defaults to the platform home region. Needed for
+              replica buckets, which must live in a different region than the
+              sources they protect — a CloudFormation stack is regional, so a
+              cross-region pair is two stacks.
   --dry-run   Produce a changeset without executing it.
 USAGE
 }
@@ -36,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --account)  ACCOUNT_KEY="$2"; shift 2 ;;
     --template) TEMPLATE="$2"; shift 2 ;;
     --stack)    STACK="$2"; shift 2 ;;
+    --region)   REGION="$2"; shift 2 ;;
     --dry-run)  DRY_RUN=1; shift ;;
     -h|--help)  usage; exit 0 ;;
     *=*)        PARAMS+=("$1"); shift ;;
@@ -47,6 +52,10 @@ done
 [[ -n "${TEMPLATE}" ]]    || { usage; die "--template is required."; }
 [[ -n "${STACK}" ]]       || { usage; die "--stack is required."; }
 
+# SSM Parameter Store is REGIONAL. The platform registry lives in the home
+# region, so the account lookup must happen there regardless of where the stack
+# is being deployed — otherwise deploying to us-west-2 searches for a parameter
+# that only exists in us-east-2 and reports the account as unregistered.
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
 require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
@@ -54,6 +63,9 @@ require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
 TARGET="$(get_param "/org/account/${ACCOUNT_KEY}")"
 [[ -n "${TARGET}" && "${TARGET}" != "None" ]] \
   || die "No account registered at ${PLATFORM_SSM_PREFIX}/org/account/${ACCOUNT_KEY}."
+
+# Only now switch to the deployment region.
+export AWS_DEFAULT_REGION="${REGION:-${PLATFORM_HOME_REGION}}"
 
 [[ "${TARGET}" != "${PLATFORM_MGMT_ACCOUNT_ID}" ]] \
   || die "Refusing to deploy a workload stack into the management account.

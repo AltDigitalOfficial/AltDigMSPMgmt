@@ -116,7 +116,9 @@
             "arn:aws:iam::*:role/Platform*",
             "arn:aws:sts::*:assumed-role/Platform*/*",
             "arn:aws:iam::*:role/stacksets-exec-*",
-            "arn:aws:sts::*:assumed-role/stacksets-exec-*/*"
+            "arn:aws:sts::*:assumed-role/stacksets-exec-*/*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*"
           ]
         }
       }

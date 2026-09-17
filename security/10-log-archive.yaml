@@ -62,6 +62,20 @@ Parameters:
     Description: Organization id (o-xxxx), used to scope the bucket policy.
     AllowedPattern: '^o-[a-z0-9]{10,32}$'
 
+  ReplicaRegion:
+    Type: String
+    Default: ''
+    Description: >-
+      Region holding the replica buckets. Empty disables replication, which is
+      the state before security/20-archive-replicas.yaml has been deployed
+      there — a replication rule pointing at a bucket that does not exist fails
+      the stack.
+
+  ReplicaKeyArn:
+    Type: String
+    Default: ''
+    Description: KMS key encrypting the replicas. Empty disables replication.
+
   ManagementAccountId:
     Type: String
     Description: >-
@@ -70,7 +84,166 @@ Parameters:
       owned by that account.
     AllowedPattern: '^[0-9]{12}$'
 
+Conditions:
+  # Replication is off until the destination stack exists in the replica
+  # region. Both parameters must be supplied; a half-configured rule is worse
+  # than none because it fails the stack on every subsequent deployment.
+  WantReplication: !And
+    - !Not [!Equals [!Ref ReplicaRegion, '']]
+    - !Not [!Equals [!Ref ReplicaKeyArn, '']]
+
 Resources:
+
+  # -------------------------------------------------------------------------
+  # Cross-region replication
+  # -------------------------------------------------------------------------
+  # Closes D-011 (design doc 02 requires platform services to be multi-region)
+  # and, for the Config archive, B-006.
+  #
+  # The Config replica has Object Lock enabled even though its SOURCE does not,
+  # because AWS Config refuses to deliver to a locked bucket while S3
+  # Replication can write into one. If that holds, the authoritative immutable
+  # copy of configuration history becomes the replica.
+  #
+  # Whether it holds is being tested here rather than assumed. If replication
+  # into a lock-enabled destination fails, D-011 is still closed and B-006
+  # stays open.
+  ReplicationRole:
+    Type: AWS::IAM::Role
+    Condition: WantReplication
+    Properties:
+      RoleName: PlatformArchiveReplication
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: s3.amazonaws.com }
+            Action: sts:AssumeRole
+      # Bucket ARNs are CONSTRUCTED here rather than read with !GetAtt.
+      #
+      # The buckets name this role in their ReplicationConfiguration, so a
+      # !GetAtt back to the buckets closes a cycle and CloudFormation refuses
+      # the whole template:
+      #   Circular dependency between resources: [LogArchiveBucketPolicy,
+      #   ReplicationRole, ConfigArchiveBucketPolicy, FlowLogBucket, ...]
+      #
+      # The names are deterministic — the same !Sub expression that creates
+      # them — so constructing the ARN is exact, not a guess. The cost is that
+      # renaming a bucket now means editing two places, which is why the names
+      # appear nowhere else in the file.
+      Policies:
+        - PolicyName: ReplicateArchives
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetReplicationConfiguration'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-${AWS::AccountId}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-config-archive-${AWS::AccountId}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-${AWS::AccountId}'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObjectVersionForReplication'
+                  - 's3:GetObjectVersionAcl'
+                  - 's3:GetObjectVersionTagging'
+                  # The log archive source HAS Object Lock. Replicating an
+                  # object carries its retention state across, which means
+                  # reading that state first. Without these two, replication
+                  # reports FAILED on every object in the locked bucket and
+                  # says nothing about why.
+                  - 's3:GetObjectRetention'
+                  - 's3:GetObjectLegalHold'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-${AWS::AccountId}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-config-archive-${AWS::AccountId}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-${AWS::AccountId}/*'
+              - Effect: Allow
+                Action:
+                  - 's3:ReplicateObject'
+                  - 's3:ReplicateDelete'
+                  - 's3:ReplicateTags'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-replica-${AWS::AccountId}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-config-archive-replica-${AWS::AccountId}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-replica-${AWS::AccountId}/*'
+              - Effect: Allow
+                Action: [ 'kms:Decrypt', 'kms:DescribeKey' ]
+                Resource: !GetAtt LogArchiveKey.Arn
+              - Effect: Allow
+                Action: [ 'kms:Encrypt', 'kms:GenerateDataKey' ]
+                Resource: !Ref ReplicaKeyArn
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  # -------------------------------------------------------------------------
+  # Backfill
+  # -------------------------------------------------------------------------
+  # A replication rule is not retroactive. It applies to objects written AFTER
+  # it exists and to nothing already in the bucket. When this rule was created
+  # the log archive held 916 CloudTrail objects and the Config archive 46, and
+  # every one of them would have stayed single-region forever.
+  #
+  # That is worth stating plainly because "the bucket is replicated" reads as
+  # though it covers the bucket. It covers the future of the bucket. The past
+  # needs S3 Batch Replication, which is a one-off job rather than a resource —
+  # so the ROLE is declared here, where it is reviewable and versioned, and the
+  # job that uses it is scripts/backfill-replication.sh.
+  #
+  # The role is kept after the backfill rather than deleted: any future gap in
+  # the rule, any bucket added to the archive, and any object that fails
+  # replication needs the same job run again.
+  BatchReplicationRole:
+    Type: AWS::IAM::Role
+    Condition: WantReplication
+    Properties:
+      RoleName: PlatformArchiveBatchReplication
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: batchoperations.s3.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BackfillReplication
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # InitiateReplication is what a batch job actually calls. It is
+              # NOT s3:ReplicateObject — that is the permission the replication
+              # SERVICE uses once a copy is under way. Confusing the two
+              # produces a job that fails every task with AccessDenied.
+              - Effect: Allow
+                Action: 's3:InitiateReplication'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-${AWS::AccountId}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-config-archive-${AWS::AccountId}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-${AWS::AccountId}/*'
+              # Required to GENERATE the manifest rather than supply one. The
+              # generated manifest is filtered to objects whose replication
+              # status is NONE or FAILED, so re-running the job is cheap and
+              # does not re-copy what already arrived.
+              - Effect: Allow
+                Action:
+                  - 's3:GetReplicationConfiguration'
+                  - 's3:ListBucket'
+                  - 's3:PutInventoryConfiguration'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-${AWS::AccountId}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-config-archive-${AWS::AccountId}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-${AWS::AccountId}'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObjectVersion'
+                  - 's3:GetObjectVersionAcl'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-${AWS::AccountId}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-config-archive-${AWS::AccountId}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-${AWS::AccountId}/*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
 
   # -------------------------------------------------------------------------
   # Encryption key
@@ -234,6 +407,22 @@ Resources:
         - { Key: platform-managed, Value: 'true' }
         - { Key: Purpose,          Value: log-archive }
         - { Key: DataClassification, Value: regulated }
+      ReplicationConfiguration: !If
+        - WantReplication
+        - Role: !GetAtt ReplicationRole.Arn
+          Rules:
+            - Id: CrossRegion
+              Status: Enabled
+              Priority: 1
+              Filter: {}
+              DeleteMarkerReplication: { Status: Disabled }
+              Destination:
+                Bucket: !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-replica-${AWS::AccountId}'
+                EncryptionConfiguration:
+                  ReplicaKmsKeyID: !Ref ReplicaKeyArn
+              SourceSelectionCriteria:
+                SseKmsEncryptedObjects: { Status: Enabled }
+        - !Ref AWS::NoValue
 
   # -------------------------------------------------------------------------
   # Config archive — a SECOND bucket, without Object Lock
@@ -311,6 +500,22 @@ Resources:
         - { Key: platform-managed, Value: 'true' }
         - { Key: Purpose,          Value: config-archive }
         - { Key: Immutable,        Value: 'false' }
+      ReplicationConfiguration: !If
+        - WantReplication
+        - Role: !GetAtt ReplicationRole.Arn
+          Rules:
+            - Id: CrossRegion
+              Status: Enabled
+              Priority: 1
+              Filter: {}
+              DeleteMarkerReplication: { Status: Disabled }
+              Destination:
+                Bucket: !Sub 'arn:${AWS::Partition}:s3:::altdig-config-archive-replica-${AWS::AccountId}'
+                EncryptionConfiguration:
+                  ReplicaKmsKeyID: !Ref ReplicaKeyArn
+              SourceSelectionCriteria:
+                SseKmsEncryptedObjects: { Status: Enabled }
+        - !Ref AWS::NoValue
 
   ConfigArchiveBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -419,6 +624,22 @@ Resources:
         - { Key: platform-managed, Value: 'true' }
         - { Key: Purpose,          Value: flow-logs }
         - { Key: Immutable,        Value: 'false' }
+      ReplicationConfiguration: !If
+        - WantReplication
+        - Role: !GetAtt ReplicationRole.Arn
+          Rules:
+            - Id: CrossRegion
+              Status: Enabled
+              Priority: 1
+              Filter: {}
+              DeleteMarkerReplication: { Status: Disabled }
+              Destination:
+                Bucket: !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-replica-${AWS::AccountId}'
+                EncryptionConfiguration:
+                  ReplicaKmsKeyID: !Ref ReplicaKeyArn
+              SourceSelectionCriteria:
+                SseKmsEncryptedObjects: { Status: Enabled }
+        - !Ref AWS::NoValue
 
   FlowLogBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -570,6 +791,11 @@ Outputs:
   BucketArn:
     Description: Log archive bucket ARN
     Value: !GetAtt LogArchiveBucket.Arn
+
+  BatchReplicationRoleArn:
+    Condition: WantReplication
+    Description: Role used by scripts/backfill-replication.sh
+    Value: !GetAtt BatchReplicationRole.Arn
 
   KeyArn:
     Description: Log archive KMS key ARN
