@@ -248,6 +248,38 @@ Resources:
               StringNotEquals:
                 's3:x-amz-server-side-encryption': 'aws:kms'
 
+          # Object Lock stops a VERSION being deleted. It does not stop a
+          # delete marker being created over it.
+          #
+          # Verified on a live delivered object: s3:DeleteObject without a
+          # version id returned DeleteMarker:true and succeeded. The underlying
+          # version was untouched and refused deletion — "Access Denied because
+          # object protected by object lock" — but the object had vanished from
+          # a normal listing.
+          #
+          # That is the dangerous shape. The evidence survives, yet the archive
+          # reads as empty to anyone not thinking in versions, and the person
+          # discovering it is mid-incident. An attacker who cannot destroy the
+          # logs can still make them look destroyed, which buys the same
+          # confusion at no cost.
+          #
+          # Platform deployment principals keep delete rights so a delete
+          # marker can be cleared; Object Lock still refuses them the version
+          # itself, so this grants no power to destroy anything.
+          - Sid: DenyDeleteMarkersAndVersionDeletion
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+            Resource: !Sub '${LogArchiveBucket.Arn}/*'
+            Condition:
+              ArnNotLike:
+                'aws:PrincipalArn':
+                  - 'arn:aws:sts::*:assumed-role/Platform*/*'
+                  - 'arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*'
+                  - 'arn:aws:sts::*:assumed-role/stacksets-exec-*/*'
+
           - Sid: CloudTrailCheckAcl
             Effect: Allow
             Principal: { Service: cloudtrail.amazonaws.com }
