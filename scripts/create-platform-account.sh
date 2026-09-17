@@ -58,6 +58,11 @@ case " ${PLATFORM_OUS} " in
 esac
 
 ALIAS="$(platform_account_alias "${OU}" "${ROLE}")"
+# The canonical name never changes, even if the live alias falls back to a
+# suffixed variant. SSM is keyed on this so downstream lookups are predictable:
+# a consumer asks for /platform/org/account/ad-security-audit and gets an
+# account id, without needing to know whether the alias collided.
+CANONICAL_ALIAS="${ALIAS}"
 EMAIL="$(platform_account_email "${OU}" "${ROLE}")"
 [[ -n "${DISPLAY_NAME}" ]] || DISPLAY_NAME="AltDigital ${OU^} ${ROLE^}"
 
@@ -153,22 +158,55 @@ if [[ -n "${CREDS}" ]]; then
   CUR="$(AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST \
     aws iam list-account-aliases --query 'AccountAliases[0]' --output text 2>/dev/null | no_cr | sed 's/^None$//')"
   if [[ -z "${CUR}" ]]; then
-    AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST \
-      aws iam create-account-alias --account-alias "${ALIAS}" \
-      && ok "alias ${ALIAS}" \
-      || warn "Could not set alias — it may be taken globally by another AWS customer."
+    # Account aliases are globally unique across ALL of AWS, not just this
+    # Organization. Open item B15 assumed the 'ad-' prefix was enough to avoid
+    # collision; it is not. 'ad-security-audit' was already taken by an
+    # unrelated AWS customer.
+    #
+    # Member aliases are far safer — ad-oeight-arc8-prod carries distinctive
+    # partner and client slugs — so the exposure is concentrated in platform
+    # accounts, whose names are generic words.
+    #
+    # Fall back to appending the last four digits of the account id. Still
+    # readable in a support ticket, deterministic given the account, and
+    # guaranteed unique in practice. The alias is a sign-in convenience, not an
+    # identifier the platform depends on: Cost Categories derive from account
+    # id, OU placement drives policy, and the Organizations account name is the
+    # human label. Nothing breaks if an alias cannot be set at all.
+    if AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST \
+         aws iam create-account-alias --account-alias "${ALIAS}" 2>/dev/null; then
+      ok "alias ${ALIAS}"
+    else
+      FALLBACK="${ALIAS}-${ACCOUNT_ID: -4}"
+      if AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST \
+           aws iam create-account-alias --account-alias "${FALLBACK}" 2>/dev/null; then
+        warn "'${ALIAS}' is taken globally by another AWS customer."
+        ok "alias ${FALLBACK} (fallback)"
+        ALIAS="${FALLBACK}"
+      else
+        warn "Could not set an alias. '${ALIAS}' and '${FALLBACK}' are both unavailable,"
+        warn "or IAM has not finished propagating. Re-run to retry — nothing depends on it."
+      fi
+    fi
   else
+    # Adopt whatever is actually set, which may be a fallback from an earlier
+    # run. Leaving ALIAS at the canonical value would report a live alias that
+    # does not exist and skip recording the real one.
     skip "alias already ${CUR}"
+    ALIAS="${CUR}"
   fi
 else
   warn "Could not assume OrganizationAccountAccessRole yet — alias not set."
   warn "IAM is eventually consistent after account creation; re-run to finish."
 fi
 
-put_param "/org/account/${ALIAS}" "${ACCOUNT_ID}" "Platform account ${ALIAS} (${OU} OU)"
+put_param "/org/account/${CANONICAL_ALIAS}" "${ACCOUNT_ID}" "Platform account ${CANONICAL_ALIAS} (${OU} OU)"
+if [[ "${ALIAS}" != "${CANONICAL_ALIAS}" ]]; then
+  put_param "/org/account/${CANONICAL_ALIAS}/alias" "${ALIAS}" "Live IAM alias; differs from the canonical name because of a global collision"
+fi
 
 hr
-ok "${ALIAS} = ${ACCOUNT_ID}"
+ok "${CANONICAL_ALIAS} = ${ACCOUNT_ID}   (alias: ${ALIAS})"
 log ""
 log "AWS sends a welcome message to ${EMAIL}."
 log "Confirm it arrives — that is the genuine end-to-end test of the"

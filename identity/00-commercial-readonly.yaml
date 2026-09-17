@@ -76,17 +76,6 @@ Parameters:
     AllowedPattern: '^[0-9]{12}$'
     ConstraintDescription: Must be a 12-digit AWS account id.
 
-  SessionDuration:
-    Type: String
-    Default: PT4H
-    Description: >-
-      ISO-8601 session duration. Four hours rather than the one hour used by
-      PlatformBootstrapAdmin: this role is read-only over a single data domain
-      and carries no ability to change anything, so the re-authentication tax
-      buys much less here than it does on an admin role. A month-end close
-      should not need six sign-ins.
-    AllowedValues: [PT1H, PT2H, PT4H]
-
   SsmPrefix:
     Type: String
     Default: /platform
@@ -106,7 +95,19 @@ Resources:
         Billing and cost data only. No member account access, no operational
         telemetry, no write actions anywhere. Design doc 12.
       InstanceArn: !Ref InstanceArn
-      SessionDuration: !Ref SessionDuration
+
+      # Four hours, not the one hour PlatformBootstrapAdmin uses. This role is
+      # read-only over a single data domain and cannot change anything, so the
+      # re-authentication tax buys much less here than it does on an admin
+      # role — a month-end close should not need six sign-ins.
+      #
+      # Literal rather than a parameter on purpose. cfn-guard evaluates the
+      # template statically and cannot resolve a !Ref, so a parameterised
+      # duration would pass SSO_PERMISSION_SET_SESSION_DURATION_BOUNDED by
+      # being unreadable rather than by being correct. A parameter with
+      # AllowedValues would enforce it at deploy time, but only the literal
+      # also enforces it at review time, which is where it matters.
+      SessionDuration: PT4H
 
       # Drops the portal straight into Cost Management rather than the generic
       # console home. The Cost Explorer and Billing consoles are served from
@@ -318,10 +319,15 @@ Resources:
               - invoicing:Tag*
               - invoicing:Untag*
               - invoicing:Update*
+              # Accept* is not a verb prefix used elsewhere in this list. It is
+              # here because payments:AcceptFinancingApplicationTerms is a
+              # write that none of the usual prefixes catch — the kind of thing
+              # enumerating by verb misses, which is why cfn-lint's action-name
+              # check is load-bearing here rather than cosmetic.
+              - payments:Accept*
               - payments:Create*
               - payments:Delete*
               - payments:Make*
-              - payments:Set*
               - payments:Tag*
               - payments:Untag*
               - payments:Update*

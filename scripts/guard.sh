@@ -5,10 +5,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 command -v cfn-guard >/dev/null 2>&1 \
   || die "cfn-guard not found. Run scripts/setup-tooling.sh"
 
-RULES_DIR="${REPO_ROOT}/policies/guard"
+# win_path for the same reason as the templates -- see find_templates in
+# lib/common.sh. cfn-guard reports a missing rules directory, not a path
+# problem, so this looks like the rules have not been written yet.
+RULES_DIR="$(win_path "${REPO_ROOT}/policies/guard")"
 
-mapfile -t TEMPLATES < <(find "${REPO_ROOT}/org" "${REPO_ROOT}/identity" "${REPO_ROOT}/baseline" \
-  -name '*.yaml' -o -name '*.yml' 2>/dev/null | sort)
+mapfile -t TEMPLATES < <(find_templates)
 
 [[ ${#TEMPLATES[@]} -gt 0 ]] || { warn "No templates found."; exit 0; }
 

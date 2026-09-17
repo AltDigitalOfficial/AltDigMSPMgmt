@@ -30,21 +30,29 @@ rule S3_ENCRYPTION_REQUIRED when %s3_buckets !empty {
   }
 }
 
+# The custom message sits on the `exists` clause and again INSIDE the nested
+# block, not after it. cfn-guard 3.x will not parse a <<...>> that follows a
+# block clause, and the parse error it reports quotes the message rather than
+# naming the construct — so it reads as a problem with the text.
 rule S3_PUBLIC_ACCESS_BLOCKED when %s3_buckets !empty {
   %s3_buckets {
     Properties.PublicAccessBlockConfiguration exists
+    <<
+      Violation: S3 bucket with no PublicAccessBlockConfiguration at all.
+      Fix:       Add it with all four settings true.
+    >>
     Properties.PublicAccessBlockConfiguration {
       BlockPublicAcls == true
       BlockPublicPolicy == true
       IgnorePublicAcls == true
       RestrictPublicBuckets == true
+      <<
+        Violation: S3 bucket without all four public access blocks set true.
+        Reason:    Partial block configuration reads as protected and is not.
+        Fix:       Set all four to true. Public content is served via
+                   CloudFront, never from a public bucket.
+      >>
     }
-    <<
-      Violation: S3 bucket without all four public access blocks set true.
-      Reason:    Partial block configuration reads as protected and is not.
-      Fix:       Set all four to true. Public content is served via CloudFront,
-                 never from a public bucket.
-    >>
   }
 }
 
@@ -272,8 +280,11 @@ rule SSO_PERMISSION_SET_SESSION_DURATION_BOUNDED when %permission_sets !empty {
                  implicit means nobody notices when a later edit sets twelve.
                  The session is how long a revoked or compromised federation
                  still works after the identity source has cut it off.
-      Fix:       Set SessionDuration to PT1H, PT2H or PT4H. Longer than four
-                 hours needs a deviation record, not a template change.
+      Fix:       Set SessionDuration to a LITERAL PT1H, PT2H or PT4H. A !Ref
+                 to a parameter also fails this rule, and is meant to: cfn-guard
+                 evaluates statically and cannot resolve it, so a parameterised
+                 duration would be unreadable rather than correct. Longer than
+                 four hours needs a deviation record, not a template change.
     >>
   }
 }

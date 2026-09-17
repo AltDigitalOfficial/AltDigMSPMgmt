@@ -56,6 +56,11 @@ no_cr() { tr -d '\r'; }
 # So convert explicitly, and only where the argument genuinely is a file.
 # 'cygpath -m' yields C:/AltDigital/... — a Windows path with forward slashes,
 # which file:// URIs accept. No-op off Windows, where cygpath does not exist.
+# Note the asymmetry: cygpath emits a trailing newline, printf does not. Any
+# caller building a LIST of paths must strip it -- command substitution does,
+# which is why find_templates below wraps this in "$(...)". Missed once, and
+# the symptom was cfn-lint reporting twice as many templates as exist and
+# failing on a blank filename.
 win_path() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
 }
@@ -369,6 +374,25 @@ normalise_phone() {
 # All stack deploys go through here so behaviour is uniform: validated before
 # submission, idempotent, and a real changeset on --dry-run rather than a
 # narrated guess.
+
+# find_templates -> every CloudFormation template, one per line, in a form the
+# linters can actually open.
+#
+# win_path is not optional here. common.sh exports MSYS_NO_PATHCONV=1 so that
+# SSM paths and ARNs survive the trip to aws.exe, and the side effect is that
+# REAL paths stop being converted too: cfn-lint.exe and cfn-guard.exe are
+# Windows binaries and cannot open '/c/AltDigital/...'. The failure is
+# 'could not be processed by glob.glob', which reads like a bad pattern rather
+# than a bad path, and cfn-lint still exits 0 on it under some invocations —
+# so a lint run could report success having linted nothing at all.
+find_templates() {
+  local d
+  for d in org identity baseline; do
+    [[ -d "${REPO_ROOT}/${d}" ]] || continue
+    find "${REPO_ROOT}/${d}" \( -name '*.yaml' -o -name '*.yml' \) -print
+  done | sort | while read -r t; do printf '%s
+' "$(win_path "${t}")"; done
+}
 
 cfn_validate() {
   local template="$1"
