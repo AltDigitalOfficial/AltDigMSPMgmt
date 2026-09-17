@@ -15,6 +15,7 @@ Design package: [starter_docs/](starter_docs/) · Build sequence:
 | 1.1 / 14.1 — Organization and OU structure | **Deployed** — stack `platform-org-structure`, drift `IN_SYNC` |
 | 1.2 — SCPs | **Deployed** — 3 policies attached to Sandbox OU; Members not yet attached |
 | 1.3 — Guardrail test harness | **Passing** — 8/9 provable against a live account |
+| 11.1 (part) — Commercial billing access | **Deployed** — `CommercialReadOnly` permission set, group-assigned. Aggregation layer still absent: deviation D-009 |
 | 2 onward | Not started |
 
 Live tree:
@@ -75,6 +76,32 @@ contract, BAA, notification window, downstream SLA commitments, Cost Category
 dimension, Truveon tenant and registry entry are all separate and still
 outstanding.
 
+## Commercial access
+
+Billing and cost data for the commercial function, and nothing else — no member
+account access, no operational telemetry, no writes anywhere.
+
+```bash
+cp config/identity.env.example config/identity.env   # gitignored; add members
+scripts/deploy-commercial-access.sh --dry-run
+scripts/deploy-commercial-access.sh
+```
+
+Creates the `CommercialReadOnly` Identity Center group if absent, deploys the
+permission set and its assignment, and adds the members listed in
+`config/identity.env`. Nobody is ever removed by the script — a leaver is
+reported and left in place, because losing someone's access as a side effect of
+a stale local file is the wrong failure mode.
+
+Two things about it are temporary and both are recorded in
+[docs/deviations.md](docs/deviations.md):
+
+- **D-009** — assigned to the management account, because the reporting account
+  and delegated Cost Explorer access that should hold it do not exist yet
+- **D-010** — the group and its members live in the built-in Identity Center
+  directory, which the switch to Entra will delete. The permission set survives;
+  the group id is a template parameter precisely so the redeploy is one command
+
 ## The resulting tree
 
 ```
@@ -112,6 +139,7 @@ amount of downstream reporting can correct.
 ```
 config/         platform.env — single source of truth for shared values
 org/            CloudFormation for the Organization tree
+identity/       Identity Center permission sets and assignments
 policies/guard/ cfn-guard rules; SCPs and RCPs land here
 scripts/        bash entry points; lib/common.sh holds shared helpers
 docs/           bootstrap runbook, deviation records
@@ -122,8 +150,9 @@ starter_docs/   the design package (source material)
 
 - Nothing hardcodes an OU id or account id — they are published to SSM under
   `/platform/` and read from there
-- No personal data in the repository. `config/contacts.env` is gitignored and
-  blocked by the pre-commit hook
+- No personal data in the repository. `config/contacts.env` and
+  `config/identity.env` are gitignored and blocked by the pre-commit hook.
+  Group and permission set names are not personal data and are committed
 - No IAM users or long-lived access keys for human principals in member accounts
 - Automated remediation never terminates, deletes, deregisters, rolls back or
   purges

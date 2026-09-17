@@ -94,16 +94,38 @@ put_param /identity/identity-store-id "${IDENTITY_STORE_ID}" \
 # Helpers
 # ---------------------------------------------------------------------------
 #
-# All of these use the AWS CLI shorthand form for --alternate-identifier and
-# --member-id rather than inline JSON. Shorthand has no braces or quotes for
-# the Windows shell to mangle, and MSYS path conversion is already disabled in
-# common.sh.
+# --alternate-identifier must be JSON, not AWS CLI shorthand. Shorthand looks
+# like it ought to work and fails with "Shorthand syntax does not support
+# document types" — AttributeValue is a document type, so the whole argument
+# has to be JSON.
+#
+# The failure mode is what makes this worth a comment. Both lookups below are
+# wrapped in `2>/dev/null || true` because "not found" is a legitimate answer,
+# and that swallows the shorthand parse error too: the call returns empty on
+# EVERY invocation, so an existing group reads as absent and the next run tries
+# to create a duplicate instead of reusing it. Cost one deploy to find.
+#
+# alternate_identifier builds the JSON with printf rather than inline escaped
+# quotes. Same result, but a shell-quoted "{\"UniqueAttribute\":{...}}" is
+# unreadable and one deleted backslash away from being silently wrong.
+#
+# Safe on Git Bash: the JSON has no leading slash, so MSYS path conversion has
+# nothing to rewrite, and common.sh disables it regardless.
+#
+# --member-id is a plain union with a string member, not a document type, so
+# shorthand is genuinely fine there. Left as shorthand rather than made
+# uniform, because the difference between the two is the point.
+
+# alternate_identifier <attribute-path> <value> -> JSON for --alternate-identifier
+alternate_identifier() {
+  printf '{"UniqueAttribute":{"AttributePath":"%s","AttributeValue":"%s"}}' "$1" "$2"
+}
 
 # group_id_by_name <display-name> -> group id, or empty
 group_id_by_name() {
   aws identitystore get-group-id \
     --identity-store-id "${IDENTITY_STORE_ID}" \
-    --alternate-identifier "UniqueAttribute={AttributePath=displayName,AttributeValue=$1}" \
+    --alternate-identifier "$(alternate_identifier displayName "$1")" \
     --query GroupId --output text 2>/dev/null | no_cr || true
 }
 
@@ -111,7 +133,7 @@ group_id_by_name() {
 user_id_by_name() {
   aws identitystore get-user-id \
     --identity-store-id "${IDENTITY_STORE_ID}" \
-    --alternate-identifier "UniqueAttribute={AttributePath=userName,AttributeValue=$1}" \
+    --alternate-identifier "$(alternate_identifier userName "$1")" \
     --query UserId --output text 2>/dev/null | no_cr || true
 }
 
@@ -187,7 +209,13 @@ trim() { printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$/
 # function changes what "$*" joins with, and every log helper in common.sh uses
 # "$*" — the result is progress lines reading "Creating,identity,store,user".
 # Learned the obvious way.
-split_records() { printf '%s' "$1" | tr ',' '\n'; }
+#
+# printf '%s\n', not printf '%s'. Without the trailing newline the last --
+# and with a single member, the only -- record has no line terminator, `read`
+# returns non-zero on it, and the while loop body never runs. The script then
+# finishes successfully having done nothing, which is the worst outcome
+# available here: the group exists, the stack deploys, and nobody has access.
+split_records() { printf '%s\n' "$1" | tr ',' '\n'; }
 
 # configured_emails <spec> -> the third field of each record, one per line
 configured_emails() {

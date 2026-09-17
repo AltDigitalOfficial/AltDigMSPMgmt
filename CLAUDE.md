@@ -28,8 +28,10 @@ say so rather than inventing its contents.
 - **Nothing hardcodes an OU id or an account id.** OU ids are published to SSM
   Parameter Store under `/platform/` and read from there.
 - **No personal data in the repository.** Names, direct emails and phone
-  numbers live in `config/contacts.env`, which is gitignored and blocked by the
-  pre-commit hook.
+  numbers live in `config/contacts.env` (AWS alternate contacts) and
+  `config/identity.env` (Identity Center group membership). Both are gitignored
+  and blocked by the pre-commit hook. Group and permission set *names* are not
+  personal data and do live in the repository.
 
 ## Windows / Git Bash traps
 
@@ -84,6 +86,7 @@ design package.
 ```
 config/       platform.env — single source of truth for shared values
 org/          CloudFormation for the Organization tree
+identity/     Identity Center permission sets and assignments
 policies/     cfn-guard rules; SCPs and RCPs land here
 scripts/      bash entry points; lib/common.sh holds the shared helpers
 docs/         runbooks and deviation records

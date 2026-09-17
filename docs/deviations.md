@@ -270,6 +270,115 @@ from one containing regulated client workloads.
 
 ---
 
+## D-009 · `CommercialReadOnly` is assigned to the management account
+
+**Design position** — [12-commercial-access.md](../starter_docs/12-commercial-access.md):
+cost and billing data is Organization-level, which creates tension with keeping
+the management account nearly empty. *"Do not resolve that by granting access to
+the management account."* The design's answer is a CUR export to S3 in a
+dedicated reporting account plus delegated Cost Explorer access, consumed from
+the aggregation layer.
+
+**Actual** — The `CommercialReadOnly` permission set is assigned to
+`738815759702`, the Organization management account.
+
+**Reason** — The aggregation layer does not exist. The Infrastructure OU holds
+no accounts, there is no reporting account, no CUR export and no registered
+delegated administrator for any billing service (verified 2026-09-16:
+`list-delegated-administrators` returns empty). The management account is
+currently the only place cost data exists, so the choice was between this and
+no commercial access at all.
+
+**Decision** — Accepted (Jamie, 2026-09-16), with the scope below.
+
+**A correction to the design worth recording.** Closing this deviation will not
+remove the management account grant entirely, because part of it cannot move.
+Delegated administration covers Cost Explorer, Budgets, CUR / Data Exports, cost
+anomaly detection and Cost Optimization Hub. It does **not** cover invoices,
+payment instruments, credits or tax — those are payer-account data and are
+readable only in the management account. Design doc 12 lists "Billing console,
+invoices" under Granted, so the design already requires something that its own
+placement rule forbids. When the aggregation layer lands, the correct end state
+is a split: the analytical surface moves, and a much narrower invoice-and-payer
+grant stays here.
+
+**Risk while open**
+- A standing federated grant on the management account for a non-engineering
+  function. That is the account with no SCP above it
+- The grant reveals the account and OU tree — effectively the client roster —
+  because Cost Explorer is unreadable without account names
+- Growing exposure: today the only member account with spend is
+  `ad-sandbox-canary`, so there is close to nothing to see. That stops being
+  true at first vesting
+- Compounds with [D-007](#d-007--standing-platformbootstrapadmin-grant-with-no-jit-elevation):
+  two standing permission sets now exist on the management account
+
+**Mitigations applied**
+- The permission set's inline policy carries a `NotAction` deny that permits
+  only billing service prefixes. Everything else — CloudWatch, logs, Config,
+  Security Hub, GuardDuty, S3, EC2, KMS, IAM, Identity Center, Organizations
+  writes — is denied outright, and stays denied for services AWS has not
+  launched yet. This matters more than usual precisely because SCPs do not
+  apply to the management account, so the permission set is the whole boundary
+- A second deny removes every write action inside the billing domain,
+  enumerated by verb prefix per service, including tagging — Cost Categories
+  and cost allocation tags are the billing model, so a tag change is a billing
+  change
+- Assigned to exactly one account. No member account access of any kind
+- Assigned to a group, never to a user. Membership is the only lever
+- Four-hour session, and read-only throughout
+- Verified against IAM Access Analyzer (`validate-policy`, no findings) and
+  `cfn-guard`
+
+**Close when** — The reporting account exists, CUR / Data Exports is landing
+there, and a billing delegated administrator is registered. At that point the
+analytical half of this grant moves to the reporting account and what remains
+here is narrowed to invoices and payer data.
+
+**Deadline** — Before the first member account is vested, the same gate as
+D-007. A billing-only grant over an Organization whose entire spend is one
+sandbox account is a very different proposition from one covering live client
+workloads.
+
+---
+
+## D-010 · Identity Center users and groups are created outside Entra — CLOSES ITSELF
+
+**Design position** — [03-identity-and-access.md](../starter_docs/03-identity-and-access.md):
+Entra ID is the source of truth for staff identity, SAML for authentication,
+SCIM for provisioning, so joiners and leavers flow automatically.
+
+**Actual** — The identity source is still the built-in Identity Center
+directory. `scripts/deploy-commercial-access.sh` creates the group and its
+members directly in that directory from `config/identity.env`.
+
+**Reason** — Entra federation is listed under "Later" in the bootstrap runbook
+and has not been done. Access was needed before it.
+
+**Known cost, accepted deliberately** — Switching the identity source to Entra
+**deletes every directory user and group and every assignment made to them**.
+Permission sets survive. The runbook's own advice was to do the cutover while
+the user count was one; it is now two, and this deviation is the record of
+having gone the other way.
+
+**Why the damage is bounded** — The permission set and its policy are
+CloudFormation and survive untouched. The group id is a template *parameter*
+rather than an `AWS::IdentityStore::Group` resource, specifically so that the
+same template works either side of the cutover: before it the deploy script
+creates the group, after it SCIM does, and only the parameter value differs.
+Redeploying after the cutover is one script run, not a rewrite.
+
+**Close when** — The identity source is Entra, the `CommercialReadOnly` group
+is provisioned by SCIM from an Entra group of the same name, and
+`config/identity.env` is deleted. Two sources of truth for who has access is
+worse than either one alone.
+
+**Deadline** — Before the team grows past a handful of directory users. Every
+user added before the cutover is another one to recreate after it, and the
+recreate is silent — access simply stops working.
+
+---
+
 ## D-005 · Design package layout differs from the prompts document
 
 **Design position** — [claude-code-prompts.md](../starter_docs/claude-code-prompts.md)

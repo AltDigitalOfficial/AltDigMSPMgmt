@@ -43,7 +43,7 @@ if [[ ${need_cfn_guard} -eq 1 ]]; then
   log ""
   log "  cfn-guard — download the Windows build from:"
   log "    https://github.com/aws-cloudformation/cloudformation-guard/releases/latest"
-  log "    file: cfn-guard-v3-x86_64-pc-windows-msvc.tar.gz"
+  log "    file: cfn-guard-v3-x86_64-windows-latest.tar.gz"
   log "    extract cfn-guard.exe somewhere on PATH"
   log ""
   log "  or, if Rust is available:  cargo install cfn-guard"

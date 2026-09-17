@@ -6,7 +6,7 @@
 
 SHELL := /usr/bin/env bash
 
-.PHONY: help setup lint guard validate validate-aws validate-policies bootstrap org-structure
+.PHONY: help setup lint guard validate validate-aws validate-policies bootstrap org-structure commercial-access
 
 help:
 	@echo "setup           install cfn-lint and cfn-guard"
@@ -17,6 +17,7 @@ help:
 	@echo "validate        validate-aws + validate-policies + lint + guard"
 	@echo "bootstrap       bootstrap the management account (add DRY=1 for dry run)"
 	@echo "org-structure   deploy the OU skeleton (add DRY=1 for dry run)"
+	@echo "commercial-access  deploy CommercialReadOnly + reconcile membership"
 
 DRYFLAG := $(if $(DRY),--dry-run,)
 
@@ -42,3 +43,6 @@ bootstrap:
 
 org-structure:
 	@scripts/deploy-org-structure.sh $(DRYFLAG)
+
+commercial-access:
+	@scripts/deploy-commercial-access.sh $(DRYFLAG)
