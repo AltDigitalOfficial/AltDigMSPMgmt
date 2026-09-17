@@ -62,6 +62,14 @@ Parameters:
     Description: Organization id (o-xxxx), used to scope the bucket policy.
     AllowedPattern: '^o-[a-z0-9]{10,32}$'
 
+  ManagementAccountId:
+    Type: String
+    Description: >-
+      Management account id. The organization trail lives there, and both the
+      key policy and the bucket policy scope CloudTrail's access to trails
+      owned by that account.
+    AllowedPattern: '^[0-9]{12}$'
+
 Resources:
 
   # -------------------------------------------------------------------------
@@ -109,15 +117,44 @@ Resources:
             Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
             Action: 'kms:*'
             Resource: '*'
-          # CloudTrail and Config encrypt with this key from the management
-          # account and from every member account, so the grant is scoped by
-          # organization rather than by account id — there is no list of
-          # accounts to maintain, and a newly vested account works immediately.
-          - Sid: AllowLogServicesToEncrypt
+          # aws:PrincipalOrgID does NOT work for a service principal.
+          #
+          # The first version conditioned these grants on aws:PrincipalOrgID,
+          # reasoning that only principals inside the Organization should
+          # encrypt. But when CloudTrail calls KMS the principal IS
+          # cloudtrail.amazonaws.com — an AWS service, not a member of any
+          # organization — so the condition could never match and CloudTrail was
+          # refused the key. The trail failed to create with "Insufficient
+          # permissions to access S3 bucket or KMS key", which names neither the
+          # condition nor the reason.
+          #
+          # Service principals are constrained by aws:SourceArn,
+          # aws:SourceAccount or aws:SourceOrgID — properties of the resource
+          # the service is ACTING FOR, not of the caller.
+          #
+          # For CloudTrail the sharper control is the encryption context, which
+          # carries the trail ARN. It restricts this key to encrypting trails
+          # owned by the management account, so a trail created elsewhere in the
+          # Organization cannot use it.
+          - Sid: AllowCloudTrailToEncrypt
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action:
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringLike:
+                'kms:EncryptionContext:aws:cloudtrail:arn':
+                  !Sub 'arn:aws:cloudtrail:*:${ManagementAccountId}:trail/*'
+
+          # Config and VPC flow log delivery act on behalf of each member
+          # account, so they are scoped by source organization: no account list
+          # to maintain, and a newly vested account works immediately.
+          - Sid: AllowLogDeliveryToEncrypt
             Effect: Allow
             Principal:
               Service:
-                - cloudtrail.amazonaws.com
                 - config.amazonaws.com
                 - delivery.logs.amazonaws.com
             Action:
@@ -127,7 +164,7 @@ Resources:
             Resource: '*'
             Condition:
               StringEquals:
-                'aws:PrincipalOrgID': !Ref OrganizationId
+                'aws:SourceOrgID': !Ref OrganizationId
 
   LogArchiveKeyAlias:
     Type: AWS::KMS::Alias
@@ -216,6 +253,9 @@ Resources:
             Principal: { Service: cloudtrail.amazonaws.com }
             Action: 's3:GetBucketAcl'
             Resource: !GetAtt LogArchiveBucket.Arn
+            Condition:
+              StringLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:*:${ManagementAccountId}:trail/*'
 
           - Sid: CloudTrailWrite
             Effect: Allow
@@ -225,7 +265,8 @@ Resources:
             Condition:
               StringEquals:
                 's3:x-amz-acl': 'bucket-owner-full-control'
-                'aws:SourceOrgID': !Ref OrganizationId
+              StringLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:*:${ManagementAccountId}:trail/*'
 
           - Sid: ConfigCheckAcl
             Effect: Allow

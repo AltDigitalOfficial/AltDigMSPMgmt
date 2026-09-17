@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — organization-wide CloudTrail. One trail in the
+  management account capturing every API call in every account, delivered to
+  the immutable log archive. Deploys to the management account only.
+
+# ---------------------------------------------------------------------------
+# One organization trail, not one trail per account
+# ---------------------------------------------------------------------------
+# An organization trail is created once in the management account and applies
+# to every member account automatically — including accounts vested after it
+# was created. A member account cannot disable, reconfigure or delete it: the
+# trail is not their resource. That property is doing real work here, because
+# it is the one detective control that does not depend on the member-account
+# baseline having been applied correctly.
+#
+# The SCPs deny cloudtrail:StopLogging and DeleteTrail as defence in depth, but
+# the organization trail would survive even without them.
+#
+# ---------------------------------------------------------------------------
+# What this deliberately does not do
+# ---------------------------------------------------------------------------
+# No CloudWatch Logs delivery. Design doc 07 expects an incident readout to
+# answer "what did this principal do in the preceding 24 hours", which against
+# S3 means Athena rather than a log-group query — slower, but an organization
+# trail across every account is a large ingest volume and CloudWatch Logs is
+# charged per GB. Recorded as B-005 in docs/build-backlog.md and revisited when
+# Phase 7 can weigh query latency during a live incident against the cost.
+#
+# No data events. S3 object-level and Lambda invocation logging multiply volume
+# by orders of magnitude and belong to a per-tenant decision driven by the
+# questionnaire's data classification, not to the platform baseline.
+
+Parameters:
+
+  LogArchiveBucketName:
+    Type: String
+    Description: >-
+      Bucket in the Log Archive account. Read from
+      /platform/org/account/altdig-security-logarchive by the deploy script;
+      not hardcoded.
+    MinLength: 3
+
+  LogArchiveKeyArn:
+    Type: String
+    Description: KMS key ARN in the Log Archive account used to encrypt trail objects.
+    AllowedPattern: '^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/.+$'
+
+  TrailName:
+    Type: String
+    Default: platform-organization-trail
+    Description: Trail name. Appears in every member account's CloudTrail console.
+
+Resources:
+
+  OrganizationTrail:
+    Type: AWS::CloudTrail::Trail
+    # Retain rather than delete on stack removal. Deleting the trail would stop
+    # capture across every account in the Organization at once, which is both
+    # an availability event for the evidence pipeline and precisely the action
+    # the SCPs exist to prevent a human performing by hand.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TrailName: !Ref TrailName
+      IsOrganizationTrail: true
+      IsLogging: true
+
+      # Multi-region regardless of the platform's region allow-list. A trail
+      # limited to permitted regions would not record activity in a region the
+      # allow-list is supposed to prevent — and activity in an unexpected
+      # region is exactly what you want captured, not skipped. This is the
+      # blind spot prompt 10.2 describes, and the trail must not share it.
+      IsMultiRegionTrail: true
+
+      # Global service events (IAM, STS, CloudFront, Route 53) are emitted in
+      # us-east-1 regardless of where anything is deployed. Without this, every
+      # IAM action in the Organization goes unrecorded.
+      IncludeGlobalServiceEvents: true
+
+      # Produces a signed digest chain, so tampering with delivered objects is
+      # detectable independently of S3 Object Lock. Two mechanisms, different
+      # failure modes: Object Lock prevents alteration, validation proves none
+      # occurred.
+      EnableLogFileValidation: true
+
+      S3BucketName: !Ref LogArchiveBucketName
+      KMSKeyId: !Ref LogArchiveKeyArn
+
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: organization-audit-trail }
+
+Outputs:
+
+  TrailArn:
+    Description: Organization trail ARN
+    Value: !GetAtt OrganizationTrail.Arn
+
+  TrailNameOut:
+    Description: Organization trail name
+    Value: !Ref TrailName
+
+  # Echoed so the deploy script can report the destination without a second
+  # lookup, and so the stack records what it was pointed at.
+  Destination:
+    Description: Log archive bucket receiving this trail
+    Value: !Ref LogArchiveBucketName
