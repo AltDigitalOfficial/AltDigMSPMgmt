@@ -33,6 +33,18 @@ export REPO_ROOT
 # shellcheck source=/dev/null
 source "${REPO_ROOT}/config/platform.env"
 
+# Default the CLI profile, so that forgetting to export it does not silently
+# run against whatever this workstation's default credentials happen to be —
+# which here is an IAM user in an unrelated AWS account. See the comment on
+# PLATFORM_AWS_PROFILE in config/platform.env for the near-miss that prompted
+# this.
+#
+# An AWS_PROFILE already in the environment always wins: overriding a
+# deliberate choice would be worse than the problem being solved.
+if [[ -z "${AWS_PROFILE:-}" && -n "${PLATFORM_AWS_PROFILE:-}" ]]; then
+  export AWS_PROFILE="${PLATFORM_AWS_PROFILE}"
+fi
+
 # --- output ----------------------------------------------------------------
 
 if [[ -t 1 ]]; then
@@ -131,15 +143,51 @@ require_cli() {
 # script that mutates the Organization calls this first. Pointing a bootstrap
 # script at the wrong account is the single easiest catastrophic mistake here.
 require_account() {
-  local expected="$1"
-  local actual
-  actual="$(aws sts get-caller-identity --query Account --output text 2>/dev/null | no_cr)" \
-    || die "Could not call sts:GetCallerIdentity. Are credentials configured?"
-  if [[ "${actual}" != "${expected}" ]]; then
-    die "Wrong account. Expected ${expected}, credentials resolve to ${actual}.
+  local expected="$1" out rc
+
+  # stderr is captured rather than discarded. The previous version sent it to
+  # /dev/null and reported "Are credentials configured?" for every failure,
+  # which points at configuration — and the overwhelmingly common cause is an
+  # expired SSO token, where the configuration is perfectly correct and the
+  # answer is one command. PlatformBootstrapAdmin sessions last ONE HOUR by
+  # design, so this is not an edge case; it is most of the failures.
+  #
+  # The `if` matters. Under `set -e` a failing command substitution in a plain
+  # assignment terminates the shell before the next line runs, so the obvious
+  #     out="$(aws ...)"; rc=$?
+  # exits 255 with no message at all — worse than the message being replaced.
+  # An assignment is a simple command and gets no exemption; a condition does.
+  if out="$(aws sts get-caller-identity --query Account --output text 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  out="$(printf '%s' "${out}" | no_cr)"
+
+  if [[ ${rc} -ne 0 ]]; then
+    case "${out}" in
+      *"Token has expired"*|*expired*|*SSO*|*sso*)
+        die "SSO session expired.
+
+      aws sso login --profile ${AWS_PROFILE:-${PLATFORM_AWS_PROFILE:-<profile>}}
+
+      PlatformBootstrapAdmin sessions are one hour by design, so expect this
+      roughly hourly during a long build session." ;;
+      *"could not be found"*)
+        die "AWS profile ${AWS_PROFILE:-<unset>} is not configured.
+      Check ~/.aws/config, or unset AWS_PROFILE to use the default chain." ;;
+      *)
+        die "Could not call sts:GetCallerIdentity:
+      ${out}" ;;
+    esac
+  fi
+
+  if [[ "${out}" != "${expected}" ]]; then
+    die "Wrong account. Expected ${expected}, credentials resolve to ${out}.
+      Profile in use: ${AWS_PROFILE:-<none — using the default chain>}
       Set AWS_PROFILE to a profile for ${expected} and retry."
   fi
-  ok "Account ${actual} confirmed."
+  ok "Account ${out} confirmed."
 }
 
 caller_arn() {

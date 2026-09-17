@@ -52,7 +52,14 @@ fi
 
 [[ ${#TEMPLATES[@]} -gt 0 ]] || { warn "No templates found."; exit 0; }
 
+# ValidateTemplate is read-only and works from any account, so this script
+# deliberately does not call require_account — it should stay usable without a
+# platform session. But it must SAY which account it used: on 2026-09-17 it
+# validated eleven platform templates against an unrelated AWS account and
+# printed eleven green lines, and nothing in that output hinted at it.
+CALLER="$(aws sts get-caller-identity --query Account --output text 2>/dev/null | no_cr)" || true
 info "Validating ${#TEMPLATES[@]} template(s) against the CloudFormation API"
+info "  account ${CALLER:-<unknown>} via profile ${AWS_PROFILE:-<default chain>}"
 FAILED=0
 for t in "${TEMPLATES[@]}"; do
   cfn_validate "${t}" || FAILED=1
