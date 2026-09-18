@@ -4,14 +4,20 @@ Standing instructions for any Claude Code session in this repository.
 
 ## Read before making architectural choices
 
-The design package lives in [starter_docs/](starter_docs/). Read the relevant
+The design package lives in [design/](design/). Read the relevant
 document before implementing against it. The build sequence is
-[starter_docs/claude-code-prompts.md](starter_docs/claude-code-prompts.md).
+[design/claude-code-prompts.md](design/claude-code-prompts.md).
 
 Note: several documents the package cross-references are **not yet present** —
-01 (Design Principles), 04, 05, 06, 08, 09, 11, 14, the Truveon functional
+04 (Security Controls and Evidence), 05 (Resilience), 08 (Change and Release),
+09 (Vulnerability and Patching), 11 (Developer Access), the Truveon functional
 assumptions, and four of six diagrams. Where a prompt cites a missing document,
 say so rather than inventing its contents.
+
+Supplied 2026-09-17: 01 (Design Principles), 06 (Observability),
+06a (Alarm Specification) and 14 (Environment Tiers). 06a is **authoritative**
+for alarm configuration and is consumed directly by the instrumentation Lambda
+rather than transcribed — see `scripts/publish-instrumentation.sh`.
 
 ## Hard rules
 
@@ -80,7 +86,7 @@ design package.
 - One scoped piece of work at a time. Do the thing asked, then stop.
 - Give the why alongside the what, and be direct about tradeoffs.
 - Flag anything uncertain rather than assuming — especially where a load-bearing
-  assumption (the `V` items in `starter_docs/open-items.md`) is involved.
+  assumption (the `V` items in `design/open-items.md`) is involved.
 
 ## Layout
 
@@ -91,7 +97,7 @@ identity/     Identity Center permission sets and assignments
 policies/     cfn-guard rules; SCPs and RCPs land here
 scripts/      bash entry points; lib/common.sh holds the shared helpers
 docs/         runbooks and deviation records
-starter_docs/ the design package (source material, not edited by build work)
+design/ the design package (source material, not edited by build work)
 ```
 
 Directories from the prompts document that do not exist yet — `baseline/`,

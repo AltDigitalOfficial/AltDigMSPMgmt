@@ -1,6 +1,6 @@
 # Accepted Deviations from the Design Package
 
-Where the build departs from `starter_docs/`, it is recorded here with the
+Where the build departs from `design/`, it is recorded here with the
 reason and the condition for closing it. An undeclared difference is drift and
 is treated as a finding — design principle P9 applied to the design package
 itself.
@@ -9,7 +9,7 @@ itself.
 
 ## D-009 · Account alias prefix is `altdig-`, not `ad-`
 
-**Design position** — [15-partner-model.md](../starter_docs/15-partner-model.md)
+**Design position** — [15-partner-model.md](../design/15-partner-model.md)
 specifies `ad-<partner>-<client>-<env>`, justifying the prefix as: *"Account
 aliases are globally unique across all of AWS; the prefix avoids collision and
 makes ownership obvious in a support ticket."* Open item B15 records the prefix
@@ -113,7 +113,7 @@ years, so masking at the source is the only control that actually works.
 
 ## D-012 · Four StackSets remain in the management account
 
-**Design position** — [02-platform-architecture.md](../starter_docs/02-platform-architecture.md):
+**Design position** — [02-platform-architecture.md](../design/02-platform-architecture.md):
 *"The Organization management account holds nothing but the Organization
 itself. No workloads, no pipelines."* A StackSet administrator is a pipeline.
 
@@ -162,7 +162,7 @@ change, rather than as a migration in its own right.
 
 ## D-011 · Platform services are single-region — CLOSED
 
-**Design position** — [02-platform-architecture.md](../starter_docs/02-platform-architecture.md):
+**Design position** — [02-platform-architecture.md](../design/02-platform-architecture.md):
 *"Platform services (Log Archive, Audit, Truveon evidence store) are
 multi-region regardless of tenant tier. A regional event must not blind us
 across every tenant simultaneously."*
@@ -231,7 +231,7 @@ today; that changes with the first vested application.
 
 ## D-001 · Root mailbox is a personal alias, not a monitored distribution list
 
-**Design position** — [15-partner-model.md](../starter_docs/15-partner-model.md),
+**Design position** — [15-partner-model.md](../design/15-partner-model.md),
 open item B14: *"The base mailbox must be a monitored distribution list, not a
 personal account — AWS sends root-level security and billing notices there."*
 
@@ -278,7 +278,7 @@ already blocks on contract and BAA items; this belongs in the same set.
 
 ## D-002 · us-west-1 removed from the allowed region list
 
-**Design position** — [02-platform-architecture.md](../starter_docs/02-platform-architecture.md):
+**Design position** — [02-platform-architecture.md](../design/02-platform-architecture.md):
 *"US regions only. us-east-1, us-east-2, us-west-1, us-west-2."*
 
 **Actual** — `PLATFORM_ALLOWED_REGIONS=us-east-1,us-east-2,us-west-2`.
@@ -325,7 +325,7 @@ updated either way.
 
 ## D-004 · Partner precondition warns where the design requires it to block — CLOSED
 
-**Design position** — [13-client-provisioning.md](../starter_docs/13-client-provisioning.md):
+**Design position** — [13-client-provisioning.md](../design/13-client-provisioning.md):
 partner must exist, be `active`, and have a non-null notification window.
 *"This must block, not warn."*
 
@@ -414,7 +414,7 @@ bypasses the checks that catch them. Scope any exception to DKIM-authenticated
 
 ## D-006 · Root MFA is a virtual authenticator, not a hardware token
 
-**Design position** — [03-identity-and-access.md](../starter_docs/03-identity-and-access.md):
+**Design position** — [03-identity-and-access.md](../design/03-identity-and-access.md):
 break-glass access uses *"hardware MFA tokens, credentials split and stored
 physically."* The management account root user is the most extreme instance of
 that requirement — it cannot be constrained by any SCP or RCP.
@@ -474,7 +474,7 @@ combination is what carries the real exposure.
 
 ## D-007 · Standing `PlatformBootstrapAdmin` grant with no JIT elevation
 
-**Design position** — [03-identity-and-access.md](../starter_docs/03-identity-and-access.md):
+**Design position** — [03-identity-and-access.md](../design/03-identity-and-access.md):
 *"No standing administrative access."* `PlatformAdmin` is JIT-only — a stated
 reason, a time box, an automatic expiry, and an elevation event that flows to
 Truveon as evidence.
@@ -519,7 +519,7 @@ from one containing regulated client workloads.
 
 ## D-009 · `CommercialReadOnly` is assigned to the management account
 
-**Design position** — [12-commercial-access.md](../starter_docs/12-commercial-access.md):
+**Design position** — [12-commercial-access.md](../design/12-commercial-access.md):
 cost and billing data is Organization-level, which creates tension with keeping
 the management account nearly empty. *"Do not resolve that by granting access to
 the management account."* The design's answer is a CUR export to S3 in a
@@ -591,7 +591,7 @@ workloads.
 
 ## D-010 · Identity Center users and groups are created outside Entra — CLOSES ITSELF
 
-**Design position** — [03-identity-and-access.md](../starter_docs/03-identity-and-access.md):
+**Design position** — [03-identity-and-access.md](../design/03-identity-and-access.md):
 Entra ID is the source of truth for staff identity, SAML for authentication,
 SCIM for provisioning, so joiners and leavers flow automatically.
 
@@ -626,13 +626,13 @@ recreate is silent — access simply stops working.
 
 ---
 
-## D-005 · Design package layout differs from the prompts document
+## D-005 · Design package layout differs from the prompts document — PARTIALLY CLOSED
 
-**Design position** — [claude-code-prompts.md](../starter_docs/claude-code-prompts.md)
+**Design position** — [claude-code-prompts.md](../design/claude-code-prompts.md)
 assumes `design/`, `intake/`, `prompts/`, `diagrams/`, `truveon/`. The README's
 internal links assume the same.
 
-**Actual** — Everything is flat in `starter_docs/`, and eight design documents
+**Actual** — Everything is flat in `design/`, and eight design documents
 plus four diagrams and the Truveon functional assumptions are absent entirely.
 
 **Reason** — The source material was delivered flat. Nothing has been moved,
@@ -643,6 +643,40 @@ and any prompt citing a missing document cannot be followed as written.
 Notably, `01-design-principles.md` is absent while P1, P4, P9 and P10 are cited
 throughout — P4 is called *"the most important constraint"* in prompt 6.1.
 
-**Close when** — Either the missing documents are supplied and the tree is
-reorganised to match, or the prompts document is updated to reference
-`starter_docs/` as it stands.
+**Status, 2026-09-17** — the directory half is closed; the missing-documents
+half is not.
+
+**What changed.** The design material now lives in `design/`, which is the path
+the prompts and the documents' own cross-references have always named. It was
+previously in `starter_docs/` — a folder name the package never used for
+itself, which is why roughly a hundred `](design/...)` links resolved to
+nothing.
+
+Claude Desktop then supplied 01, 06, 06a and 14 and emitted them into
+`design/`, producing two partial copies: four documents only in `design/`,
+eleven only in `starter_docs/`, and three in both with the `design/` versions
+newer. Neither was a superset, so a merge was mandatory and the only real
+question was the destination name.
+
+`design/` won on three grounds, none of which was that it was newer:
+
+- every prompt says *"Read design/06-observability.md"*
+- the cross-references inside `starter_docs/` themselves pointed at `design/`
+- the upstream generator emits into `design/`, so choosing otherwise meant
+  renaming every future drop in perpetuity
+
+All 18 documents are now in `design/`, moved with `git mv` so history follows
+them. Thirty-two inbound references across seven files were rewritten,
+including `CLAUDE.md`. Verified afterwards that no link that previously
+resolved now fails.
+
+**Still open** — five documents remain absent: 04 (Security Controls and
+Evidence), 05 (Resilience), 08 (Change and Release), 09 (Vulnerability and
+Patching) and 11 (Developer Access), plus the Truveon functional assumptions
+and four diagrams. 01 is now present, which matters most: P4 is called *"the
+most important constraint"* in prompt 6.1 and was unreadable until today.
+
+**Close when** — the remaining five documents are supplied. The `intake/`,
+`prompts/`, `diagrams/` and `truveon/` subdirectories the prompts also assume
+are NOT being created: the package is flat, it works flat, and inventing
+subdirectories for four files would trade one layout mismatch for another.

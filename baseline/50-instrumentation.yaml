@@ -10,7 +10,7 @@ Description: >-
 # Design doc 06 is missing
 # ---------------------------------------------------------------------------
 # Prompt 4.1 says "implement the standard alarm sets in the table in design
-# 06". starter_docs/ does not contain 06-observability.md, so there is no table
+# 06". design/ does not contain 06-observability.md, so there is no table
 # to implement and none has been invented.
 #
 # What is built here is the MECHANISM, which is fully specified by the prompt

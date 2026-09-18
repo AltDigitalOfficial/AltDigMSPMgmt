@@ -57,15 +57,15 @@ in the documents that do exist:
 
 | Denial | Source |
 |---|---|
-| `kms:ScheduleKeyDeletion` | [03](../../starter_docs/03-identity-and-access.md) — quorum-controlled actions |
+| `kms:ScheduleKeyDeletion` | [03](../../design/03-identity-and-access.md) — quorum-controlled actions |
 | Backup vault deletion / vault lock modification | 03 — quorum-controlled actions |
 | Removal of an account from the Organization | 03 — quorum-controlled actions |
 | Disabling CloudTrail or the Config recorder | 03 — quorum-controlled actions |
 | Log destination configuration | 03 — customer access, *"enforced by SCP, not by permission set alone"* |
 | KMS key policy modification | 03 — customer access |
-| Platform role modification | [07](../../starter_docs/07-response-automation.md) — *"a role member accounts cannot modify, deny or delete"* |
-| Platform-managed tag modification | [10](../../starter_docs/10-commercial-model.md) — *"modification by member account principals is denied by SCP"* |
-| Detective control removal generally | [open-items](../../starter_docs/open-items.md) V1 |
+| Platform role modification | [07](../../design/07-response-automation.md) — *"a role member accounts cannot modify, deny or delete"* |
+| Platform-managed tag modification | [10](../../design/10-commercial-model.md) — *"modification by member account principals is denied by SCP"* |
+| Detective control removal generally | [open-items](../../design/open-items.md) V1 |
 | Backup tampering | open-items V2 |
 | Containment role protection | open-items V3 |
 

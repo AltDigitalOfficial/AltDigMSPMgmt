@@ -3,8 +3,8 @@
 AWS infrastructure for a segregated, multi-tenant hosting platform supporting
 independent member applications under HIPAA, PCI-DSS and SOC 2.
 
-Design package: [starter_docs/](starter_docs/) · Build sequence:
-[starter_docs/claude-code-prompts.md](starter_docs/claude-code-prompts.md)
+Design package: [design/](design/) · Build sequence:
+[design/claude-code-prompts.md](design/claude-code-prompts.md)
 
 ## Where the build has reached
 
@@ -143,7 +143,7 @@ identity/       Identity Center permission sets and assignments
 policies/guard/ cfn-guard rules; SCPs and RCPs land here
 scripts/        bash entry points; lib/common.sh holds shared helpers
 docs/           bootstrap runbook, deviation records
-starter_docs/   the design package (source material)
+design/   the design package (source material)
 ```
 
 ## Conventions

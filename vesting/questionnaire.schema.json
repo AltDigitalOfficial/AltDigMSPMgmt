@@ -3,7 +3,7 @@
   "$id": "https://altdigital.ai/schemas/vesting-questionnaire-v1.json",
   "title": "AltDigital Managed Platform — onboarding questionnaire",
 
-  "description": "Structured form of starter_docs/onboarding-questionnaire.md, which is the INPUT to account vesting rather than a document that gets filed. Only [A] asked fields appear here. [D] derived fields are computed by scripts/derive-vesting.py from vesting/derivation-rules.yaml and are rejected if supplied, because a derived value that can be typed is a derived value that can be wrong. [P] placeholder fields are owned outside this process and are marked required-but-nullable so their absence is visible rather than assumed.",
+  "description": "Structured form of design/onboarding-questionnaire.md, which is the INPUT to account vesting rather than a document that gets filed. Only [A] asked fields appear here. [D] derived fields are computed by scripts/derive-vesting.py from vesting/derivation-rules.yaml and are rejected if supplied, because a derived value that can be typed is a derived value that can be wrong. [P] placeholder fields are owned outside this process and are marked required-but-nullable so their absence is visible rather than assumed.",
 
   "type": "object",
   "additionalProperties": false,

@@ -5,7 +5,7 @@ two other lists:
 
 - [deviations.md](deviations.md) — accepted departures from the design package,
   each with a close condition
-- [starter_docs/open-items.md](../starter_docs/open-items.md) — the design
+- [design/open-items.md](../design/open-items.md) — the design
   package's own open questions, owned by Jamie, Art and Wayne
 
 Items here are things the build created or discovered, and that nobody has
