@@ -1,0 +1,504 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — Tier 1 automated response. The four-stage
+  runbook framework, its safety rails, and the state they depend on. Part of
+  the member baseline StackSet.
+
+# ---------------------------------------------------------------------------
+# This is the first stack permitted to stop anything
+# ---------------------------------------------------------------------------
+# Everything before it creates, reads or alarms. This one can stop an ECS task
+# and restart a process, so the interesting part is not what it does — it is
+# what it is unable to do.
+#
+# The refusals recorded in runbooks/catalog.yaml on 2026-09-18 are enforced
+# HERE, in IAM, not only in code. A future catalog entry naming
+# drain_and_replace would fail at the API rather than succeeding because
+# somebody added a function to actions.py. Code says what the platform intends;
+# IAM says what it can do, and only the second survives a mistake.
+#
+# ---------------------------------------------------------------------------
+# Automation runs ALONGSIDE paging, not in front of it
+# ---------------------------------------------------------------------------
+# Doc 07 implies automation first and a page only on escalation. That would
+# mean removing AlarmActions from every alarm and letting the engine page — and
+# it would make this Lambda a single point of failure for every page the
+# platform sends. A bug here would be silent, because the symptom is the
+# absence of an alert.
+#
+# So alarms keep their existing actions and the engine is triggered in parallel
+# by an EventBridge rule on alarm state change. The cost is duplication: an
+# alarm the automation fixes has already paged. That is the right way round for
+# now — recorded as B-030, to revisit once the engine has a track record.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+    Description: Artifact bucket in Platform Tooling holding the response package.
+
+  ArtifactKey:
+    Type: String
+    Description: Content-addressed package key.
+
+  EnvironmentTier:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, uat, prod]
+
+  AlertTopicArn:
+    Type: String
+    Default: ''
+    Description: Where stage 4 publishes the dossier.
+
+  LowUrgencyTopicArn:
+    Type: String
+    Default: ''
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Empty falls back to alias/platform-logs, created by
+      baseline/20-log-data-protection.yaml.
+
+  ResponseEnabled:
+    Type: String
+    Default: 'disabled'
+    AllowedValues: ['enabled', 'disabled']
+    Description: >-
+      Initial value of the kill switch.
+
+      DEFAULTS TO DISABLED. An account does not begin taking automated action
+      because a stack was deployed to it — somebody turns it on deliberately,
+      per account, after looking at what the catalog would do there. The
+      parameter is then changed OUT OF BAND by scripts/response-kill-switch.sh,
+      because 06a requires the switch usable without a deployment and the
+      moment you want it is the moment you least want to run one.
+
+      Note this template does not manage the value after creation: the SSM
+      parameter is created here and then owned by the operator. A stack update
+      would otherwise revert a deliberate emergency stop.
+
+Conditions:
+  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+  MetaLowUrgency: !And
+    - !Not [!Equals [!Ref LowUrgencyTopicArn, '']]
+    - !Or
+      - !Equals [!Ref EnvironmentTier, dev]
+      - !Equals [!Ref EnvironmentTier, test]
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Kill switch
+  # -------------------------------------------------------------------------
+  # An SSM parameter because 06a requires it usable without a deployment, which
+  # rules out a stack parameter and an environment variable alike.
+  #
+  # rails.check_kill_switch FAILS CLOSED: absent, unreadable or anything other
+  # than 'enabled' all block. A switch that defaults to go when it cannot be
+  # consulted works only when nothing is wrong.
+  ResponseKillSwitch:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /platform/response/enabled
+      Type: String
+      Value: !Ref ResponseEnabled
+      Description: >-
+        Tier 1 automated response. 'enabled' or anything else. Changed out of
+        band by scripts/response-kill-switch.sh; do not edit via the stack.
+      Tags:
+        platform-managed: 'true'
+
+  # -------------------------------------------------------------------------
+  # Rail state
+  # -------------------------------------------------------------------------
+  RemediationHistory:
+    Type: AWS::DynamoDB::Table
+    # Retained. The circuit breaker and the failed-attempt limit are only as
+    # good as their memory, and a stack replacement that emptied this table
+    # would silently reset every count — handing the automation a clean slate
+    # on exactly the resource it had already given up on.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: platform-remediation-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: resource_action, AttributeType: S }
+        - { AttributeName: attempted_at,    AttributeType: S }
+      KeySchema:
+        # Partitioned by (resource, action) so the circuit breaker's question —
+        # "how often has THIS action run on THIS resource" — is a single query
+        # rather than a scan. The rate limit's question is account-wide and does
+        # scan, which is acceptable because the TTL below bounds the table.
+        - { AttributeName: resource_action, KeyType: HASH }
+        - { AttributeName: attempted_at,    KeyType: RANGE }
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  ChangeRecordLogGroup:
+    Type: AWS::Logs::LogGroup
+    # Retained, and the retention is long. 06a requires a change record for
+    # every automated action, and doc 07 explains why: automation must not
+    # become a route around change management. That record is only worth
+    # anything if it outlives the incident.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/platform/change-records
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  DossierLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/platform/incident-dossiers
+      RetentionInDays: 365
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  # -------------------------------------------------------------------------
+  # Execution role — the interesting part is the absences
+  # -------------------------------------------------------------------------
+  ResponseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformResponseAutomation
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [lambda.amazonaws.com, ssm.amazonaws.com] }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GatherReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Stage 1 is read-only and runs on every alarm, so these are the
+              # permissions the role uses almost all the time.
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:DescribeAlarmHistory'
+                  - 'cloudwatch:GetMetricStatistics'
+                  - 'cloudwatch:ListMetrics'
+                  - 'cloudtrail:LookupEvents'
+                  - 'config:GetResourceConfigHistory'
+                  - 'ecs:DescribeServices'
+                  - 'ecs:DescribeTasks'
+                  - 'ecs:ListTasks'
+                  - 'elasticloadbalancing:DescribeTargetGroups'
+                  - 'elasticloadbalancing:DescribeTargetHealth'
+                  - 'application-autoscaling:DescribeScalingPolicies'
+                  - 'ec2:DescribeInstances'
+                  - 'ssm:DescribeInstanceInformation'
+                  - 'ssm:GetCommandInvocation'
+                Resource: '*'
+
+        - PolicyName: RailState
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan']
+                Resource: !GetAtt RemediationHistory.Arn
+              - Effect: Allow
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/response/*'
+              - Effect: Allow
+                Action: ['logs:CreateLogStream', 'logs:PutLogEvents']
+                Resource:
+                  - !Sub '${ChangeRecordLogGroup.Arn}'
+                  - !Sub '${ChangeRecordLogGroup.Arn}:*'
+                  - !Sub '${DossierLogGroup.Arn}'
+                  - !Sub '${DossierLogGroup.Arn}:*'
+              - Effect: Allow
+                Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents']
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/platform-response*'
+              - !If
+                - HasAlerting
+                - Effect: Allow
+                  Action: 'sns:Publish'
+                  Resource: !If
+                    - MetaLowUrgency
+                    - [!Ref AlertTopicArn, !Ref LowUrgencyTopicArn]
+                    - [!Ref AlertTopicArn]
+                - !Ref AWS::NoValue
+
+        - PolicyName: PermittedRemediations
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The four permitted actions, and only those.
+              #
+              # ecs:StopTask is task cycling. ecs:UpdateService is scale-out —
+              # which can also scale IN, and that is deliberate: a policy that
+              # let the automation only increase capacity would prevent it ever
+              # undoing its own change.
+              - Effect: Allow
+                Action: ['ecs:StopTask', 'ecs:UpdateService']
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/platform-managed': 'true'
+              # SendCommand is clear_log_files and restart_service. Scoped to
+              # the one AWS document those use, so the role cannot run an
+              # arbitrary SSM document — which would otherwise be a general
+              # remote-execution grant wearing a remediation costume.
+              - Effect: Allow
+                Action: 'ssm:SendCommand'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+              - Effect: Allow
+                Action: 'ssm:SendCommand'
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/platform-managed': 'true'
+
+        - PolicyName: RefusalsEnforcedInIam
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Explicit denies for everything refused on 2026-09-18.
+              #
+              # Redundant against the Allow statements above, which do not grant
+              # these — and that redundancy is the point. An explicit Deny cannot
+              # be overridden by a later Allow, so adding a permission to this
+              # role by mistake does not silently enable a refused action. The
+              # decision survives the next person editing this file.
+              - Sid: NeverTerminateOrDeregister
+                Effect: Deny
+                Action:
+                  - 'ec2:TerminateInstances'
+                  - 'ec2:StopInstances'
+                  - 'elasticloadbalancing:DeregisterTargets'
+                  - 'autoscaling:TerminateInstanceInAutoScalingGroup'
+                  - 'autoscaling:DetachInstances'
+                Resource: '*'
+              - Sid: NeverTouchDatabases
+                Effect: Deny
+                Action:
+                  # RDS failover was refused on duration, not on destruction.
+                  # Storage expansion was refused because AWS does not permit
+                  # shrinking allocated storage — the one genuinely
+                  # irreversible action on the list.
+                  - 'rds:RebootDBInstance'
+                  - 'rds:FailoverDBCluster'
+                  - 'rds:ModifyDBInstance'
+                  - 'rds:PromoteReadReplica'
+                  - 'rds:DeleteDBInstance'
+                Resource: '*'
+              - Sid: NeverDeleteMonitoring
+                Effect: Deny
+                Action:
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'logs:DeleteLogGroup'
+                  - 'config:DeleteConfigurationRecorder'
+                Resource: '*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  # -------------------------------------------------------------------------
+  # The engine
+  # -------------------------------------------------------------------------
+  ResponseFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: platform-response
+      Runtime: python3.13
+      Handler: engine.handler
+      Role: !GetAtt ResponseRole.Arn
+      # Long enough to gather, act, and sleep through a short settle period.
+      # MAX_INLINE_SETTLE below caps how much of that is sleeping — anything
+      # longer returns awaiting-settle rather than risking a timeout, because a
+      # timeout mid-incident produces no dossier at all.
+      Timeout: 300
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          ENVIRONMENT_TIER: !Ref EnvironmentTier
+          ACCOUNT_ID: !Ref AWS::AccountId
+          HISTORY_TABLE: !Ref RemediationHistory
+          KILL_SWITCH_PARAM: !Ref ResponseKillSwitch
+          CHANGE_LOG_GROUP: !Ref ChangeRecordLogGroup
+          DOSSIER_LOG_GROUP: !Ref DossierLogGroup
+          # Stage 4 publishes the dossier to the tier-appropriate topic, the
+          # same rule the workload alarms follow. A dev incident that
+          # automation could not fix is worth reading; it is not worth a phone
+          # call, and routing every engine escalation to the paging topic would
+          # quietly undo the tier separation everywhere else in the platform.
+          ALERT_TOPIC_ARN: !If
+            - MetaLowUrgency
+            - !Ref LowUrgencyTopicArn
+            - !Ref AlertTopicArn
+          MAX_INLINE_SETTLE: '120'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  ResponseLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/platform-response
+      RetentionInDays: 90
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  # -------------------------------------------------------------------------
+  # Trigger
+  # -------------------------------------------------------------------------
+  # Alarm state change, filtered to platform-auto alarms entering ALARM.
+  #
+  # The engine needs alarm_id, resource_type and resource_id, which this event
+  # does not carry — it has the alarm NAME. The engine refuses to guess rather
+  # than parsing them out, because the name is
+  # platform-auto-RESOURCEID-ALARMID and both halves may contain dashes. A
+  # small input transformer would be the obvious fix and would be the same
+  # ambiguous parse in a different language.
+  #
+  # So the alarm TAGS carry them — the instrumentation Lambda already writes
+  # platform-alarm-id — and B-031 covers wiring that lookup. Until then the
+  # engine is invoked manually and by test, which is the right state for
+  # something that can stop a container.
+  AlarmStateChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-response-on-alarm
+      Description: >-
+        Platform alarms entering ALARM. DISABLED until B-031 wires the
+        alarm-name-to-resource lookup — an enabled rule that invokes an engine
+        which then refuses every event would fill the logs with exceptions and
+        teach everyone to ignore them.
+      EventPattern:
+        source: ['aws.cloudwatch']
+        detail-type: ['CloudWatch Alarm State Change']
+        detail:
+          state:
+            value: ['ALARM']
+      State: DISABLED
+      Targets:
+        - Id: response
+          Arn: !GetAtt ResponseFunction.Arn
+
+  AlarmInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ResponseFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AlarmStateChangeRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Automation document
+  # -------------------------------------------------------------------------
+  # Prompt 5.1 asks for the framework "as SSM Automation documents". ONE
+  # document, driven by the catalog — not one per runbook, which is the
+  # arrangement the data-driven design exists to avoid.
+  #
+  # It is a thin wrapper over the Lambda rather than the logic itself. The
+  # staging, rails and dossier assembly are a few hundred lines of Python with
+  # tests; expressing them as aws:executeScript steps would put untested code
+  # in a document nobody can run locally, to satisfy the letter of "as SSM
+  # Automation documents" while losing what makes it reviewable.
+  #
+  # The document earns its place regardless: it gives an operator a way to
+  # invoke a runbook by hand, with the same rails, and it is what a future
+  # OpsItem or Incident Manager response plan will target.
+  ResponseAutomationDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: PlatformRunbook
+      DocumentType: Automation
+      DocumentFormat: YAML
+      TargetType: /
+      Content:
+        schemaVersion: '0.3'
+        description: >-
+          AltDigital four-stage runbook. Gathers, applies permitted
+          remediations with every safety rail, revalidates between stages, and
+          assembles the incident dossier. What it does for a given alarm is in
+          runbooks/catalog.yaml, not in this document.
+        assumeRole: !GetAtt ResponseRole.Arn
+        parameters:
+          AlarmName:
+            type: String
+            description: CloudWatch alarm that fired.
+          AlarmId:
+            type: String
+            description: 06a alarm id, e.g. ec2-disk-high.
+          ResourceType:
+            type: String
+            description: e.g. AWS::EC2::Instance
+          ResourceId:
+            type: String
+            description: The resource the alarm is about.
+        mainSteps:
+          - name: runFourStageRunbook
+            action: 'aws:invokeLambdaFunction'
+            maxAttempts: 1
+            # No retries, deliberately. Re-invoking the engine would re-run the
+            # remediations, and "the fix did not fix, so try it again" is
+            # precisely the behaviour the failed-attempt rail exists to stop.
+            # The rails would catch it — this makes sure it never gets that far.
+            timeoutSeconds: 300
+            inputs:
+              FunctionName: !Ref ResponseFunction
+              Payload: |
+                {
+                  "alarm_name": "{{ AlarmName }}",
+                  "alarm_id": "{{ AlarmId }}",
+                  "resource_type": "{{ ResourceType }}",
+                  "resource_id": "{{ ResourceId }}"
+                }
+            outputs:
+              - Name: result
+                Selector: $.Payload
+                Type: String
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+Outputs:
+
+  FunctionName:
+    Value: !Ref ResponseFunction
+
+  KillSwitchParameter:
+    Description: Change with scripts/response-kill-switch.sh, never via the stack
+    Value: !Ref ResponseKillSwitch
+
+  AutomationDocument:
+    Value: !Ref ResponseAutomationDocument
+
+  HistoryTable:
+    Description: Circuit breaker and failed-attempt state
+    Value: !Ref RemediationHistory
+
+  TriggerState:
+    Description: Alarm trigger is disabled until B-031
+    Value: DISABLED
