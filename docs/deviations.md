@@ -160,6 +160,83 @@ change, rather than as a migration in its own right.
 
 ---
 
+## D-012b · Automated remediation is permitted to stop a process and a task
+
+*(Numbered D-013 in commit messages before the duplicate-id audit; see B-014.)*
+
+**Standing rule** — CLAUDE.md: *"Never write code that terminates, deletes,
+deregisters, rolls back or purges a resource as part of automated remediation.
+Security automation isolates and preserves. Operational automation is additive
+or reversible."*
+
+**Design position** — [07-response-automation.md](../design/07-response-automation.md)
+stage 3 permits, where redundancy is verified first: cycle an ECS task, fail
+over an RDS replica, drain and replace an instance behind a load balancer,
+restart a service on a multi-instance fleet.
+
+**The conflict** — cycling stops, draining deregisters. Those are two of the
+verbs the rule names.
+
+**Decision, 2026-09-18, by Jamie.** Resolved action by action rather than as a
+blanket rule, because the four are not equivalent — two of them destroy no AWS
+resource at all.
+
+| Action | Destroys | Decision |
+|---|---|---|
+| Restart a service (SSM Run Command) | nothing — a process | **permitted** |
+| Cycle an ECS task | the task; the service continues | **permitted** |
+| RDS failover | nothing | **refused for now** |
+| Drain and replace an LB instance | the instance | **refused** |
+
+**Why a process restart is not covered by the rule.** The rule names
+*resources*. A Linux service is not one — nothing in AWS is created, destroyed
+or altered, and the restart is fast. Refusing it would read the rule as "never
+change anything", which is not what it says.
+
+**Why an ECS task is treated as a process.** Jamie's judgement: a task is
+closer to a process than to an instance. It is a replaceable unit of a service
+that the scheduler recreates by design, and the service — the thing the
+customer has — is untouched. Reasonable people differ here, which is why it was
+asked rather than assumed.
+
+**Why RDS failover is refused despite destroying nothing.** Timing. Jamie:
+*"a process restart in Windows can be fast, an RDS failover can take a while."*
+An action that is safe in kind can still be an outage in duration, and the
+platform has no data yet on how long a failover takes on real instances.
+Revisit when there is.
+
+**The correction that improved the reasoning.** An earlier draft refused
+scale-out because it creates cost. Jamie pushed back — *"but you also said
+scaling out was reversible"* — and he was right: the objection applied a
+stricter standard than the rule's own "additive or reversible", and bundled
+scale-out with RDS storage expansion when the two are not alike.
+
+The property that matters is **irreversibility**, not cost:
+
+- scale out — additive, reversible, capped by the circuit breaker at three per
+  hour
+- expand RDS storage — additive, and **AWS does not permit shrinking allocated
+  storage, ever**, so a runaway log raises the floor of that customer's bill
+  permanently
+
+Cost is a consequence; irreversibility is the property. Scale-out is now
+permitted with a precondition of the same shape as the redundancy check —
+`requires_scale_in_policy`, verified before acting — because reversible in
+principle is not the same as self-reversing: on a fixed desired count the
+automation adds capacity and nothing removes it.
+
+**Risk while open** — an automated action can stop a customer's container. The
+containing controls are the framework's, not the runbook's: redundancy verified
+before acting, one resource at a time with revalidation between, circuit
+breaker at three identical remediations in an hour, twenty actions per account
+per hour, and a kill switch that works without a deployment.
+
+**Re-review when** — the first tenant runs ECS in production, since the
+judgement about tasks was made without one; or when there is failover timing
+data, which would reopen the RDS question.
+
+---
+
 ## D-011 · Platform services are single-region — CLOSED
 
 **Design position** — [02-platform-architecture.md](../design/02-platform-architecture.md):

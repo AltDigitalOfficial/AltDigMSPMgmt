@@ -29,30 +29,67 @@
 # refer to the same things by the same names.
 #
 # ---------------------------------------------------------------------------
-# Stage 3 is deliberately EMPTY
+# What is permitted, and what was refused
 # ---------------------------------------------------------------------------
-# Doc 07 permits mildly disruptive actions at stage 3 where the resource is
-# genuinely redundant: cycle an ECS task, drain and replace an instance behind
-# a load balancer, restart a service on a multi-instance fleet.
+# Doc 07 and CLAUDE.md disagreed about stage 3. Doc 07 permits cycling an ECS
+# task, draining and replacing an instance, restarting a service on a fleet and
+# failing over an RDS replica. CLAUDE.md says "never write code that
+# terminates, deletes, deregisters, rolls back or purges a resource as part of
+# automated remediation. Operational automation is additive or reversible."
 #
-# CLAUDE.md states a hard rule that reads directly against several of those:
+# Resolved action by action on 2026-09-18, because the four are not equivalent
+# — two of them destroy no AWS resource at all. Recorded as D-013.
 #
-#   "Never write code that terminates, deletes, deregisters, rolls back or
-#    purges a resource as part of automated remediation. Operational automation
-#    is additive or reversible."
+# THE TEST THAT MATTERS IS REVERSIBILITY, NOT COST. An earlier draft of this
+# file refused scale-out on the grounds that it creates cost, which applied a
+# stricter standard than CLAUDE.md's own "additive or reversible" and bundled
+# it with RDS storage expansion. The two are not alike:
 #
-# Cycling a task stops it. Draining an instance deregisters it. Those are the
-# named verbs. The two documents disagree, and resolving that by picking one
-# quietly would be the wrong kind of decision for an assistant to make — so
-# stage 3 is structurally supported, enforced by every rail, and populated by
-# nobody. An alarm that exhausts stage 2 escalates to stage 4 and pages.
+#   scale out             additive, reversible, and capped by the circuit
+#                         breaker at three in an hour.
+#   expand RDS storage    additive, and AWS DOES NOT PERMIT SHRINKING ALLOCATED
+#                         STORAGE. Ever. A runaway log therefore raises the
+#                         floor of that customer's bill permanently.
 #
-# The framework still implements the stage 3 rails (redundancy check, one
-# resource at a time) because prompt 5.1 requires them in the framework rather
-# than in runbooks, and because they must exist and be tested before any action
-# is ever added here — not written in a hurry alongside the first one.
+# Cost is a consequence; irreversibility is the property. Refusing on the
+# consequence produced an inconsistent catalog and an argument that would not
+# survive being questioned — which is what happened.
 #
-# Tracked as B-029.
+#   PERMITTED
+#     clear log files       stage 2. Deletes files, not a resource. No cost.
+#     scale out             stage 2, and ONLY where the target can scale itself
+#                           back in. Reversible in principle is not the same as
+#                           self-reversing: on a fixed desired count the
+#                           automation adds capacity and nothing ever removes
+#                           it. requires_scale_in_policy is checked BEFORE
+#                           acting, the same shape as the redundancy check.
+#     restart a service     stage 3. A process, via SSM Run Command. Nothing in
+#                           AWS is destroyed, and a restart is fast.
+#     cycle an ECS task     stage 3. The task dies, the service does not. Jamie
+#                           judged a task closer to a process than a resource.
+#
+#   REFUSED, with what would change the answer
+#     expand a volume       irreversible, per above. Nothing changes this; it is
+#                           a property of the AWS API, not a policy choice.
+#     release stuck DB
+#       connections         needs credentials the platform deliberately does not
+#                           hold, and identifying a genuinely stuck connection is
+#                           not something we can do confidently yet. Potentially
+#                           disruptive to real production users.
+#     flush a cache         doc 07 calls this non-destructive. It is not: a
+#                           flushed production cache stampedes the backend, and
+#                           the stampede can be worse than the memory pressure it
+#                           relieved. Held pending a decision.
+#     RDS failover          not destructive, and SLOW enough to be an outage in
+#                           its own right. Refused until there is data on how
+#                           long, on real instances, in this platform.
+#     drain and replace
+#       an LB instance      hits two of CLAUDE.md's named verbs outright, and the
+#                           recovery story is "hope the ASG launches a healthy
+#                           one". Refused until there is data.
+#
+# "No for now" and "no forever" are different, and a catalog that cannot tell
+# them apart accumulates the wrong kind of caution.
 
 schema_version: 1
 
@@ -80,22 +117,66 @@ runbooks:
 
     ec2-disk-high:
       description: >
-        Filesystem approaching full. 06a names a remediation runbook for this
-        one explicitly (remediation_runbook: ec2-disk-exhaustion), which is why
-        it is the first entry here.
+        Filesystem approaching full. 06a names the remediation runbook for this
+        one explicitly (remediation_runbook: ec2-disk-exhaustion).
+
+        The clearest case in the catalog: a known cause, a bounded fix, and
+        nothing destroyed that anyone wants.
       gather:
         - disk_usage_by_mount   # which filesystem, not just "a filesystem"
-      stage_2: []
+      stage_2:
+        - action: clear_log_files
+          # Rotated and compressed logs only. NEVER the live log — truncating
+          # it breaks the writer's file handle and destroys the diagnostic
+          # evidence for the incident currently being diagnosed.
+          #
+          # Deleting FILES is not deleting a RESOURCE. CLAUDE.md's rule names
+          # resources; a rotated log is neither a resource nor something anyone
+          # wants.
+          parameters:
+            paths: ['/var/log/*.gz', '/var/log/*.1', '/var/log/*.old']
+            min_age_days: 3
+            journald_vacuum_size: 200M
       stage_3: []
 
     ec2-cpu-high:
       description: >
         Sustained high CPU. Almost never actionable without knowing what
-        changed, which is why this entry adds no stage 2 action and leans
-        entirely on the gather stage.
+        changed, which is why this entry adds no action and leans entirely on
+        the gather stage.
+
+        Deliberately no restart. High CPU is as likely to be legitimate load as
+        a fault, and restarting a busy service to fix busyness is how an
+        automation turns a slow day into an outage.
       gather: []
       stage_2: []
       stage_3: []
+
+    ec2-memory-high:
+      description: >
+        Memory exhaustion on an instance. The classic case for a service
+        restart: a leak grows monotonically, a restart returns it to baseline,
+        and nothing in AWS is destroyed.
+
+        Note this alarm only exists at uat and prod in 06a and carries a [TUNE]
+        threshold, so it will not fire until somebody sets one. Correct rather
+        than unfortunate — an automated restart keyed to a number nobody chose
+        is worse than no automation.
+      gather:
+        - top_processes_by_memory   # WHAT is leaking, in the dossier
+      stage_2: []
+      stage_3:
+        - action: restart_service
+          # SSM Run Command against a named service. Destroys no AWS resource,
+          # which is why it survives CLAUDE.md's rule on a careful reading: the
+          # rule names resources, and a process is not one.
+          #
+          # requires_redundancy stays true. A restart is brief but not
+          # instantaneous, and on a single-instance service "brief" is still an
+          # outage the customer sees.
+          requires_redundancy: true
+          parameters:
+            service_name_tag: platform-managed-service
 
     ec2-status-check-failed:
       description: >
@@ -133,6 +214,78 @@ runbooks:
         does not hold.
       gather:
         - connection_trend
+      stage_2: []
+      stage_3: []
+
+  # -------------------------------------------------------------------------
+  "AWS::ECS::Service":
+
+    ecs-cpu-high:
+      description: >
+        Sustained CPU across the service's tasks. The one place scale-out is
+        unambiguous: the target is the service itself, and Application Auto
+        Scaling either can or cannot scale it back in, which is checkable.
+      gather:
+        - ecs_task_cpu_by_task
+      stage_2:
+        - action: scale_out
+          # Reversible is not the same as SELF-reversing. Without a scale-in
+          # policy the automation adds tasks and nothing ever removes them —
+          # reversible in principle, permanent in practice until someone
+          # notices the bill. Verified before acting, not after; if the service
+          # cannot scale itself back down, this runbook gathers and escalates
+          # instead.
+          requires_scale_in_policy: true
+          parameters:
+            increment: 1
+      stage_3: []
+
+    ecs-memory-high:
+      description: >
+        A task approaching its memory limit. Cycling returns memory to baseline
+        while the service keeps serving from its other tasks.
+
+        THIS is where task cycling belongs, not on the flapping alarms below. A
+        container leaking memory is alive and degraded; cycling fixes it.
+      gather:
+        - ecs_task_memory_by_task
+      stage_2: []
+      stage_3:
+        - action: cycle_ecs_task
+          # Stops one task; the service's desired count brings a replacement.
+          # Jamie's judgement, 2026-09-18: a task is closer to a process than to
+          # a resource, so this is permitted where CLAUDE.md would forbid
+          # terminating an instance. See D-013.
+          requires_redundancy: true
+          parameters:
+            max_tasks_per_run: 1
+
+    ecs-running-vs-desired:
+      description: >
+        Running task count below desired. 06a names ecs-task-flapping as the
+        remediation runbook.
+
+        NO CYCLING HERE, and this is the important one. Running below desired
+        means ECS is ALREADY trying to start tasks and failing. Stopping another
+        adds to the deficit and races the scheduler — the automation would be
+        competing with the thing trying to fix the problem.
+      gather:
+        - ecs_stopped_task_reasons   # why they are dying, which is the answer
+        - ecs_service_events
+      stage_2: []
+      stage_3: []
+
+    ecs-task-restart-rate:
+      description: >
+        Tasks restarting faster than the tier threshold. Same runbook name in
+        06a, same reasoning as above and more strongly: the alarm says tasks are
+        already cycling too often, so cycling one is indistinguishable from the
+        fault.
+
+        This is the circuit breaker's own scenario, written as an alarm.
+      gather:
+        - ecs_stopped_task_reasons
+        - ecs_service_events
       stage_2: []
       stage_3: []
 
