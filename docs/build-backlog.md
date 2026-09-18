@@ -346,6 +346,96 @@ bucket being opened to the internet. That is currently undetected.
 
 ---
 
+## B-027 · Alarms do not say what they are about
+
+**Raised** — 2026-09-18, by Jamie: *"we need to be sure to tie them back to the
+AWS object(s), and craft the message, in such a way where it's easy to tell
+what the alarm is about."*
+
+**The design already states the requirement.** Design doc 07's incident readout
+opens with:
+
+> `Alarm: what fired, when, on what, in which account`
+
+and says that on escalation *"this is the PagerDuty payload, so the human opens
+their laptop to a dossier rather than a blank console"*. Today's alarms deliver
+roughly one of those four.
+
+### What a woken engineer currently sees
+
+The PagerDuty incident title is the CloudWatch alarm name, unaltered:
+
+```
+platform-auto-platform-instrumentation-lambda-error-rate
+```
+
+Six distinct problems in one string:
+
+1. **It cannot be parsed back.** The format is
+   `platform-auto-<resource-id>-<alarm-id>` and both halves contain dashes. Is
+   the resource `platform-instrumentation` and the alarm `lambda-error-rate`,
+   or the resource `platform-instrumentation-lambda` and the alarm
+   `error-rate`? A human can guess; nothing else can. This same ambiguity
+   already forced drift detection to run a full sweep rather than parse deleted
+   alarm names.
+
+2. **No account, and therefore no tenant.** Nothing says which partner, client,
+   application or environment. With one canary account that is survivable. With
+   forty member accounts every incident title is a resource id with no owner,
+   and the first minute of every response is working out whose it is.
+
+3. **No environment.** `dev` and `prod` alarms are typographically identical.
+   Low urgency is currently the only signal, and that is a routing property
+   rather than something visible in the title.
+
+4. **The description leads with provenance, not diagnosis.** It currently opens
+   with the spec's `note` and then explains which file generated the alarm.
+   Useful to a maintainer, close to useless at 3am. It should open with what is
+   wrong and what to look at.
+
+5. **Metric-math alarms hide the resource entirely.** `describe-alarms` on a
+   `derived` alarm returns no `MetricName` and no `Dimensions` — the resource
+   appears only inside the `Metrics` array. Any tooling that reads the obvious
+   fields to answer "what is this about" gets nothing.
+
+6. **The tags lost the resource identity.** Alarms carry `platform-managed`,
+   `platform-auto-instrumented`, `platform-alarm-id` and `platform-routing` —
+   and no resource type or id. An earlier version tagged
+   `platform-resource-type`; the rework onto 06a dropped it. So the
+   machine-readable path to "what object is this about" does not exist either.
+
+### The two layers, and why this cannot simply wait
+
+Prompt 5.3 builds the dossier: a Lambda between the alarm and PagerDuty that
+assembles the full readout from doc 07. That is the real fix for items 2, 3 and
+4, and it is phase 5.
+
+But **until 5.3 exists the alarm name and description ARE the payload**, and
+phase 5 is several phases away. Meanwhile every incident that arrives is a
+resource id with no owner.
+
+The split worth making:
+
+| Do now, cheap, not wasted by 5.3 | Wait for 5.3 |
+|---|---|
+| Restore resource type and id as TAGS — 5.3 will read them to build the dossier | Assembling the readout |
+| An unambiguous separator in the name, or an id that carries account and environment | Recent changes, deployment correlation |
+| Description that opens with the condition and what to check | Metrics and logs at time of trigger |
+
+### Careful with the name
+
+Changing the alarm name changes its identity. Drift detection matches on name,
+so a rename makes every existing alarm an orphan and creates a parallel set —
+which drift will dutifully report and refuse to delete. A rename needs a
+deliberate one-off sweep, not a quiet redeploy. That is an argument for doing
+it *soon*, while the population is six alarms in one account rather than
+several hundred across forty.
+
+**Do before** — the first tenant is vested. After that a rename is a migration,
+and before that it is an edit.
+
+---
+
 ## B-016 · Terraform state for PagerDuty is local and unlocked
 
 **Observed** — 2026-09-17, building `pagerduty/`.
