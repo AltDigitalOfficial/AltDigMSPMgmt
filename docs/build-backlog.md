@@ -219,6 +219,42 @@ declarative.
 
 ---
 
+## B-023 · Truveon tenant granularity: per client, or per application?
+
+**Raised** — 2026-09-17, by Jamie: *"we do have a Truveon tenant set up for
+OEight (the company) but not yet Arc8 (the app)."*
+
+**The questionnaire says client.** Field 1.1 — "Client (member organisation)
+name" — lists "Truveon tenant" among its consumers. Field 1.2, the application
+name, does not. So the design as written creates one tenant per client, and
+OEight's existing tenant would already cover Arc8.
+
+**The operational reality described is per application.** Which is a
+defensible answer, and possibly the better one, but it is not what the
+questionnaire encodes — and the two produce different systems:
+
+| | Per client | Per application |
+|---|---|---|
+| OEight with Arc8 + a second app | one tenant, two apps inside | two tenants |
+| Evidence segregation | shared across the client's apps | separated |
+| Truveon flat fee (doc 10) | charged once per client | charged per app |
+| Exit of one app | evidence stays in a live tenant | tenant can be retired whole |
+
+The fee row is the one that decides it commercially, and the exit row is the
+one that decides it for a client whose apps have different IP owners —
+**which is exactly OEight's situation**: OEight owns Arc8, while Avergent
+retains the IP for the app OEight builds for them. Those two applications
+arguably should not share an evidence tenant at all.
+
+**Not decided here.** It changes the questionnaire schema (a `truveon_tenant`
+field, or none), the registry record shape, and the billing model. Owned by
+Jamie and Wayne.
+
+**Decide before** — the Truveon integration is built (phase 9.1), because that
+integration will encode whichever answer is assumed.
+
+---
+
 ## B-016 · Terraform state for PagerDuty is local and unlocked
 
 **Observed** — 2026-09-17, building `pagerduty/`.

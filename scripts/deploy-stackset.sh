@@ -101,10 +101,31 @@ hr
 
 cfn_validate "${REPO_ROOT}/${TEMPLATE}"
 
-PARAM_ARGS=()
-for p in "${PARAMS[@]}"; do
-  PARAM_ARGS+=("ParameterKey=${p%%=*},ParameterValue=${p#*=}")
-done
+# Parameters go as JSON, not as the ParameterKey=X,ParameterValue=Y shorthand.
+#
+# The shorthand splits on commas, so any parameter value CONTAINING a comma is
+# parsed as further key/value pairs. BlockedDomains is exactly that:
+#   BlockedDomains=*.bit,*.onion,*.top
+# arrives at the CLI as a list and fails with "Invalid type for parameter
+# Parameters[0].ParameterValue ... valid types: <class 'str'>", which names the
+# type and not the comma.
+#
+# JSON has no such ambiguity, and python does the escaping so a value carrying
+# a quote or a space is safe too.
+PARAM_JSON=""
+if [[ ${#PARAMS[@]} -gt 0 ]]; then
+  PARAM_JSON="$(printf '%s
+' "${PARAMS[@]}" | "$(command -v python || command -v python3)" -c '
+import json,sys
+out=[]
+for line in sys.stdin.read().splitlines():
+    if not line:
+        continue
+    k, _, v = line.partition("=")
+    out.append({"ParameterKey": k, "ParameterValue": v})
+print(json.dumps(out))
+')"
+fi
 
 EXISTS="$(aws cloudformation describe-stack-set --stack-set-name "${NAME}" \
   --call-as SELF --query 'StackSet.StackSetId' --output text 2>/dev/null | no_cr || true)"
@@ -126,7 +147,7 @@ if [[ -z "${EXISTS}" ]]; then
     --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
     --capabilities CAPABILITY_NAMED_IAM \
     --description "Platform baseline from ${TEMPLATE}" \
-    ${PARAM_ARGS:+--parameters "${PARAM_ARGS[@]}"} \
+    ${PARAM_JSON:+--parameters "${PARAM_JSON}"} \
     --query 'StackSetId' --output text | no_cr
   ok "stack set created"
 else
@@ -137,7 +158,7 @@ else
     --permission-model SERVICE_MANAGED \
     --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
     --capabilities CAPABILITY_NAMED_IAM \
-    ${PARAM_ARGS:+--parameters "${PARAM_ARGS[@]}"} \
+    ${PARAM_JSON:+--parameters "${PARAM_JSON}"} \
     --operation-preferences "MaxConcurrentCount=${MAX_CONCURRENT},FailureToleranceCount=${FAILURE_TOLERANCE},RegionConcurrencyType=SEQUENTIAL" \
     --query 'OperationId' --output text | no_cr
   ok "stack set updated"
@@ -149,13 +170,23 @@ fi
 # But update-stack-set ALSO redeploys to every existing instance. Calling
 # create-stack-instances straight afterwards collides with that operation —
 # OperationInProgressException — and the collision looks like a failure when
-# the update is in fact doing the work. So only create instances that are not
-# already there.
-EXISTING_INSTANCES="$(aws cloudformation list-stack-instances --stack-set-name "${NAME}" \
-  --query 'length(Summaries)' --output text 2>/dev/null | no_cr || echo 0)"
+# the update is in fact doing the work. So skip instance creation only when
+# THIS OU is already a target.
+#
+# The test used to be "does this stack set have any instances at all", which
+# broke the one thing this script exists to do. A stack set deployed to Sandbox
+# has instances, so every later `--ou members` printed "1 instance(s) already
+# exist", reported SUCCEEDED, and added nothing. The staged rollout — Sandbox,
+# then Members — could never reach its second stage, and the output claimed it
+# had.
+#
+# StackSet.OrganizationalUnitIds is the authoritative target list.
+# list-stack-instances is not: it shows OUs that HAVE ACCOUNTS, so a correctly
+# targeted but currently empty OU is indistinguishable from one never targeted.
+TARGETED_OUS="$(aws cloudformation describe-stack-set --stack-set-name "${NAME}"   --query 'StackSet.OrganizationalUnitIds' --output text 2>/dev/null | no_cr || true)"
 
-if [[ "${EXISTING_INSTANCES}" != "0" && -n "${EXISTS}" ]]; then
-  skip "${EXISTING_INSTANCES} instance(s) already exist; the stack set update redeploys to them"
+if [[ " ${TARGETED_OUS} " == *" ${TARGET_OU} "* && -n "${EXISTS}" ]]; then
+  skip "${TARGET_OU} is already a target; the stack set update redeploys to it"
   info "Waiting for the update to complete"
   for _ in $(seq 1 80); do
     STATUS="$(aws cloudformation list-stack-set-operations --stack-set-name "${NAME}" \
