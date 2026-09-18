@@ -43,10 +43,36 @@ and cannot be guessed or reused.
 rotates them periodically — so leaving one out fails verification without
 saying which.
 
-Some DNS providers append the zone name automatically. If yours does, enter
-only the part before `.altdigital.ai`. A doubled suffix
-(`..._domainkey.altdigital.ai.altdigital.ai`) is the usual reason verification
-never completes.
+### Most providers append the zone name for you
+
+The table above gives **fully qualified** names because that is what SES
+reports. Most DNS control panels append the zone automatically, so pasting the
+full name produces a doubled suffix:
+
+```
+rdrpb72bvywdulqb5rfv2x6uatho57uu._domainkey.altdigital.ai.altdigital.ai
+```
+
+Confirmed on 2026-09-18: GoDaddy detects this and prompts —
+*"Looks like you're putting the domain in the Name field... Do you want to
+change how these records resolve?"* **Answer yes**, the first and default
+option. It rewrites the record to the correct name.
+
+To avoid the prompt, enter only the part before `.altdigital.ai` in the **Name**
+field:
+
+| Name field | Value field |
+|---|---|
+| `rdrpb72bvywdulqb5rfv2x6uatho57uu._domainkey` | `rdrpb72bvywdulqb5rfv2x6uatho57uu.dkim.amazonses.com` |
+| `ioask4howkzus3rorqjx73qbwulrt7nw._domainkey` | `ioask4howkzus3rorqjx73qbwulrt7nw.dkim.amazonses.com` |
+| `4hwrxc3jus6p7bryb4c4jbwbcvso27ei._domainkey` | `4hwrxc3jus6p7bryb4c4jbwbcvso27ei.dkim.amazonses.com` |
+
+The **Value** is never shortened — it is a hostname in Amazon's zone, not in
+ours, so it is absolute in every provider.
+
+A doubled suffix is the usual reason verification never completes, and it fails
+silently: SES simply keeps reporting `PENDING` with no indication that the
+record exists at the wrong name.
 
 ---
 
