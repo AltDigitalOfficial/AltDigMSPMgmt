@@ -258,6 +258,21 @@ Resources:
               - Effect: Allow
                 Action: 'config:ListDiscoveredResources'
                 Resource: '*'
+              # Account-level event rules from 06a's `metric: event` entries.
+              #
+              # No events:DeleteRule and no events:RemoveTargets, deliberately
+              # and for the same reason the role has no cloudwatch:DeleteAlarms:
+              # automated remediation in this platform never removes anything.
+              # A reconciler that can delete is a reconciler that can delete
+              # everything when its input is wrong.
+              - Effect: Allow
+                Action:
+                  - 'events:PutRule'
+                  - 'events:PutTargets'
+                  - 'events:DescribeRule'
+                  - 'events:ListTargetsByRule'
+                  - 'events:TagResource'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/platform-event-*'
               - Effect: Allow
                 Action:
                   - 'logs:CreateLogStream'
@@ -461,6 +476,7 @@ Resources:
           ALERT_TOPIC_ARN: !Ref AlertTopicArn
           LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
           ALARM_PREFIX: platform-auto
+          EVENT_RULE_PREFIX: platform-event
       Tags:
         - { Key: platform-managed, Value: 'true' }
 

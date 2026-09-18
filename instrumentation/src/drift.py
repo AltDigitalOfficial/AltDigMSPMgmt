@@ -63,7 +63,12 @@ DRIFT_LOG_GROUP = os.environ.get("DRIFT_LOG_GROUP", "/aws/platform/alarm-drift")
 
 cloudwatch = boto3.client("cloudwatch")
 config = boto3.client("config")
+events = boto3.client("events")
 logs = boto3.client("logs")
+
+ALERT_TOPIC_ARN = os.environ.get("ALERT_TOPIC_ARN", "")
+LOW_URGENCY_TOPIC_ARN = os.environ.get("LOW_URGENCY_TOPIC_ARN", "")
+EVENT_RULE_PREFIX = os.environ.get("EVENT_RULE_PREFIX", "platform-event")
 
 # Fields that decide whether an alarm fires, and therefore the fields whose
 # modification is drift.
@@ -174,6 +179,200 @@ def differences(expected, actual):
     return diffs
 
 
+# ---------------------------------------------------------------------------
+# Account-level event rules
+# ---------------------------------------------------------------------------
+# B-026. 06a defines four alarms with `metric: event` — EventBridge rules, in
+# its own words "not a metric alarm". Nothing created them.
+#
+# They are ACCOUNT-level, not per-resource, and that is what decides where they
+# live. A CloudTrail rule matching PutBucketPolicy is one rule for the account;
+# creating it per bucket would produce N identical rules all firing together on
+# the same event.
+#
+# Built here rather than in the CloudFormation template so 06a stays the single
+# source. Hand-writing four rules in YAML would be a second copy of the
+# specification, and the two would drift — which is a peculiar thing for the
+# drift detector to be the cause of.
+#
+# Three source shapes, because AWS delivers these three kinds of event through
+# three different envelopes. This mapping is the whole of the per-source
+# special-casing, and it is small enough to read.
+
+AUTOSCALING_DETAIL_TYPES = {
+    "EC2_INSTANCE_LAUNCH_ERROR": "EC2 Instance Launch Unsuccessful",
+    "EC2_INSTANCE_TERMINATE_ERROR": "EC2 Instance Terminate Unsuccessful",
+}
+
+CLOUDTRAIL_SOURCES = {
+    "AWS::S3::Bucket": "aws.s3",
+}
+
+
+def event_pattern(spec, resource_type):
+    """Build an EventBridge pattern. Returns (pattern, None) or (None, reason)."""
+    source = spec.get("source")
+
+    if source == "rds_event_category":
+        cats = spec.get("event_categories") or []
+        return {
+            "source": ["aws.rds"],
+            "detail-type": ["RDS DB Instance Event", "RDS DB Cluster Event"],
+            "detail": {"EventCategories": cats},
+        }, None
+
+    if source == "cloudtrail":
+        aws_source = CLOUDTRAIL_SOURCES.get(resource_type)
+        if not aws_source:
+            return None, (
+                f"cloudtrail event alarm on {resource_type}, which has no entry in "
+                "CLOUDTRAIL_SOURCES. Add the aws.* event source for that service."
+            )
+        return {
+            "source": [aws_source],
+            "detail-type": ["AWS API Call via CloudTrail"],
+            "detail": {"eventName": spec.get("event_names") or []},
+        }, None
+
+    if source == "autoscaling_event":
+        types = spec.get("event_types") or []
+        unknown = [t for t in types if t not in AUTOSCALING_DETAIL_TYPES]
+        if unknown:
+            return None, f"unmapped Auto Scaling event types: {unknown}"
+        return {
+            "source": ["aws.autoscaling"],
+            "detail-type": [AUTOSCALING_DETAIL_TYPES[t] for t in types],
+        }, None
+
+    return None, f"unknown event source '{source}'"
+
+
+def event_alarms():
+    """Every `metric: event` entry, deduplicated by id.
+
+    Deduplication matters: RDS::DBCluster inherits RDS::DBInstance, so the two
+    RDS event alarms appear twice across the spec. Creating a rule per
+    occurrence would produce two identical rules under two names, both firing.
+    """
+    seen, out = set(), []
+    for resource_type in sorted(instr.IN_SCOPE):
+        alarms, _cfg = instr.resolve_set(resource_type)
+        for spec in (alarms or []):
+            if spec.get("metric") != "event":
+                continue
+            aid = spec.get("id")
+            if aid in seen:
+                continue
+            seen.add(aid)
+            out.append((resource_type, spec))
+    return out
+
+
+def reconcile_event_rules():
+    """Create or correct the account-level event rules. Never deletes."""
+    created, corrected, intact, skipped, problems = [], [], [], [], []
+
+    for resource_type, spec in event_alarms():
+        aid = spec["id"]
+        severity = spec.get("severity_by_tier") or {}
+
+        # Same rule as threshold_by_tier for metric alarms: a tier absent from
+        # severity_by_tier means this event is not watched in that tier.
+        # rds-auto-restart-detected has no `prod` entry because the seven-day
+        # auto-start it detects only happens where HOOP stops instances.
+        if instr.ENVIRONMENT_TIER not in severity:
+            skipped.append(aid)
+            continue
+
+        routing = severity[instr.ENVIRONMENT_TIER]
+        pages = (instr.ROUTING.get(routing) or {}).get("pages", False)
+        topic = ALERT_TOPIC_ARN if pages else LOW_URGENCY_TOPIC_ARN
+        if not topic:
+            problems.append({"alarm": aid, "reason": "no destination topic configured"})
+            continue
+
+        pattern, why = event_pattern(spec, resource_type)
+        if pattern is None:
+            record("event-rule-unsupported", {
+                "alarm_id": aid, "resource_type": resource_type, "message": why})
+            problems.append({"alarm": aid, "reason": why})
+            continue
+
+        # applies_when cannot be expressed in an event pattern.
+        #
+        # rds-auto-restart-detected carries
+        # {hoop_configured: true, hoop_state: scheduled_down} — a condition
+        # about the environment's state at the moment the event arrives, not
+        # about the event. An EventBridge pattern matches the event only.
+        #
+        # The rule is created anyway and the condition recorded, because a
+        # missing rule is a missed detection while an over-firing rule is
+        # noise. Filtering belongs in the dossier layer (prompt 5.3), which
+        # sees the event and can ask what the HOOP state was.
+        unfiltered = spec.get("applies_when") or None
+
+        name = f"{EVENT_RULE_PREFIX}-{aid}"[:64]
+        desired_pattern = json.dumps(pattern, sort_keys=True)
+
+        try:
+            existing = events.describe_rule(Name=name)
+            have_pattern = json.dumps(
+                json.loads(existing.get("EventPattern") or "{}"), sort_keys=True)
+            targets = events.list_targets_by_rule(Rule=name).get("Targets", [])
+            have_topic = targets[0]["Arn"] if targets else None
+            unchanged = (have_pattern == desired_pattern and have_topic == topic
+                         and existing.get("State") == "ENABLED")
+        except events.exceptions.ResourceNotFoundException:
+            existing, unchanged, have_pattern, have_topic = None, False, None, None
+
+        if unchanged:
+            intact.append(aid)
+            continue
+
+        try:
+            events.put_rule(
+                Name=name,
+                Description=(
+                    f"06a {aid} on {resource_type}. Routing '{routing}' at tier "
+                    f"'{instr.ENVIRONMENT_TIER}'. Managed from "
+                    f"design/06a-alarm-specification.yaml — edit the specification, "
+                    f"not this rule."),
+                EventPattern=json.dumps(pattern),
+                State="ENABLED",
+                Tags=[{"Key": "platform-managed", "Value": "true"},
+                      {"Key": "platform-alarm-id", "Value": aid}],
+            )
+            events.put_targets(Rule=name, Targets=[{"Id": "alert", "Arn": topic}])
+        except Exception as exc:
+            problems.append({"alarm": aid, "reason": str(exc)})
+            continue
+
+        detail = {"alarm_id": aid, "rule": name, "resource_type": resource_type,
+                  "routing": routing, "topic": topic}
+        if unfiltered:
+            detail["applies_when_not_enforced"] = unfiltered
+            detail["applies_when_note"] = (
+                "This condition is about environment state, not about the event, so "
+                "no EventBridge pattern can express it. The rule fires regardless; "
+                "filtering belongs in the dossier layer (prompt 5.3).")
+
+        if existing is None:
+            created.append(aid)
+            record("created-event-rule", dict(detail, message=(
+                "An account-level event rule from 06a did not exist and has been "
+                "created. Until now this event class was undetected.")))
+        else:
+            corrected.append(aid)
+            record("corrected-event-rule", dict(
+                detail,
+                previous_pattern=have_pattern, previous_target=have_topic,
+                message="An account-level event rule differed from the specification "
+                        "and has been put back."))
+
+    return {"created": created, "corrected": corrected, "intact": len(intact),
+            "not_watched_in_tier": skipped, "problems": problems}
+
+
 def handler(event, context):
     trigger = "schedule"
     if (event or {}).get("detail-type") == "AWS API Call via CloudTrail":
@@ -257,8 +456,19 @@ def handler(event, context):
     if failures:
         record("drift-sweep-failures", {"failures": failures})
 
+    # Account-level event rules are reconciled on the same sweep. They are
+    # monitoring the specification describes and the platform must have, which
+    # is the same question the alarm sweep answers — just for a different kind
+    # of object.
+    try:
+        event_rules = reconcile_event_rules()
+    except Exception as exc:
+        event_rules = {"error": str(exc)}
+        record("event-rule-sweep-failed", {"error": str(exc)})
+
     result = {
         "trigger": trigger,
+        "event_rules": event_rules,
         "recreated": recreated,
         "corrected": corrected,
         "intact": len(intact),
