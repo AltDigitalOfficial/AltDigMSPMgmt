@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — deployment artifact bucket. Holds Lambda
+  packages that the baseline StackSet installs into every member account.
+  Deployed to the Platform Tooling account.
+
+# ---------------------------------------------------------------------------
+# Why a bucket rather than inline code
+# ---------------------------------------------------------------------------
+# CloudFormation's AWS::Lambda::Function ZipFile property caps at 4,096
+# characters and cannot express dependencies. The instrumentation handler is
+# larger than that on its own, before any configuration.
+#
+# The alternative considered and rejected was squeezing the handler under the
+# limit by moving its configuration into an SSM parameter. That trades a hard
+# 4KB limit for a different hard 4KB limit (Standard tier parameters), moves
+# the alarm definitions somewhere no reviewer would think to look, and makes
+# the code unreadable in service of the packaging mechanism.
+#
+# ---------------------------------------------------------------------------
+# Read by the whole Organization, written by one account
+# ---------------------------------------------------------------------------
+# A member account's CloudFormation must fetch the package at stack create
+# time, so every account in the Organization needs read. Only Platform Tooling
+# writes.
+#
+# This is the first platform resource deliberately readable org-wide, so it is
+# worth being precise about what that admits: anyone who can read this bucket
+# can read the instrumentation source. That source contains no secrets and its
+# behaviour is already described in this repository. What would matter is
+# WRITE access — a tampered package runs with the instrumentation role's
+# permissions in every member account — which is why versioning is on, the
+# bucket denies unencrypted and non-TLS access, and writes are restricted to
+# this account.
+
+Parameters:
+
+  OrganizationId:
+    Type: String
+    Description: Organization id (o-xxxx). Scopes read access.
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+
+Resources:
+
+  ArtifactsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts platform deployment artifacts
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          # Member accounts decrypt when Lambda pulls the package. Scoped to
+          # the Organization by PRINCIPAL here, not by source: this is a real
+          # IAM principal in a member account making the call, not a service
+          # acting on its behalf, so aws:PrincipalOrgID is the correct
+          # condition — the opposite of the CloudTrail and CloudWatch cases
+          # elsewhere in this repository.
+          - Sid: AllowOrganizationRead
+            Effect: Allow
+            Principal: { AWS: '*' }
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  ArtifactsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-artifacts
+      TargetKeyId: !Ref ArtifactsKey
+
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-platform-artifacts-${AWS::AccountId}'
+      # Versioning is the control that matters here. A Lambda package is
+      # referenced by key, and an overwritten key silently changes what every
+      # member account installs on its next update. With versioning, the old
+      # object still exists and the change is visible.
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ArtifactsKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              # Long enough to roll back a bad package deliberately, short
+              # enough that the bucket is not an archive. This is build output,
+              # not evidence — the evidence archive is a different bucket with
+              # very different rules.
+              NoncurrentDays: 90
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: deployment-artifacts }
+
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ArtifactsBucket.Arn
+              - !Sub '${ArtifactsBucket.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': 'false' }
+
+          - Sid: AllowOrganizationRead
+            Effect: Allow
+            Principal: { AWS: '*' }
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+            Resource: !Sub '${ArtifactsBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+
+          # ListBucket separately and on the BUCKET arn, not the object arn.
+          # Granting it on objects silently does nothing, which is a mistake
+          # that surfaces as an AccessDenied on a List call that the policy
+          # appears to permit.
+          - Sid: AllowOrganizationList
+            Effect: Allow
+            Principal: { AWS: '*' }
+            Action: 's3:ListBucket'
+            Resource: !GetAtt ArtifactsBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+
+          # Writes are the dangerous direction. A tampered package runs with
+          # the instrumentation role's permissions in every member account, so
+          # only principals in THIS account may put objects.
+          - Sid: DenyWriteFromOutsideThisAccount
+            Effect: Deny
+            Principal: { AWS: '*' }
+            Action:
+              - 's3:PutObject'
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+              - 's3:PutBucketPolicy'
+            Resource:
+              - !GetAtt ArtifactsBucket.Arn
+              - !Sub '${ArtifactsBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                'aws:PrincipalAccount': !Ref AWS::AccountId
+
+Outputs:
+
+  BucketName:
+    Description: Artifact bucket. Lambda packages are published here.
+    Value: !Ref ArtifactsBucket
+
+  BucketArn:
+    Value: !GetAtt ArtifactsBucket.Arn
+
+  KeyArn:
+    Description: Artifact encryption key
+    Value: !GetAtt ArtifactsKey.Arn

@@ -1,0 +1,364 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — auto-instrumentation. Applies the standard
+  alarm set to newly created resources, installs the CloudWatch agent on new
+  instances, and records an exception for anything it cannot handle. Part of
+  the member baseline StackSet.
+
+# ---------------------------------------------------------------------------
+# Design doc 06 is missing
+# ---------------------------------------------------------------------------
+# Prompt 4.1 says "implement the standard alarm sets in the table in design
+# 06". starter_docs/ does not contain 06-observability.md, so there is no table
+# to implement and none has been invented.
+#
+# What is built here is the MECHANISM, which is fully specified by the prompt
+# itself. The alarm content lives in instrumentation/alarm-sets.yaml and is
+# marked provisional; replacing it when 06 arrives is a data edit and a
+# republish, with no change to this template. That is exactly what the prompt's
+# "a configuration document, not a switch statement" instruction buys.
+#
+# Tracked as B-024.
+#
+# ---------------------------------------------------------------------------
+# Config as the trigger, not CloudTrail
+# ---------------------------------------------------------------------------
+# EventBridge can see resource creation two ways:
+#
+#   CloudTrail API calls  immediate, but the event shape differs per API and
+#                         the resource identifier sits somewhere different in
+#                         responseElements for every service. Parsing it means
+#                         a per-service special case, which is the switch
+#                         statement the prompt rules out.
+#
+#   Config item changes   uniform. resourceType and resourceId are top-level
+#                         fields with the same meaning for every service.
+#
+# Config is chosen for uniformity. The cost is honest and worth stating: Config
+# evaluates on its own schedule, so instrumentation lags creation by minutes
+# rather than seconds. For alarms on long-lived infrastructure that is
+# acceptable. It would not be acceptable for a containment action, which is why
+# design doc 07's response automation is a separate path.
+#
+# This also means the Config recorder must be running, which baseline/
+# 10-config-recorder.yaml guarantees for every member account.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+    Description: >-
+      Artifact bucket in the Platform Tooling account, org-readable.
+      Published by scripts/publish-instrumentation.sh.
+
+  ArtifactKey:
+    Type: String
+    Description: >-
+      Content-addressed package key, e.g.
+      instrumentation/handler-<hash>.zip
+
+      The hash is part of the key on purpose. CloudFormation decides whether to
+      update a Lambda by comparing S3Key, so publishing new code to the SAME
+      key leaves every member account running the old code while the stack
+      reports itself current.
+
+  MonitoringTier:
+    Type: String
+    Default: reduced
+    AllowedValues: [full, production-equivalent, reduced]
+    Description: >-
+      Which alarms in each set apply. Derived per environment by
+      scripts/derive-vesting.py from vesting/derivation-rules.yaml, so this is
+      passed in by the vesting pipeline rather than chosen here.
+
+  AlertTopicArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Cross-account SNS topic in the Audit account. Auto-created alarms publish
+      here. Empty leaves them actionless — see B-015 for why that is not the
+      same as alerting.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+    Description: >-
+      KMS key encrypting this account's platform log groups. Empty falls back
+      to the alias ARN for alias/platform-logs, which baseline/
+      20-log-data-protection.yaml creates in every member account.
+
+      An ALIAS ARN rather than a key ARN, because the key is created per
+      account by another StackSet, so its key id differs everywhere and cannot
+      be a single StackSet parameter. The alias name is identical in every
+      account, which makes it the only form that can be expressed here.
+
+      ORDERING: 20-log-data-protection must reach an account before this
+      template does, or the alias does not exist and the log group fails to
+      create. Both are in the member baseline and the numeric prefix is the
+      deployment order.
+
+  ExceptionRetentionDays:
+    Type: Number
+    Default: 365
+    Description: >-
+      Retention for the exception log group. Exceptions record that a resource
+      came up UNMONITORED, which is a compliance-relevant gap rather than an
+      operational log line, so it outlives a normal debugging window.
+
+Conditions:
+  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Exception destination
+  # -------------------------------------------------------------------------
+  # Created before the Lambda and referenced by it. The Lambda re-raises if it
+  # cannot write here, because at that point it has no way to report anything
+  # and a Lambda error is the only remaining signal.
+  ExceptionLogGroup:
+    Type: AWS::Logs::LogGroup
+    # Retained. These records say "a resource came up with no monitoring",
+    # which is a compliance question rather than a debugging one. A stack
+    # update that replaced this group would discard the evidence that the gap
+    # ever existed — and the gap is exactly what an auditor asks about.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/platform/instrumentation-exceptions
+      RetentionInDays: !Ref ExceptionRetentionDays
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ExceptionMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ExceptionLogGroup
+      FilterName: PlatformInstrumentationException
+      # Matches on the record marker rather than on a reason, so a new
+      # exception reason added to the handler is counted without editing this.
+      FilterPattern: '{ $.record_type = "instrumentation-exception" }'
+      MetricTransformations:
+        - MetricNamespace: AltDigital/Platform
+          MetricName: InstrumentationExceptions
+          MetricValue: '1'
+          DefaultValue: 0
+
+  ExceptionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-instrumentation-exception
+      AlarmDescription: >-
+        The auto-instrumentation Lambda could not instrument a resource. That
+        resource is running with NO platform monitoring, and nothing else will
+        notice — this alarm is the only signal.
+        Read /aws/platform/instrumentation-exceptions for the reason. The
+        common case is a resource type with no alarm set defined: either add
+        one to instrumentation/alarm-sets.yaml, or add the type to
+        ignored_resource_types to record that the omission is deliberate.
+      Namespace: AltDigital/Platform
+      MetricName: InstrumentationExceptions
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+
+  # -------------------------------------------------------------------------
+  # Execution role
+  # -------------------------------------------------------------------------
+  InstrumentationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Named Platform* so SCP 03's DenyPlatformRoleNameSquatting protects it
+      # from being recreated by a workload principal.
+      RoleName: PlatformInstrumentation
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: Instrument
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # PutMetricAlarm cannot be scoped to a resource: CloudWatch
+              # alarms do not support resource-level permissions for it, so '*'
+              # is the only expressible form rather than a widening. The
+              # compensating control is that Delete is NOT granted — this role
+              # can create and update alarms and cannot remove them, so a
+              # compromise of it cannot silently disable monitoring.
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:PutMetricAlarm'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:TagResource'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub '${ExceptionLogGroup.Arn}'
+                  - !Sub '${ExceptionLogGroup.Arn}:*'
+              # Its own execution log group. Separate from the exception group
+              # so that a flood of runtime logs cannot bury exception records
+              # or push them past retention.
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/platform-instrumentation*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  # -------------------------------------------------------------------------
+  # The function
+  # -------------------------------------------------------------------------
+  InstrumentationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: platform-instrumentation
+      Runtime: python3.13
+      Handler: handler.handler
+      Role: !GetAtt InstrumentationRole.Arn
+      # 60s is generous for a handful of PutMetricAlarm calls and cheap at this
+      # invocation rate. The reason not to trim it: a timeout mid-set leaves a
+      # resource partially instrumented with no exception record, because the
+      # handler never reaches the code that would write one.
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          EXCEPTION_LOG_GROUP: !Ref ExceptionLogGroup
+          MONITORING_TIER: !Ref MonitoringTier
+          ALERT_TOPIC_ARN: !Ref AlertTopicArn
+          ALARM_PREFIX: platform-auto
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  InstrumentationLogGroup:
+    Type: AWS::Logs::LogGroup
+    # Delete, explicitly, and the contrast with ExceptionLogGroup above is the
+    # point. This holds Lambda runtime chatter with 30-day retention; there is
+    # nothing here an auditor needs and nothing worth orphaning on a stack
+    # replacement. Stated rather than defaulted so the difference between the
+    # two groups reads as a decision.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/platform-instrumentation
+      RetentionInDays: 30
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  # -------------------------------------------------------------------------
+  # Trigger
+  # -------------------------------------------------------------------------
+  ResourceCreationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-instrument-on-create
+      Description: >-
+        Config item changes for resource types the platform instruments.
+        Filtered here rather than in the Lambda so that uninteresting
+        resource types do not pay an invocation — but NOT filtered to the
+        known types, because the prompt requires an unrecognised type to
+        raise an exception, and a rule that never delivers it cannot.
+      EventPattern:
+        source:
+          - aws.config
+        detail-type:
+          - 'Config Configuration Item Change'
+        detail:
+          messageType:
+            - ConfigurationItemChangeNotification
+          configurationItem:
+            configurationItemStatus:
+              # ResourceDiscovered is a new resource. OK is an existing one
+              # being re-evaluated, and instrumenting on it would rewrite every
+              # alarm on every Config evaluation cycle — idempotent, but a
+              # large amount of pointless API traffic and a very noisy trail.
+              - ResourceDiscovered
+      State: ENABLED
+      Targets:
+        - Id: instrumentation
+          Arn: !GetAtt InstrumentationFunction.Arn
+
+  EventInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InstrumentationFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ResourceCreationRule.Arn
+
+  # -------------------------------------------------------------------------
+  # CloudWatch agent
+  # -------------------------------------------------------------------------
+  # Prompt 4.1: "Include the SSM association that installs the CloudWatch
+  # agent on new instances, since memory and disk alarms are useless without
+  # it."
+  #
+  # Worth being precise about why. EC2 publishes CPU, network and disk I/O from
+  # the hypervisor, which cannot see inside the guest. Memory used and
+  # filesystem used are guest-internal and are not published at all without an
+  # agent. An alarm on mem_used_percent with no agent does not error — it sits
+  # in INSUFFICIENT_DATA indefinitely, which in a console full of green looks
+  # near enough to healthy that nobody investigates.
+  #
+  # Targeted by tag rather than by instance id, so an instance created after
+  # this association picks it up. Instances must carry
+  # platform-managed=true; anything that does not is out of scope by
+  # construction, which is a decision the baseline makes rather than this
+  # template.
+  CloudWatchAgentAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      AssociationName: platform-install-cloudwatch-agent
+      Name: AWS-ConfigureAWSPackage
+      Targets:
+        - Key: tag:platform-managed
+          Values: ['true']
+      Parameters:
+        action: ['Install']
+        name: ['AmazonCloudWatchAgent']
+      # Re-applies on a schedule so a replaced or manually removed agent comes
+      # back. Without this the association is a one-time install and the agent
+      # is only as present as nobody having touched it.
+      ScheduleExpression: 'rate(1 day)'
+      ComplianceSeverity: HIGH
+      MaxConcurrency: '10%'
+      MaxErrors: '10%'
+
+Outputs:
+
+  FunctionName:
+    Description: Auto-instrumentation function
+    Value: !Ref InstrumentationFunction
+
+  ExceptionLogGroupName:
+    Description: Where instrumentation exceptions are recorded
+    Value: !Ref ExceptionLogGroup
+
+  ExceptionAlarmName:
+    Description: Fires when a resource comes up uninstrumented
+    Value: !Ref ExceptionAlarm
+
+  MonitoringTierApplied:
+    Description: Tier this account's alarm sets were filtered to
+    Value: !Ref MonitoringTier
