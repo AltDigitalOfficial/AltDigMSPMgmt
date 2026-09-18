@@ -1252,3 +1252,26 @@ it — so the queue is a gap detector, and nothing yet looks at it.
 **Revisit when** — prompt 12.3 (Jira) and Phase 11 (commercial). The review
 queue needs a decision of its own: a weekly digest is probably right, but that
 is 4.4's shape and 4.4 is already built.
+
+---
+
+## B-040 · Audit account Lambda concurrency is 10
+
+**Open** — 2026-09-18, found deploying the routing layer.
+
+`alerting/20-router.yaml` asked for `ReservedConcurrentExecutions: 20` and was
+refused: the account's total concurrency is 10, AWS's default for an account
+that has not used Lambda much, and reserving any amount leaves fewer than the
+10 unreserved executions AWS requires.
+
+The reservation is removed, which is worse than it sounds. A cap belongs on the
+router — it POSTs to PagerDuty, and an alarm storm across many accounts should
+queue rather than arrive as a thousand simultaneous incidents. With a ceiling of
+10 the whole account throttles under a storm instead, and a throttled router
+dead-letters what it cannot take.
+
+Today that is theoretical: one member account, low event volume. It stops being
+theoretical at roughly the tenth tenant.
+
+**Do** — request a concurrency increase for 692869638531, then restore the
+reservation.

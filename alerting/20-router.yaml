@@ -123,17 +123,23 @@ Resources:
   # the event is the only record of what it was.
   RouterDlq:
     Type: AWS::SQS::Queue
-    # The one queue worth retaining. Everything the router DOES process is in
-    # the routing log group for a year; what lands here is what it never got to
-    # process, so this is the sole record of it.
+    # Delete, after this was written as Retain and the trap fired on the very
+    # first deploy: the stack rolled back on an unrelated KMS policy error, the
+    # queue was kept, and the retry failed with "queue already exists".
     #
-    # The cost is the trap canaries/00-canary-artifacts.yaml documents: a
-    # retained resource makes a failed stack unretryable, because the recreate
-    # collides with what was kept. Accepted here and nowhere else in this file,
-    # because the queue's attributes rarely change and losing undelivered
-    # alerts is the failure this whole template exists to prevent.
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
+    # The Retain argument was that this is the only record of events the router
+    # never managed to log. True, and beside the point — at the moment a stack
+    # rolls back the queue is empty, so Retain protected nothing and cost the
+    # ability to deploy at all. The contents are short-lived by design in any
+    # case: RouterDlqAlarm fires on a single visible message precisely so this
+    # is drained rather than accumulated.
+    #
+    # canaries/00-canary-artifacts.yaml documents the same trap for S3, and the
+    # rule that generalises is: Retain is for state that has accumulated value,
+    # not for a resource that merely could. Retaining an empty thing only makes
+    # the stack unretryable.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       QueueName: platform-router-dlq
       MessageRetentionPeriod: 1209600
@@ -239,6 +245,14 @@ Resources:
                   - !GetAtt JiraQueue.Arn
                   - !GetAtt ReviewQueue.Arn
                   - !GetAtt CommercialQueue.Arn
+                  # The function's own DeadLetterConfig. Lambda validates this
+                  # at CREATE and refuses the function outright — "The provided
+                  # execution role does not have permissions to call SendMessage
+                  # on SQS" — rather than failing later when a DLQ write is
+                  # actually needed. Which is the right behaviour: a
+                  # dead-letter queue the function cannot write to is a silent
+                  # hole exactly where the guarantees are supposed to be.
+                  - !GetAtt RouterDlq.Arn
               - Effect: Allow
                 Action: 'secretsmanager:GetSecretValue'
                 Resource:
@@ -247,16 +261,18 @@ Resources:
               - Effect: Allow
                 Action: ['kms:GenerateDataKey', 'kms:Decrypt']
                 Resource: !Ref AlertsKeyArn
-              - Effect: Allow
-                # Cross-account, to read platform-routing and platform-tier off
-                # the alarm that fired. Read-only and organization-scoped: the
-                # router decides where an alarm goes and must never be able to
-                # change what an alarm is.
-                Action: ['cloudwatch:ListTagsForResource', 'cloudwatch:DescribeAlarms']
-                Resource: '*'
-                Condition:
-                  StringEquals:
-                    'aws:ResourceOrgID': !Ref OrganizationId
+              # No CloudWatch permissions, deliberately.
+              #
+              # This granted cross-account ListTagsForResource so the router
+              # could read the routing class off the alarm's tags. It cannot
+              # work: CloudWatch alarms have no resource-based policy, so an
+              # IAM grant in this account is only half of a permission that
+              # needs two halves. Every alarm routed to review with
+              # "could not read alarm tags".
+              #
+              # The instrumentation Lambda now writes the routing class into the
+              # AlarmDescription, which travels inside the event, so the router
+              # needs no AWS call at all on the path that pages people.
 
   RouterFunction:
     Type: AWS::Lambda::Function
@@ -267,7 +283,20 @@ Resources:
       Role: !GetAtt RouterRole.Arn
       Timeout: 60
       MemorySize: 256
-      ReservedConcurrentExecutions: 20
+      # No ReservedConcurrentExecutions, and not by choice.
+      #
+      # A cap belongs here: the router POSTs to PagerDuty, and an alarm storm
+      # across many accounts should queue rather than arrive as a thousand
+      # simultaneous incidents. But the Audit account's total Lambda
+      # concurrency is 10 — AWS's default for an account that has not used
+      # Lambda much — and reserving ANY amount leaves fewer than the 10
+      # unreserved executions AWS requires, so the reservation is rejected
+      # outright rather than clamped.
+      #
+      # The consequence is worse than a missing cap: with a ceiling of 10 the
+      # whole account throttles under a storm, and a throttled router
+      # dead-letters the events it cannot take. B-040 carries the quota
+      # increase, which has to happen before this is trusted in production.
       Code:
         S3Bucket: !Ref RouterCodeBucket
         S3Key: !Ref RouterCodeKey

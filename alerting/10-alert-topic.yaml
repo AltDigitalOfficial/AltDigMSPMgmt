@@ -145,6 +145,39 @@ Resources:
               StringEquals:
                 'aws:SourceOrgID': !Ref OrganizationId
 
+          # CloudWatch Logs, for the routing layer's log group. Added
+          # 2026-09-18 when alerting/20-router.yaml failed to create with
+          # "The specified KMS key does not exist or is not allowed to be used"
+          # — a message that names neither the key policy nor the missing
+          # principal, and reads like the key ARN is wrong.
+          #
+          # Three things differ from the statement above and all three are
+          # required:
+          #
+          #   the principal is REGIONAL — logs.us-east-2.amazonaws.com, not
+          #   logs.amazonaws.com, which is silently never matched
+          #
+          #   kms:Describe* is needed as well as encrypt and decrypt; Logs
+          #   validates the key before it will attach it
+          #
+          #   the condition is the log-group encryption context rather than
+          #   aws:SourceOrgID, which Logs does not send. Scoped to this
+          #   account's log groups so the grant is not open-ended.
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+
           # Publishing to an ENCRYPTED topic needs the key as well as the
           # topic, and the two are separate grants that fail at different
           # layers. Admitting a principal to the topic policy alone produces

@@ -88,16 +88,23 @@ ALERT_TOPIC_ARN = os.environ.get("ALERT_TOPIC_ARN", "")
 LOW_URGENCY_TOPIC_ARN = os.environ.get("LOW_URGENCY_TOPIC_ARN", "")
 ALARM_PREFIX = os.environ.get("ALARM_PREFIX", "platform-auto")
 
-# questionnaire 7.4, passed in by the vesting pipeline rather than read from the
-# registry here.
+# Questionnaire 7.4 is NOT read from the environment.
 #
-# The prompt says to read it from the onboarding record, and the pipeline does
-# exactly that — it then passes the value in as a stack parameter. The
-# alternative was a cross-account DynamoDB read from a Lambda in every member
-# account, which would mean granting every member account read access to the
-# registry that describes every other tenant. The value is a number of
-# milliseconds; the blast radius of that grant is the whole platform.
-ACCEPTABLE_RESPONSE_MS = os.environ.get("ACCEPTABLE_RESPONSE_MS", "")
+# It was, or rather an ACCEPTABLE_RESPONSE_MS variable was set for the purpose
+# and then never read by anything — the value arrived and stopped. Meanwhile
+# alb-target-response-time, the alarm 06a ties to it, raised threshold-unset on
+# every ALB.
+#
+# It now comes from /platform/monitoring/acceptable-response-ms via
+# threshold_from_source(), which is the same parameter the canary reads as its
+# pass condition and the canary stack uses as its SLA alarm threshold. One
+# number, three consumers, one place — which was the point of 06a's
+# "Do not hardcode. That value is used THREE times".
+#
+# A stack parameter could not have been that place: the canary needs the value
+# at RUN time, so it would have needed its own copy, and two copies of a
+# threshold is how an SLA alarm and an SLA report come to disagree.
+
 
 cloudwatch = boto3.client("cloudwatch")
 logs = boto3.client("logs")
@@ -109,6 +116,13 @@ with open(SPEC_PATH, encoding="utf-8") as fh:
 
 TIERS = SPEC.get("tiers", {})
 ROUTING = SPEC.get("routing_destinations", {})
+
+# Prefix of the machine-readable trailer appended to every AlarmDescription.
+# Must match alerting/src/router.py. A literal rather than a shared module
+# because the two run in different accounts from different packages; it is
+# short, stable, and a mismatch degrades to the review queue rather than to
+# silence.
+ROUTING_MARKER = "[platform-routing]"
 DEFAULTS = SPEC.get("defaults", {})
 ALARM_SETS = SPEC.get("alarm_sets", {})
 IN_SCOPE = set(SPEC.get("resource_types_in_scope", []))
@@ -641,7 +655,24 @@ def plan_alarms(resource_type, resource_id):
                 f"Auto-instrumented from design/06a-alarm-specification.yaml "
                 f"({aid}) at tier '{ENVIRONMENT_TIER}', routing '{routing}'. "
                 f"Edit the specification, not this alarm — drift detection "
-                f"reverts hand edits."),
+                f"reverts hand edits.\n\n"
+                # Machine-readable trailer, read by alerting/src/router.py.
+                #
+                # These facts are also on the alarm as TAGS, which is where the
+                # router looked first and could not reach them: CloudWatch
+                # alarms have no resource-based policy, so no IAM grant lets the
+                # Audit account read another account's alarm tags. Every alarm
+                # fell through to the review queue with "could not read alarm
+                # tags" — the right failure, the wrong outcome.
+                #
+                # The description, unlike the tags, travels INSIDE the alarm
+                # state change event as detail.configuration.description. So the
+                # decision arrives with the event: no cross-account call on the
+                # path that pages people, one less permission, and nothing to
+                # fail while an incident is starting.
+                f"{ROUTING_MARKER} routing={routing} tier={ENVIRONMENT_TIER} "
+                f"alarm-id={aid} resource-type={resource_type} "
+                f"resource-id={resource_id}"),
             "EvaluationPeriods": spec.get(
                 "evaluation_periods", DEFAULTS.get("evaluation_periods", 2)),
             "Threshold": threshold,

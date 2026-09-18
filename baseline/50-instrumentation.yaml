@@ -78,16 +78,14 @@ Parameters:
       not the other. Omitting a tier from threshold_by_tier is how the spec
       suppresses an alarm somewhere.
 
-  AcceptableResponseMs:
-    Type: String
-    Default: ''
-    Description: >-
-      Questionnaire 7.4, the acceptable response time in milliseconds. Passed
-      in by the vesting pipeline, which holds the onboarding record.
-
-      Deliberately NOT read from the registry by this Lambda. That would mean
-      granting every member account read access to the registry describing
-      every other tenant, to fetch one number.
+  # No AcceptableResponseMs parameter. Questionnaire 7.4 lives in
+  # /platform/monitoring/acceptable-response-ms, written by the canary stack and
+  # read at run time by the canary, by this Lambda's threshold_from_source(),
+  # and by the canary SLA alarm.
+  #
+  # It WAS a parameter here, feeding an env var nothing ever read, while the one
+  # alarm 06a ties to 7.4 raised threshold-unset on every ALB. Keeping it would
+  # have made a second source for a value 06a is explicit must have one.
 
   AlertTopicArn:
     Type: String
@@ -354,7 +352,6 @@ Resources:
         Variables:
           EXCEPTION_LOG_GROUP: !Ref ExceptionLogGroup
           ENVIRONMENT_TIER: !Ref EnvironmentTier
-          ACCEPTABLE_RESPONSE_MS: !Ref AcceptableResponseMs
           LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
           ALERT_TOPIC_ARN: !Ref AlertTopicArn
           ALARM_PREFIX: platform-auto
@@ -627,7 +624,6 @@ Resources:
           EXCEPTION_LOG_GROUP: !Ref ExceptionLogGroup
           DRIFT_LOG_GROUP: !Ref DriftLogGroup
           ENVIRONMENT_TIER: !Ref EnvironmentTier
-          ACCEPTABLE_RESPONSE_MS: !Ref AcceptableResponseMs
           ALERT_TOPIC_ARN: !Ref AlertTopicArn
           LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
           ALARM_PREFIX: platform-auto

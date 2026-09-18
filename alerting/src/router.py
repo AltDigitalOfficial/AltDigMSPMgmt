@@ -57,7 +57,9 @@ import urllib.request
 
 import boto3
 
-cloudwatch = boto3.client("cloudwatch")
+# No cloudwatch client. The router deliberately makes no cross-account AWS call
+# on the alert path — everything it needs arrives in the event. See
+# alarm_routing() for what that replaced and why.
 secrets = boto3.client("secretsmanager")
 sqs = boto3.client("sqs")
 
@@ -123,8 +125,18 @@ def from_alarm(event):
         "region": event.get("region"),
         "title": name,
         "state": state,
-        "resource": d.get("configuration", {}).get("description") or name,
-        "alarm_arn": event.get("resources", [None])[0],
+        # The alarm's own description, which carries the routing trailer. The
+        # RESOURCE comes out of that trailer rather than out of the alarm name:
+        # the name is platform-auto-RESOURCEID-ALARMID and both halves may
+        # contain dashes, so parsing it is guesswork. B-031.
+        "description": (d.get("configuration") or {}).get("description"),
+        "resource": name,
+        # No alarm_arn. It was here for the tag lookup that turned out to be
+        # impossible, and it crashed on the way out: event.get("resources",
+        # [None])[0] raises IndexError when `resources` is PRESENT and empty,
+        # because a default only applies to a missing key. EventBridge supplies
+        # an empty list, so the router died on an event it was built to handle
+        # and the whole invocation dead-lettered.
         "reason": (d.get("state") or {}).get("reason"),
         "occurred_at": event.get("time"),
         # Resolved from the alarm's tags below. An alarm the platform did not
@@ -232,22 +244,42 @@ NORMALISERS = {
 # ---------------------------------------------------------------------------
 
 
-def alarm_routing(alarm_arn):
+# Written into every AlarmDescription by the instrumentation Lambda. Must match
+# ROUTING_MARKER there.
+ROUTING_MARKER = "[platform-routing]"
+
+
+def alarm_routing(description):
     """Read the routing class the instrumentation Lambda already decided.
 
-    Returns (routing, tier, note). The decision is on the alarm as a tag because
-    that is where it was made — re-deriving it here would need 06a, the resource
-    type and the tier in an account that has none of them, and would be a second
-    implementation free to disagree with the first.
+    Out of the alarm's DESCRIPTION, which arrives inside the event as
+    detail.configuration.description — not out of its tags.
+
+    The tags carry the same facts and were the obvious source, and they are
+    unreachable. CloudWatch alarms have no resource-based policy, so there is no
+    IAM grant that lets the Audit account read another account's alarm tags; the
+    call fails and every alarm falls through to the review queue. Found on the
+    first live event, where the log read
+    "could not read alarm tags: ClientError".
+
+    Reading the description is better than fixing that would have been. The
+    alternative was assuming a role per member account per alarm, which puts a
+    cross-account round trip on the path that pages people, at the moment an
+    incident is starting and the account may itself be unhealthy.
+
+    Returns (routing, tier, note).
     """
-    if not alarm_arn:
-        return None, None, "no alarm ARN on the event"
-    try:
-        tags = cloudwatch.list_tags_for_resource(ResourceARN=alarm_arn)["Tags"]
-    except Exception as exc:
-        return None, None, f"could not read alarm tags: {type(exc).__name__}"
-    t = {x["Key"]: x["Value"] for x in tags}
-    return t.get("platform-routing"), t.get("platform-tier"), None
+    if not description or ROUTING_MARKER not in description:
+        return None, None, ("no routing marker in the alarm description — this "
+                            "alarm was not created by the instrumentation "
+                            "Lambda, or predates the marker")
+    trailer = description.split(ROUTING_MARKER, 1)[1]
+    fields = {}
+    for token in trailer.split():
+        if "=" in token:
+            k, v = token.split("=", 1)
+            fields[k] = v
+    return fields.get("routing"), fields.get("tier"), None
 
 
 def decide(norm):
@@ -258,8 +290,15 @@ def decide(norm):
     follows. An event nobody anticipated is the one most likely to matter.
     """
     if norm["kind"] == "alarm":
-        routing, tier, note = alarm_routing(norm.get("alarm_arn"))
+        routing, tier, note = alarm_routing(norm.get("description"))
         norm["environment_tier"] = tier
+        if norm.get("description") and ROUTING_MARKER in norm["description"]:
+            trailer = norm["description"].split(ROUTING_MARKER, 1)[1]
+            for token in trailer.split():
+                if token.startswith("resource-id="):
+                    # The real resource, so the page names the database rather
+                    # than the alarm about the database.
+                    norm["resource"] = token.split("=", 1)[1]
         if routing:
             return routing, f"alarm tag platform-routing={routing}"
         # No tag. Either an alarm the platform did not create, or one created
