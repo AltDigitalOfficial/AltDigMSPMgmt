@@ -398,9 +398,17 @@ def page(norm, routing, why):
         },
     }
 
+    # ensure_ascii and an explicit charset, both.
+    #
+    # The first live page rendered an em dash as mojibake in PagerDuty. Dossier
+    # text is full of them, so every real page would have carried garbled
+    # characters through to whoever was reading it at 3am. ensure_ascii=True
+    # escapes non-ASCII to \uXXXX so nothing depends on the receiver guessing an
+    # encoding, and the charset header says so regardless.
     req = urllib.request.Request(
-        PD_ENQUEUE, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST")
+        PD_ENQUEUE, data=json.dumps(body, ensure_ascii=True).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST")
     with urllib.request.urlopen(req, timeout=10) as resp:
         return {"status": resp.status, "dedup_key": body["dedup_key"],
                 "event_action": body["event_action"]}
