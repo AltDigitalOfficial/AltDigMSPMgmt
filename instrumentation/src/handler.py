@@ -223,19 +223,35 @@ def resolve_set(resource_type, _seen=None):
 # applies is not the same as knowing it does not.
 
 
+# The last failure each helper hit, so the exception can say WHY rather than
+# only that it could not tell. An AccessDenied and a deleted resource produce
+# the same None, and for two months every Lambda in the account raised
+# "could not evaluate applies_when 'dlq_configured'" — which reads like the
+# function is odd, when the cause was that the role had no
+# lambda:GetFunctionConfiguration at all and never could answer.
+_LAST_ERROR = {}
+
+
+def _describe_failed(kind, resource_id, exc):
+    code = getattr(exc, "response", {}).get("Error", {}).get("Code", type(exc).__name__)
+    _LAST_ERROR[resource_id] = f"{kind}: {code}"
+    return None
+
+
 def _rds(resource_id):
     try:
         r = boto3.client("rds").describe_db_instances(DBInstanceIdentifier=resource_id)
         return r["DBInstances"][0]
-    except (ClientError, IndexError, KeyError):
-        return None
+    except (ClientError, IndexError, KeyError) as exc:
+        return _describe_failed("rds:DescribeDBInstances", resource_id, exc)
 
 
 def _lambda_cfg(resource_id):
     try:
         return boto3.client("lambda").get_function_configuration(FunctionName=resource_id)
-    except (ClientError, KeyError):
-        return None
+    except (ClientError, KeyError) as exc:
+        return _describe_failed(
+            "lambda:GetFunctionConfiguration", resource_id, exc)
 
 
 # Where a threshold_source reads from. One entry today; a dict rather than an
@@ -373,7 +389,14 @@ def applies(spec, resource_type, resource_id):
             )
         actual = resolver(resource_type, resource_id)
         if actual is None:
-            return None, f"could not evaluate applies_when '{key}' against {resource_id}"
+            why = _LAST_ERROR.get(resource_id)
+            return None, (
+                f"could not evaluate applies_when '{key}' against {resource_id}"
+                + (f" — {why}" if why else "")
+                + (". AccessDenied here means the instrumentation role is missing "
+                   "a read permission, and the alarm can NEVER be created until "
+                   "it is granted — this is a platform fault, not a property of "
+                   "the resource." if why and "AccessDenied" in why else ""))
         if actual != expected:
             return False, None
     return True, None
@@ -513,7 +536,12 @@ def plan_alarms(resource_type, resource_id):
 
     planned = []
     classes = {"suppressed": [], "not_applicable": [], "exceptions": [],
-               "pending_destination": [], "account_level": []}
+               "pending_destination": [], "account_level": [],
+               # Non-paging alarms, which now carry no alarm action of their
+               # own and are delivered by the routing layer. Listed so the
+               # output still says where every alarm goes; an empty
+               # AlarmActions list would otherwise read as "nowhere".
+               "routed_by_router": []}
 
     for spec in alarms:
         aid = spec.get("id", "?")
@@ -618,20 +646,30 @@ def plan_alarms(resource_type, resource_id):
         routing = routing_for(spec)
         pages = (ROUTING.get(routing) or {}).get("pages", False)
 
+        # An alarm action is a SECOND delivery path, and it is only wanted for
+        # the routing classes that page.
+        #
+        # Every platform alarm is forwarded to the routing layer by
+        # baseline/70-event-forwarding.yaml, and the router applies the routing
+        # class properly. The alarm's own action is kept for paging classes as
+        # the fallback that still works when the router is broken — degraded
+        # beats silent, and that is the whole reason the SNS subscription was
+        # not retired.
+        #
+        # For NON-paging classes it is not a fallback, it is a bug. It used to
+        # send them to the low-urgency topic, which is subscribed to PagerDuty,
+        # so every `digest` and `digest_and_jira` alarm paged. The same fault in
+        # the event rules produced five PagerDuty incidents for a call that
+        # ENABLED S3 public access blocks.
         if pages:
             actions = [ALERT_TOPIC_ARN] if ALERT_TOPIC_ARN else []
-        elif LOW_URGENCY_TOPIC_ARN:
-            actions = [LOW_URGENCY_TOPIC_ARN]
-            classes["pending_destination"].append(
-                {"alarm": aid, "routing": routing, "sent_to": "low-urgency"})
+            if not actions:
+                classes["pending_destination"].append(
+                    {"alarm": aid, "routing": routing, "sent_to": "nowhere",
+                     "why": "routing class pages but no alert topic is configured"})
         else:
-            # No destination at all. The alarm is still created — it evaluates
-            # and is visible in the console — but nothing is notified, and that
-            # is recorded rather than left to be inferred from an empty
-            # AlarmActions list.
             actions = []
-            classes["pending_destination"].append(
-                {"alarm": aid, "routing": routing, "sent_to": "nowhere"})
+            classes["routed_by_router"].append({"alarm": aid, "routing": routing})
 
         dimension_name = type_cfg.get("dimension") or _dimension_for(resource_type)
 
@@ -784,6 +822,11 @@ def handler(event, context):
         "not_applicable": classes["not_applicable"],
         "exceptions": exceptions,
         "pending_destination": classes["pending_destination"],
+        # Created with no alarm action of their own, because their routing class
+        # does not page and the routing layer delivers them. Reported rather
+        # than omitted: an alarm with an empty AlarmActions list is otherwise
+        # indistinguishable from one nobody gave a destination to.
+        "routed_by_router": classes["routed_by_router"],
         "account_level_event_rules": classes["account_level"],
     }
     print(json.dumps(result))

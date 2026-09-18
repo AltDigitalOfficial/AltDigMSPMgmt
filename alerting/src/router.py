@@ -57,11 +57,14 @@ import urllib.request
 
 import boto3
 
+import eventspec
+
 # No cloudwatch client. The router deliberately makes no cross-account AWS call
 # on the alert path — everything it needs arrives in the event. See
 # alarm_routing() for what that replaced and why.
 secrets = boto3.client("secretsmanager")
 sqs = boto3.client("sqs")
+ssm = boto3.client("ssm")
 
 PD_SECRET_NAME = os.environ.get("PAGERDUTY_SECRET_NAME", "")
 PD_SECRET_NAME_LOW = os.environ.get("PAGERDUTY_SECRET_NAME_LOW", "")
@@ -71,6 +74,31 @@ COMMERCIAL_QUEUE_URL = os.environ.get("COMMERCIAL_QUEUE_URL", "")
 ROUTING_LOG_GROUP = os.environ.get("ROUTING_LOG_GROUP", "/aws/platform/routing")
 
 PD_ENQUEUE = "https://events.pagerduty.com/v2/enqueue"
+
+# 06a's event alarms, baked in at packaging by
+# scripts/lib/extract_event_specs.py from the same eventspec.py the
+# instrumentation Lambda builds the rules from.
+_SPEC_PATH = os.path.join(os.path.dirname(__file__), "event_specs.json")
+try:
+    with open(_SPEC_PATH, encoding="utf-8") as _fh:
+        EVENT_SPECS = json.load(_fh)
+except FileNotFoundError:
+    # Not fatal. A router without the specs still routes alarms, findings and
+    # dossiers; what it loses is the ability to recognise 06a's event alarms,
+    # and those then land in the review queue rather than vanishing.
+    EVENT_SPECS = []
+
+# Account -> environment tier, read from SSM in this account.
+#
+# Without it the router assumed "prod" for anything with no tier of its own,
+# which meant Security Hub and GuardDuty findings in a DEV sandbox were
+# evaluated as production. Confirmed in the live log: findings from 754280127660
+# recorded environment_tier null and "prod defaults to pagerduty". Only their
+# MEDIUM severity stopped them paging; a CRITICAL finding in a sandbox would
+# have woken somebody.
+ACCOUNT_TIER_PARAM = os.environ.get(
+    "ACCOUNT_TIER_PARAM", "/platform/routing/account-tiers")
+_TIER_CACHE = {}
 
 # design/06a routing_destinations, duplicated here for one specific reason: this
 # Lambda runs in the Audit account and 06a ships with the instrumentation
@@ -104,6 +132,40 @@ FINDING_PAGES_AT = {"CRITICAL", "HIGH"}
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+def account_tier(account_id):
+    """Environment tier for an account. Returns (tier, note).
+
+    Cached for the life of the execution environment: the map changes when an
+    account is vested, which is rarely, and a Parameter Store read per event
+    would put a throttleable dependency on the path that pages people.
+
+    An account that is not in the map returns "prod", which PAGES. That is the
+    deliberate direction to fail: treating an unknown account as dev would
+    silence a real production incident, while treating it as prod produces a
+    page that says the tier was unknown. The note travels into the routing
+    record so the gap is visible rather than inferred.
+    """
+    if not account_id:
+        return "prod", "no account id on the event; treated as prod"
+    if "map" not in _TIER_CACHE:
+        try:
+            raw = ssm.get_parameter(Name=ACCOUNT_TIER_PARAM)["Parameter"]["Value"]
+            _TIER_CACHE["map"] = json.loads(raw)
+        except Exception as exc:
+            _TIER_CACHE["map"] = {}
+            _TIER_CACHE["error"] = f"{type(exc).__name__}"
+    mapping = _TIER_CACHE["map"]
+    if account_id in mapping:
+        return mapping[account_id], None
+    why = _TIER_CACHE.get("error")
+    return "prod", (
+        f"account {account_id} is not in {ACCOUNT_TIER_PARAM}"
+        + (f" ({why} reading it)" if why else "")
+        + ". Treated as prod, which pages — an unknown account is more likely "
+          "to be an unregistered production account than a forgotten sandbox. "
+          "Run scripts/sync-account-tiers.sh.")
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +292,65 @@ def from_dossier(event):
     }
 
 
+def from_platform_event(event, spec):
+    """A raw AWS event that matches one of 06a's `metric: event` alarms.
+
+    The event arrives exactly as AWS emitted it — the forwarding rule cannot add
+    anything, because an EventBridge rule cannot transform its input when the
+    target is an event bus. So the 06a alarm is identified by matching the same
+    pattern the rule was built from, and everything else is read out of the
+    event itself.
+    """
+    d = event.get("detail") or {}
+
+    # Two shapes, because the sources disagree. An RDS or Auto Scaling event
+    # puts ARN STRINGS in the top-level `resources`; a CloudTrail event leaves
+    # that empty and puts a list of DICTS under detail.resources
+    # ({"ARN": ..., "type": ...}). Assuming strings crashed the router on the
+    # very event class this was written to handle.
+    candidates = list(event.get("resources") or []) + list(d.get("resources") or [])
+    resource = None
+    for c in candidates:
+        arn = c.get("ARN") if isinstance(c, dict) else c
+        if isinstance(arn, str) and arn:
+            resource = arn.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+            break
+    if not resource:
+        # CloudTrail puts the target under requestParameters, and what it is
+        # called depends on the service. These two cover the only cloudtrail
+        # source 06a defines today (S3); an unmatched one falls back to the
+        # event name, which at least says what happened.
+        rp = d.get("requestParameters") or {}
+        resource = (rp.get("bucketName") or d.get("SourceIdentifier")
+                    or d.get("AutoScalingGroupName") or d.get("eventName")
+                    or "unknown")
+    return {
+        "kind": "platform-event",
+        "source": (event.get("source") or "aws").replace("aws.", ""),
+        "account_id": event.get("account"),
+        "region": event.get("region"),
+        "title": f"{spec['alarm_id']} — {d.get('eventName') or d.get('Message') or event.get('detail-type')}",
+        "resource": resource,
+        "alarm_id": spec["alarm_id"],
+        "resource_type": spec["resource_type"],
+        "severity_by_tier": spec.get("severity_by_tier") or {},
+        "reason": spec.get("note"),
+        "occurred_at": event.get("time"),
+        "actor": ((d.get("userIdentity") or {}).get("arn")
+                  or (d.get("userIdentity") or {}).get("type")),
+        "raw_detail": d,
+        "routing": None,
+    }
+
+
+def match_event_spec(event):
+    """Which 06a event alarm, if any, this raw AWS event belongs to."""
+    for spec in EVENT_SPECS:
+        if eventspec.matches(spec["pattern"], event):
+            return spec
+    return None
+
+
 NORMALISERS = {
     "CloudWatch Alarm State Change": from_alarm,
     "Security Hub Findings - Imported": from_security_hub,
@@ -310,6 +431,22 @@ def decide(norm):
             "Routed to review rather than guessed at. An untagged alarm is a gap "
             "in instrumentation, not an incident.")
 
+    if norm["kind"] == "platform-event":
+        tier, note = account_tier(norm.get("account_id"))
+        norm["environment_tier"] = tier
+        sev = norm.get("severity_by_tier") or {}
+        if tier not in sev:
+            # 06a omits a tier to mean "not watched here". The rule should not
+            # have been created in that account at all, so this is a mismatch
+            # between what is deployed and what the spec says — reviewable, not
+            # pageable.
+            return "review_queue", (
+                f"06a does not watch {norm.get('alarm_id')} at tier {tier}, yet an "
+                "event rule forwarded one. The rule is stale relative to the "
+                "specification." + (f" {note}" if note else ""))
+        return sev[tier], (f"06a {norm.get('alarm_id')} at tier {tier}"
+                           + (f". {note}" if note else ""))
+
     if norm["kind"] == "dossier":
         # The response engine only emits a dossier when it has decided a human
         # is needed, so the routing class is not in question — what varies is
@@ -318,17 +455,22 @@ def decide(norm):
         return ("pagerduty" if tier in ("uat", "prod")
                 else "digest_and_jira"), f"response engine escalation, tier {tier}"
 
-    # Findings. No alarm tag exists, so the tier default applies, floored by
-    # the finding's own severity: a LOW GuardDuty finding in production is not
-    # a page just because production pages by default.
-    tier = norm.get("environment_tier") or "prod"
+    # Findings. No routing decision travels with them, so the tier default
+    # applies — and the tier is now LOOKED UP rather than assumed. It used to
+    # default to prod for everything, which meant findings in a dev sandbox were
+    # evaluated as production.
+    tier, note = account_tier(norm.get("account_id"))
+    norm["environment_tier"] = tier
     default = TIER_DEFAULT_ROUTING.get(tier, "digest")
     sev = (norm.get("severity") or "").upper()
+    suffix = f". {note}" if note else ""
+    # Floored by the finding's own severity: a LOW GuardDuty finding in
+    # production is not a page just because production pages by default.
     if default == "pagerduty" and sev not in FINDING_PAGES_AT:
         return "digest_and_jira", (
             f"{tier} defaults to pagerduty, but a {sev or 'UNRATED'} finding is "
-            "not actionable right now — ticketed instead")
-    return default, f"tier default for {tier}, severity {sev or 'UNRATED'}"
+            "not actionable right now — ticketed instead" + suffix)
+    return default, f"tier default for {tier}, severity {sev or 'UNRATED'}{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +574,17 @@ def handler(event, context):
     normalise = NORMALISERS.get(detail_type)
 
     if normalise is None:
+        # Before giving up: is this a raw AWS event belonging to one of 06a's
+        # event alarms? Those arrive with the service's own detail-type — "AWS
+        # API Call via CloudTrail", "RDS DB Instance Event" — and carry no
+        # routing decision, because the rule that forwarded them could not
+        # attach one.
+        spec = match_event_spec(event)
+        if spec is not None:
+            norm = from_platform_event(event, spec)
+            return deliver(norm, detail_type)
+
+    if normalise is None:
         # The else. An event shape nobody anticipated is not dropped — it goes
         # to review with the raw event attached, because a router that silently
         # discards what it does not recognise is indistinguishable from one that
@@ -457,6 +610,16 @@ def handler(event, context):
         print(json.dumps(out))
         return out
 
+    return deliver(norm, detail_type)
+
+
+def deliver(norm, detail_type):
+    """Decide, deliver, and record. One implementation for every event kind.
+
+    Separate from handler() so the raw-AWS-event path and the normalised paths
+    cannot diverge: the thing that decides where something goes, and the thing
+    that records why, are the same code regardless of what arrived.
+    """
     routing, why = decide(norm)
     spec = DESTINATIONS.get(routing)
     if spec is None:

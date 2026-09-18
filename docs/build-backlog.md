@@ -1275,3 +1275,61 @@ theoretical at roughly the tenth tenant.
 
 **Do** — request a concurrency increase for 692869638531, then restore the
 reservation.
+
+---
+
+## B-041 · Two-way paging splits, and the bugs they hid
+
+**Fixed** — 2026-09-18, after five false PagerDuty incidents.
+
+06a defines five routing classes. Two places reduced them to a boolean —
+"pages" or "does not page" — and sent the second half to the low-urgency SNS
+topic, which is **subscribed to PagerDuty**. So `digest`, `digest_and_jira` and
+`review_queue` all paged.
+
+    instrumentation/src/drift.py   event rules, all four of 06a's event alarms
+    instrumentation/src/handler.py metric alarms, every non-paging alarm
+
+It surfaced as five incidents titled "AWS API Call via CloudTrail" — a title
+that says nothing — raised by the canary artifacts bucket deployment calling
+`PutBucketPublicAccessBlock` to *enable* all four blocks. A hardening action,
+paged as an incident, described by nothing.
+
+Now: event rules target the routing layer, and non-paging metric alarms carry
+no alarm action at all. Paging classes keep theirs, because that is the
+fallback that still works when the router is broken.
+
+**The general shape**, worth remembering: a boolean stand-in for a five-valued
+decision does not fail loudly. It picks one of the two answers it has, and the
+wrong one looks like a working alert.
+
+---
+
+## B-042 · The instrumentation role could not read any resource
+
+**Fixed** — 2026-09-18.
+
+`applies_when` has two resolvers, `read_replica` and `dlq_configured`. Both
+call a describe API. The role had neither `rds:DescribeDBInstances` nor
+`lambda:GetFunctionConfiguration`, so both always returned AccessDenied, which
+the helpers swallowed into `None`, which means "cannot tell".
+
+Consequences, all silent:
+
+- `lambda-dlq-depth` and the RDS replica-lag alarm were **never created in any
+  account**, and could not have been.
+- Every Lambda evaluation recorded an exception — 25 in ninety minutes — which
+  kept `platform-instrumentation-exception` permanently lit, destroying the one
+  signal that says a real resource came up unmonitored. The same failure mode
+  that `resource_types_no_alarms` was added to fix on 2026-09-17, from a
+  different cause.
+- The message read "could not evaluate applies_when 'dlq_configured' against
+  platform-response", which points at the function rather than at the missing
+  permission.
+
+The describe permissions are granted, and the helpers now record the API error
+code so an AccessDenied says so and says that it is a platform fault.
+
+**Still open** — `threshold_mode: reference_metric` and the RDS memory-based
+modes were never reachable either, for the same reason. Now that the reads
+work they should be re-tested; nobody has seen them succeed. B-025.

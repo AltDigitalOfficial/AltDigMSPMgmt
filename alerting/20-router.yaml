@@ -261,6 +261,13 @@ Resources:
               - Effect: Allow
                 Action: ['kms:GenerateDataKey', 'kms:Decrypt']
                 Resource: !Ref AlertsKeyArn
+              - Effect: Allow
+                # The account -> tier map. Without it the router assumed prod
+                # for anything carrying no tier of its own, so a CRITICAL
+                # finding in a dev sandbox would have paged as production.
+                # Written by scripts/sync-account-tiers.sh.
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/routing/*'
               # No CloudWatch permissions, deliberately.
               #
               # This granted cross-account ListTagsForResource so the router

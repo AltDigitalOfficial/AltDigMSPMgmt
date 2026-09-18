@@ -66,3 +66,8 @@ scratch/
 # packaging. Committing it would let a stale copy ship if the YAML changed and
 # packaging was skipped — the catalog has one source and it is the YAML.
 runbooks/src/catalog.json
+
+# Build artifact: scripts/lib/extract_event_specs.py generates it from 06a at
+# packaging. A committed copy could ship stale if 06a changed and packaging was
+# skipped, and the router would then not recognise an event class it forwards.
+alerting/src/event_specs.json

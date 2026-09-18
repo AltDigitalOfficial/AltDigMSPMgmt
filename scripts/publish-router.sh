@@ -27,6 +27,18 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 cp "${REPO_ROOT}/alerting/src/router.py" "${BUILD}/router.py"
+cp "${REPO_ROOT}/instrumentation/src/eventspec.py" "${BUILD}/eventspec.py"
+
+# 06a's event-alarm patterns, baked in.
+#
+# The router must recognise a raw AWS event and find the 06a alarm it belongs
+# to, because an EventBridge rule cannot transform its input when the target is
+# an event bus. Generated from the same eventspec.py the instrumentation Lambda
+# builds the rules from, so the two cannot drift apart — if they did, the rule
+# would forward an event the router did not recognise and the alarm would appear
+# to work while going to the review queue.
+info "Baking in 06a's event patterns"
+"${PY}" "$(win_path "${REPO_ROOT}/scripts/lib/extract_event_specs.py")"   "$(win_path "${REPO_ROOT}/design/06a-alarm-specification.yaml")"   "$(win_path "${REPO_ROOT}/instrumentation/src")"   "$(win_path "${BUILD}/event_specs.json")"   || die "Could not extract the event specifications. Nothing packaged."
 
 info "Checking the router compiles"
 "${PY}" -m py_compile "$(win_path "${REPO_ROOT}/alerting/src/router.py")" \

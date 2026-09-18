@@ -66,6 +66,9 @@ trap 'rm -rf "${BUILD}"' EXIT
 
 cp "${SRC}/handler.py" "${BUILD}/handler.py"
 cp "${SRC}/drift.py"   "${BUILD}/drift.py"
+# Pure, and shared with the router package so the rules the Lambda creates and
+# the patterns the router matches on cannot drift apart.
+cp "${SRC}/eventspec.py" "${BUILD}/eventspec.py"
 
 info "Validating design/06a-alarm-specification.yaml"
 "${PY}" "$(win_path "${REPO_ROOT}/scripts/lib/validate_alarm_spec.py")" \

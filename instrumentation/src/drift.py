@@ -76,6 +76,25 @@ EVENT_RULE_PREFIX = os.environ.get("EVENT_RULE_PREFIX", "platform-event")
 # relay events to the alerting topics.
 EVENT_DELIVERY_ROLE_ARN = os.environ.get("EVENT_DELIVERY_ROLE_ARN", "")
 
+# The routing layer's bus in the Audit account, and the role that may put events
+# on it. Both empty means event rules are not created at all — see
+# reconcile_event_rules(), which refuses to fall back to an SNS topic because
+# that fallback is exactly what made non-paging alarms page.
+# The target Id, which MUST NOT CHANGE.
+#
+# put_targets upserts by Id. Renaming this from "alert" to "routing" did not
+# replace the old target, it added a second — so the rule delivered to the SNS
+# topic AND the bus, the false pages continued, and the reconciler reported
+# success. The role has no events:RemoveTargets by design, so nothing could
+# clean that up automatically.
+#
+# Keeping one stable Id makes every future target change an in-place replace and
+# needs no deletion permission at all.
+EVENT_TARGET_ID = "alert"
+
+CENTRAL_BUS_ARN = os.environ.get("CENTRAL_BUS_ARN", "")
+EVENT_FORWARDING_ROLE_ARN = os.environ.get("EVENT_FORWARDING_ROLE_ARN", "")
+
 # Fields that decide whether an alarm fires, and therefore the fields whose
 # modification is drift.
 #
@@ -205,52 +224,13 @@ def differences(expected, actual):
 # three different envelopes. This mapping is the whole of the per-source
 # special-casing, and it is small enough to read.
 
-AUTOSCALING_DETAIL_TYPES = {
-    "EC2_INSTANCE_LAUNCH_ERROR": "EC2 Instance Launch Unsuccessful",
-    "EC2_INSTANCE_TERMINATE_ERROR": "EC2 Instance Terminate Unsuccessful",
-}
-
-CLOUDTRAIL_SOURCES = {
-    "AWS::S3::Bucket": "aws.s3",
-}
-
-
-def event_pattern(spec, resource_type):
-    """Build an EventBridge pattern. Returns (pattern, None) or (None, reason)."""
-    source = spec.get("source")
-
-    if source == "rds_event_category":
-        cats = spec.get("event_categories") or []
-        return {
-            "source": ["aws.rds"],
-            "detail-type": ["RDS DB Instance Event", "RDS DB Cluster Event"],
-            "detail": {"EventCategories": cats},
-        }, None
-
-    if source == "cloudtrail":
-        aws_source = CLOUDTRAIL_SOURCES.get(resource_type)
-        if not aws_source:
-            return None, (
-                f"cloudtrail event alarm on {resource_type}, which has no entry in "
-                "CLOUDTRAIL_SOURCES. Add the aws.* event source for that service."
-            )
-        return {
-            "source": [aws_source],
-            "detail-type": ["AWS API Call via CloudTrail"],
-            "detail": {"eventName": spec.get("event_names") or []},
-        }, None
-
-    if source == "autoscaling_event":
-        types = spec.get("event_types") or []
-        unknown = [t for t in types if t not in AUTOSCALING_DETAIL_TYPES]
-        if unknown:
-            return None, f"unmapped Auto Scaling event types: {unknown}"
-        return {
-            "source": ["aws.autoscaling"],
-            "detail-type": [AUTOSCALING_DETAIL_TYPES[t] for t in types],
-        }, None
-
-    return None, f"unknown event source '{source}'"
+# The patterns live in eventspec.py, which is pure and is also read by
+# scripts/lib/extract_event_specs.py to bake the same patterns into the router
+# package. The router has to recognise a raw AWS event and find the 06a alarm it
+# belongs to, because an EventBridge rule cannot transform its input when the
+# target is an event bus. Two copies of these patterns would be two chances to
+# disagree, and the disagreement would be silent.
+from eventspec import event_pattern  # noqa: E402
 
 
 def event_alarms():
@@ -291,10 +271,34 @@ def reconcile_event_rules():
             continue
 
         routing = severity[instr.ENVIRONMENT_TIER]
-        pages = (instr.ROUTING.get(routing) or {}).get("pages", False)
-        topic = ALERT_TOPIC_ARN if pages else LOW_URGENCY_TOPIC_ARN
-        if not topic:
-            problems.append({"alarm": aid, "reason": "no destination topic configured"})
+
+        # To the routing layer, not to an SNS topic.
+        #
+        # This was `ALERT_TOPIC_ARN if pages else LOW_URGENCY_TOPIC_ARN` — a
+        # two-way split across five routing classes, and the non-paging half
+        # went to the low-urgency topic, which is SUBSCRIBED TO PAGERDUTY. So
+        # every one of 06a's event alarms paged in dev and test, where all four
+        # of them are digest or digest_and_jira and none of them should page at
+        # all.
+        #
+        # It was not theoretical: deploying the canary artifacts bucket raised
+        # PutBucketPublicAccessBlock, s3-public-access-change matched it, and
+        # five PagerDuty incidents appeared titled "AWS API Call via CloudTrail"
+        # — for a call that ENABLED all four public access blocks. A hardening
+        # action, paged as an incident, described by nothing.
+        #
+        # The router applies the routing class properly. It cannot be told the
+        # class on the way, because an EventBridge rule cannot transform its
+        # input when the target is an event bus, so it identifies the event by
+        # matching the same patterns from eventspec.py.
+        target_arn = CENTRAL_BUS_ARN
+        if not target_arn:
+            problems.append({
+                "alarm": aid,
+                "reason": "CENTRAL_BUS_ARN is unset, so there is nowhere to send "
+                          "this that respects its routing class. The rule is NOT "
+                          "created: sending it to a topic instead is what made "
+                          "non-paging alarms page."})
             continue
 
         pattern, why = event_pattern(spec, resource_type)
@@ -325,11 +329,21 @@ def reconcile_event_rules():
             have_pattern = json.dumps(
                 json.loads(existing.get("EventPattern") or "{}"), sort_keys=True)
             targets = events.list_targets_by_rule(Rule=name).get("Targets", [])
-            have_topic = targets[0]["Arn"] if targets else None
-            unchanged = (have_pattern == desired_pattern and have_topic == topic
+            # The WHOLE target set, not targets[0].
+            #
+            # put_targets upserts by Id, so renaming the target from "alert" to
+            # "routing" did not replace the old one — it added a second. The
+            # rule then delivered to both the SNS topic and the bus, which made
+            # the false page continue AND duplicated it into the router, while
+            # a targets[0] check reported the rule as corrected. Target order
+            # is not guaranteed either, so that check was unreliable even with
+            # one target.
+            have = sorted((t["Id"], t["Arn"]) for t in targets)
+            want = [(EVENT_TARGET_ID, target_arn)]
+            unchanged = (have_pattern == desired_pattern and have == want
                          and existing.get("State") == "ENABLED")
         except events.exceptions.ResourceNotFoundException:
-            existing, unchanged, have_pattern, have_topic = None, False, None, None
+            existing, unchanged, have_pattern, have = None, False, None, []
 
         if unchanged:
             intact.append(aid)
@@ -348,16 +362,45 @@ def reconcile_event_rules():
                 Tags=[{"Key": "platform-managed", "Value": "true"},
                       {"Key": "platform-alarm-id", "Value": aid}],
             )
-            target = {"Id": "alert", "Arn": topic}
-            if EVENT_DELIVERY_ROLE_ARN:
-                target["RoleArn"] = EVENT_DELIVERY_ROLE_ARN
-            events.put_targets(Rule=name, Targets=[target])
+            # A cross-account bus target REQUIRES a role. Without one,
+            # put_rule succeeds and put_targets fails, leaving a rule that
+            # reads ENABLED with nothing attached — which is how this platform
+            # lost an afternoon once already.
+            if not EVENT_FORWARDING_ROLE_ARN:
+                problems.append({
+                    "alarm": aid,
+                    "reason": "no forwarding role; a cross-account bus target "
+                              "cannot be created without one and a rule with no "
+                              "target looks enabled and delivers nothing"})
+                continue
+            events.put_targets(Rule=name, Targets=[{
+                "Id": EVENT_TARGET_ID, "Arn": target_arn,
+                "RoleArn": EVENT_FORWARDING_ROLE_ARN,
+            }])
+
+            # Anything still attached under another Id is reported, not
+            # removed. The role deliberately has no events:RemoveTargets — this
+            # platform's automation does not delete — so a stale target is a
+            # finding for a human, which is the same answer the response engine
+            # gives when it cannot fix something itself.
+            stale = [t["Id"] for t in targets if t["Id"] != EVENT_TARGET_ID]
+            if stale:
+                record("stale-event-target", {
+                    "alarm_id": aid, "rule": name, "stale_target_ids": stale,
+                    "message": "An event rule has a target this reconciler did "
+                               "not put there and cannot remove. The rule now "
+                               "delivers to BOTH, which for a routing change "
+                               "means the old destination is still receiving. "
+                               "Remove it by hand: aws events remove-targets "
+                               f"--rule {name} --ids " + " ".join(stale)})
+                problems.append({"alarm": aid,
+                                 "reason": f"stale target(s) {stale} need manual removal"})
         except Exception as exc:
             problems.append({"alarm": aid, "reason": str(exc)})
             continue
 
         detail = {"alarm_id": aid, "rule": name, "resource_type": resource_type,
-                  "routing": routing, "topic": topic}
+                  "routing": routing, "target": target_arn}
         if unfiltered:
             detail["applies_when_not_enforced"] = unfiltered
             detail["applies_when_note"] = (
@@ -374,7 +417,7 @@ def reconcile_event_rules():
             corrected.append(aid)
             record("corrected-event-rule", dict(
                 detail,
-                previous_pattern=have_pattern, previous_target=have_topic,
+                previous_pattern=have_pattern, previous_targets=have,
                 message="An account-level event rule differed from the specification "
                         "and has been put back."))
 

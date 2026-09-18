@@ -87,6 +87,21 @@ Parameters:
   # alarm 06a ties to 7.4 raised threshold-unset on every ALB. Keeping it would
   # have made a second source for a value 06a is explicit must have one.
 
+  CentralBusArn:
+    Type: String
+    Default: ''
+    Description: >-
+      The routing layer's bus in the Audit account. 06a's `metric: event`
+      alarms forward raw AWS events here so the router can apply their routing
+      class.
+
+      Empty means those rules are NOT created. That is deliberate: they used to
+      fall back to an SNS topic chosen by a two-way paging split, and the
+      non-paging half went to the low-urgency topic, which is subscribed to
+      PagerDuty. Every one of 06a's event alarms therefore paged in dev and
+      test, where none of them should page at all. No rule is better than a
+      rule that pages for a hardening action.
+
   AlertTopicArn:
     Type: String
     Default: ''
@@ -146,6 +161,12 @@ Parameters:
       operational log line, so it outlives a normal debugging window.
 
 Conditions:
+  # The forwarding role is created by baseline/70-event-forwarding.yaml, which
+  # takes the same bus ARN. Referenced by name rather than imported so the two
+  # stacks stay independent — and constructed only when there is a bus, because
+  # naming a role that does not exist would hand the Lambda an ARN that fails at
+  # PutTargets rather than at deploy.
+  HasCentralBus: !Not [!Equals [!Ref CentralBusArn, '']]
   HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
   UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
 
@@ -269,6 +290,26 @@ Resources:
               - Effect: Allow
                 Action: 'config:ListDiscoveredResources'
                 Resource: '*'
+              # Reading the resource itself, for applies_when and the relative
+              # threshold modes.
+              #
+              # These were missing, and the effect was quiet and total: both
+              # applies_when resolvers call one of these APIs, both got
+              # AccessDenied, both returned None, and None means "cannot tell"
+              # - so lambda-dlq-depth and the RDS replica-lag alarm were NEVER
+              # created in any account, while every Lambda evaluation raised an
+              # exception that kept platform-instrumentation-exception lit.
+              # Twenty-five exception records in ninety minutes, all the same
+              # missing permission, none of them saying so.
+              #
+              # Read-only and describe-only: the role may look at a resource to
+              # decide whether an alarm applies, and cannot change one.
+              - Effect: Allow
+                Action:
+                  - 'lambda:GetFunctionConfiguration'
+                  - 'lambda:GetAccountSettings'
+                  - 'rds:DescribeDBInstances'
+                Resource: '*'
               # Account-level event rules from 06a's `metric: event` entries.
               #
               # No events:DeleteRule and no events:RemoveTargets, deliberately
@@ -295,7 +336,14 @@ Resources:
               # hand ANY role to a service and inherit its permissions.
               - Effect: Allow
                 Action: 'iam:PassRole'
-                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformEventBridgeDelivery'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformEventBridgeDelivery'
+                  # The forwarding role, for 06a's event rules whose target is
+                  # now the routing bus. A cross-account bus target needs a
+                  # role, and creating the target needs permission to pass it —
+                  # without which PutRule succeeds and PutTargets fails, leaving
+                  # a rule that reads ENABLED and delivers nothing.
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformEventForwarding'
                 Condition:
                   StringEquals:
                     'iam:PassedToService': 'events.amazonaws.com'
@@ -355,6 +403,11 @@ Resources:
           LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
           ALERT_TOPIC_ARN: !Ref AlertTopicArn
           ALARM_PREFIX: platform-auto
+          CENTRAL_BUS_ARN: !Ref CentralBusArn
+          EVENT_FORWARDING_ROLE_ARN: !If
+            - HasCentralBus
+            - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformEventForwarding'
+            - ''
       Tags:
         - { Key: platform-managed, Value: 'true' }
 
@@ -627,6 +680,11 @@ Resources:
           ALERT_TOPIC_ARN: !Ref AlertTopicArn
           LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
           ALARM_PREFIX: platform-auto
+          CENTRAL_BUS_ARN: !Ref CentralBusArn
+          EVENT_FORWARDING_ROLE_ARN: !If
+            - HasCentralBus
+            - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformEventForwarding'
+            - ''
           EVENT_RULE_PREFIX: platform-event
           EVENT_DELIVERY_ROLE_ARN: !If
             - HasAlerting
