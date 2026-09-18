@@ -37,8 +37,38 @@ REQUIRED_TOP = ("schema_version", "default_gather", "failure_policy",
                 "settle_seconds", "runbooks")
 
 
+def alarm_ids_from_spec(spec_path):
+    """Every alarm id 06a defines, following inherits.
+
+    The catalog is keyed on these. A key that is not one of them silently finds
+    no runbook — no error, no log line, just an incident nobody responded to.
+    That happened once: `rds-storage-low` against 06a's `rds-free-storage-low`.
+    """
+    with open(spec_path, encoding="utf-8") as fh:
+        spec = yaml.safe_load(fh)
+    sets = spec.get("alarm_sets") or {}
+
+    def resolve(rt, seen=None):
+        seen = seen or set()
+        if rt in seen:
+            return []
+        seen.add(rt)
+        c = sets.get(rt)
+        if c is None:
+            return None
+        out = []
+        if c.get("inherits"):
+            out.extend(resolve(c["inherits"], seen) or [])
+        out.extend(c.get("alarms") or [])
+        out.extend(c.get("additional_alarms") or [])
+        return out
+
+    return {rt: {a["id"] for a in (resolve(rt) or [])} for rt in sets}
+
+
 def main():
     cat_path, actions_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    spec_path = sys.argv[4] if len(sys.argv) > 4 else None
     with open(cat_path, encoding="utf-8") as fh:
         cat = yaml.safe_load(fh)
     src = open(actions_path, encoding="utf-8").read()
@@ -79,6 +109,25 @@ def main():
         problems.append(f"stage 3 action without requires_redundancy: {s}")
     for s in scale_out_unchecked:
         problems.append(f"scale_out without requires_scale_in_policy: {s}")
+
+    # Cross-check against 06a. Optional only so the validator still runs
+    # without the design package present; when the path is supplied, a
+    # mismatched id is fatal.
+    if spec_path:
+        by_type = alarm_ids_from_spec(spec_path)
+        import difflib
+        for rtype, rbs in (cat.get("runbooks") or {}).items():
+            valid = by_type.get(rtype)
+            if valid is None:
+                problems.append(f"{rtype} is not a resource type in 06a")
+                continue
+            for aid in (rbs or {}):
+                if aid not in valid:
+                    near = difflib.get_close_matches(aid, sorted(valid), n=1, cutoff=0.6)
+                    hint = f" (did you mean '{near[0]}'?)" if near else ""
+                    problems.append(
+                        f"{rtype}/'{aid}' is not a 06a alarm id{hint} — this runbook "
+                        "would never be found")
 
     settle = cat.get("settle_seconds") or {}
     if "default" not in settle:

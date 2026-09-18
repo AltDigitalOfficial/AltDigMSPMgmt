@@ -48,6 +48,7 @@ info "Validating the runbook catalog"
   "$(win_path "${REPO_ROOT}/runbooks/catalog.yaml")" \
   "$(win_path "${SRC}/actions.py")" \
   "$(win_path "${BUILD}/catalog.json")" \
+  "$(win_path "${REPO_ROOT}/design/06a-alarm-specification.yaml")" \
   || die "runbooks/catalog.yaml is invalid. Nothing packaged."
 
 info "Packaging"
