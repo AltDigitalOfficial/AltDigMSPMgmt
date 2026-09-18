@@ -274,7 +274,7 @@ updated either way.
 
 ---
 
-## D-004 · Partner precondition warns where the design requires it to block
+## D-004 · Partner precondition warns where the design requires it to block — CLOSED
 
 **Design position** — [13-client-provisioning.md](../starter_docs/13-client-provisioning.md):
 partner must exist, be `active`, and have a non-null notification window.
@@ -293,10 +293,35 @@ defensible path.
 **Mitigation** — No accounts can be vested yet, so an OU beneath an incomplete
 partner is inert. The script prints exactly which conditions are unchecked.
 
-**Close when** — Phase 3.2 lands the registry and the script queries it. The
-check must then move from warning to hard failure, and the same assertion must
-appear in the phase 12.5 verification sweep — including that AltDigital's
-notification window is *tighter* than the partner's, not merely present.
+**Status** — Closed 2026-09-17. The registry landed (phase 3.2) in the
+Platform Tooling account, and `create-client-ou.sh` now calls
+`scripts/registry.sh check-partner`, which **blocks**.
+
+All four conditions are enforced, including the one most easily lost:
+AltDigital's notification window must be strictly **tighter** than the
+partner's, not merely present. Equal windows are refused. The reasoning is in
+the error text rather than only in a design document — the partner owes their
+client notification within N hours, so telling the partner at N leaves them no
+time to act and the chain cannot be met. An equal window fails identically to
+a longer one while looking perfectly reasonable in a table.
+
+**Verified by the failure path, not the success path.** Running
+`create-client-ou.sh --partner oeight --slug arc8 --dry-run` now refuses,
+because OEight has no registry record. That is correct and is the first thing
+the gate has ever stopped.
+
+**The check is not duplicated.** `create-client-ou.sh` delegates to
+`registry.sh check-partner` rather than reimplementing the rule, so there is
+one definition of "may this partner have clients". A second copy would drift
+from the first, and the symptom would be a notification chain that cannot be
+met rather than a wrong number on a screen.
+
+**Consequence for OEight** — recording the partner needs the **actual
+contractual notification windows from the Arc8 contract**. Those numbers were
+deliberately not invented to make a demonstration work. Until someone reads
+them out of the contract, no client OU can be created beneath OEight — which
+is the gate behaving exactly as designed, and is now visible rather than
+buried in a warning nobody reads.
 
 ---
 

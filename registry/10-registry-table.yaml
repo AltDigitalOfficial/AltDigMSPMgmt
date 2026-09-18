@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the platform registry. The authoritative record
+  of every partner, client and member account, and the parameters each was
+  provisioned with. Deployed to the Platform Tooling account.
+
+# ---------------------------------------------------------------------------
+# "The registry is the spine"
+# ---------------------------------------------------------------------------
+# Design doc 13's phrase, and it sets the durability bar. Every other system is
+# provisioned FROM a registry record and writes back to it: AWS accounts, Jira,
+# PagerDuty, Truveon, billing. A member account is de-vested and re-vested from
+# the same record.
+#
+# So losing this table does not lose "some metadata". It loses the only
+# statement of what each account was SUPPOSED to be — which is the half of
+# drift detection that cannot be recovered by looking at AWS, because AWS can
+# only tell you what things ARE.
+#
+# That is why point-in-time recovery, a stream, and DeletionPolicy: Retain are
+# all on, for a table that will hold a few hundred small items.
+#
+# ---------------------------------------------------------------------------
+# Why Platform Tooling and not Audit
+# ---------------------------------------------------------------------------
+# Audit is a read-mostly aggregation account whose trustworthiness rests on
+# having very few writers. The registry is a provisioning control plane written
+# on every onboarding, every baseline bump and every declared override. Putting
+# it there would have traded a clean separation for one fewer account.
+#
+# ---------------------------------------------------------------------------
+# Single table, and the key design
+# ---------------------------------------------------------------------------
+# One table rather than four, because every access pattern here is "give me
+# this partner and everything under it" or "give me all records of one type".
+# Both are single queries in this layout and would be joins across four tables.
+#
+#   PK                    SK                  Record
+#   --------------------  ------------------  ----------------------------
+#   CONFIG                BASELINE            current global baseline version
+#   PARTNER#<slug>        META                partner: state, BAA, windows
+#   PARTNER#<slug>        CLIENT#<slug>       client under that partner
+#   ACCOUNT#<id>          META                member account + parameters
+#   ACCOUNT#<id>          OVERRIDE#<name>     a declared local override
+#
+# An override is a CHILD of the account rather than a field on it, so that each
+# one carries its own reason, owner and review date, and so that adding one is
+# a write that cannot accidentally overwrite the others.
+
+Parameters:
+
+  TableName:
+    Type: String
+    Default: platform-registry
+    Description: Registry table name. Referenced by scripts/registry.sh.
+
+Resources:
+
+  RegistryKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts the platform registry
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  RegistryKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-registry
+      TargetKeyId: !Ref RegistryKey
+
+  RegistryTable:
+    Type: AWS::DynamoDB::Table
+    # Retain on both, because this is the one table whose loss is not
+    # recoverable from AWS itself. A stack delete that takes the registry with
+    # it would leave every account running with no record of what it was meant
+    # to be.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK,               AttributeType: S }
+        - { AttributeName: SK,               AttributeType: S }
+        - { AttributeName: record_type,      AttributeType: S }
+        - { AttributeName: baseline_version, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+
+      GlobalSecondaryIndexes:
+        # Report 1 — "which accounts are behind the current baseline version".
+        #
+        # baseline_version is a ZERO-PADDED string, not a number. DynamoDB sorts
+        # string sort keys lexicographically, so "10" sorts before "9" unless
+        # padded. Enforced in scripts/registry.sh rather than here, because
+        # DynamoDB cannot express the constraint — which makes it exactly the
+        # kind of thing that works until version 10.
+        - IndexName: by-type
+          KeySchema:
+            - { AttributeName: record_type,      KeyType: HASH }
+            - { AttributeName: baseline_version, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
+
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref RegistryKey
+
+      # The stream is the change history of the spine. CloudTrail data events
+      # would record that a write happened and by whom; the stream records what
+      # the record looked like before and after. For "who moved this account to
+      # a different baseline version and what was it before", only the second
+      # answers the question.
+      #
+      # Nothing consumes it yet. That is deliberate — a stream with no consumer
+      # costs nothing and retains 24 hours, and turning one on later does not
+      # backfill the history you wanted.
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: Purpose,          Value: platform-registry }
+
+Outputs:
+
+  TableName:
+    Description: Registry table
+    Value: !Ref RegistryTable
+
+  TableArn:
+    Description: Registry table ARN
+    Value: !GetAtt RegistryTable.Arn
+
+  TableStreamArn:
+    Description: Change stream, currently unconsumed
+    Value: !GetAtt RegistryTable.StreamArn
+
+  KeyArn:
+    Description: Registry encryption key
+    Value: !GetAtt RegistryKey.Arn

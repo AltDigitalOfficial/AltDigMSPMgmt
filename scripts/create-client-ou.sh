@@ -4,12 +4,14 @@
 #
 # Part of step 5 of the provisioning saga (design doc 13). The step 0 partner
 # precondition — partner exists, is active, notification window non-null — is
-# NOT fully enforceable yet: 'active' and the notification window live in the
-# platform registry, which does not exist until phase 3.2.
+# fully enforced as of 2026-09-17 and BLOCKS, which is what doc 13 requires.
 #
-# What this script CAN check today is enforced below. What it cannot check is
-# printed as an explicit warning rather than passed over silently, so the gap
-# is visible until the registry closes it.
+# It warned rather than blocked for most of this build, because 'active' and
+# the notification windows had nowhere to live until the platform registry
+# landed. That was deviation D-004, now closed.
+#
+# The check itself is in scripts/registry.sh check-partner, not duplicated
+# here.
 #
 # Usage:
 #   scripts/create-client-ou.sh --partner oeight --slug arc8 \
@@ -124,13 +126,30 @@ log "                 $(account_email "${PARTNER}" "${SLUG}" '' 'uat')  (opt-in)
 log "                 $(account_email "${PARTNER}" "${SLUG}" '' 'prod')"
 hr
 
-warn "Partner precondition only PARTIALLY enforced:"
-warn "  checked   — partner OU exists"
-warn "  UNCHECKED — partner state is 'active'"
-warn "  UNCHECKED — partner notification window is non-null"
-warn "  UNCHECKED — AltDigital's window is tighter than the partner's"
-warn "These need the platform registry (phase 3.2). Until it exists, a human"
-warn "confirms them. Design doc 13 requires these to BLOCK, not warn."
+# --- partner precondition, fully enforced (D-004) --------------------------
+#
+# This BLOCKS. Design doc 13 says it must, and for most of this build it
+# warned instead because 'active' and the notification windows lived in a
+# registry that did not exist. It exists now.
+#
+# The check is delegated to scripts/registry.sh rather than reimplemented,
+# so there is exactly one definition of "may this partner have clients" —
+# including the assertion that AltDigital's notification window is strictly
+# TIGHTER than the partner's, not merely present. A second copy of that rule
+# would drift from the first, and the failure would be a notification chain
+# that cannot be met rather than a wrong number on a screen.
+#
+# 'direct' is exempt: an AltDigital client with no partner has no partner
+# notification chain to be tighter than.
+if [[ "${PARTNER}" != "direct" ]]; then
+  info "Checking partner precondition in the registry"
+  bash "${REPO_ROOT}/scripts/registry.sh" check-partner --slug "${PARTNER}"     || die "Partner precondition failed for '${PARTNER}'. No client OU created.
+
+      Design doc 13: the partner must exist, be active, and carry a non-null
+      notification window before any client is onboarded beneath it. This is a
+      block, not a warning — a client under an incomplete partner has no
+      defensible incident notification path."
+fi
 hr
 
 cfn_deploy "${STACK_NAME}" "${REPO_ROOT}/org/20-client-ou.yaml" \

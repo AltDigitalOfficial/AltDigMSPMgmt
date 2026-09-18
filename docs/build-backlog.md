@@ -180,6 +180,45 @@ for overlapping reasons.
 
 ---
 
+## B-022 · The registry records intent; nothing compares it to reality
+
+**Observed** — 2026-09-17, building the registry (phase 3.2).
+
+Prompt 3.2 says *"undeclared difference between an account's actual
+configuration and its recorded parameters is drift and must surface as a
+finding."* The registry now holds the recorded parameters and reports declared
+overrides. **Nothing compares the two sides.**
+
+So `report-overrides` returning "no declared overrides" means precisely that —
+nobody has declared one. It does not mean there are no differences, and the
+report says so in as many words rather than implying a clean bill of health.
+
+**Why it is genuinely the harder half.** Comparing requires a per-parameter
+notion of what "actual" means, and each one is a different API:
+
+| Recorded parameter | Where reality lives |
+|---|---|
+| `EgressProfile` | route tables, NAT presence, endpoint set |
+| `baseline_version` | which StackSet version the account's instance is at |
+| `environment` | OU placement, tags |
+| retention, Object Lock mode | S3 bucket configuration |
+
+`CloudFormation DescribeStackInstance` gives the baseline half almost for free
+— the drift status and the deployed version are both there — and that covers
+report 1's underlying question honestly rather than trusting a number someone
+typed. The rest needs a comparator per parameter.
+
+**Do the baseline half first.** It is the one where the registry can currently
+be wrong without anyone noticing: `put-account --baseline-version` records what
+someone *says* the account is at, and nothing checks it against the StackSet.
+A registry that confidently reports a wrong version is worse than no report.
+
+**Close before** — the first tenant, since drift detection is a claim
+AltDigital makes to clients and this is the part that makes it true rather than
+declarative.
+
+---
+
 ## B-016 · Terraform state for PagerDuty is local and unlocked
 
 **Observed** — 2026-09-17, building `pagerduty/`.
