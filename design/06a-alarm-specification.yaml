@@ -1,0 +1,788 @@
+# =============================================================================
+# AltDigital Platform — Standard Alarm Specification
+# Companion to design/06-observability.md "Auto-instrumentation"
+# Consumed by: instrumentation Lambda (Claude Code prompt 4.1)
+#
+# version: 1
+# status:   DRAFT — thresholds marked [TUNE] require per-application review
+#           before production use. Thresholds marked [DEFAULT] are conventional
+#           and may be adopted as-is.
+#
+# This file is the data half of the data-driven instrumentation layer. Adding a
+# resource type or changing a threshold must not require a code change.
+# =============================================================================
+
+version: 1
+
+# -----------------------------------------------------------------------------
+# Environment tiers. Source: design/14-environment-tiers.md
+# -----------------------------------------------------------------------------
+tiers:
+  dev:
+    monitoring_depth: light
+    default_routing: digest
+    canaries: false
+    alarm_actions_enabled: true
+  test:
+    monitoring_depth: light
+    default_routing: digest_and_jira
+    canaries: optional
+    alarm_actions_enabled: true
+  uat:
+    monitoring_depth: moderate
+    default_routing: jira_and_commercial
+    canaries: true
+    alarm_actions_enabled: true
+  prod:
+    monitoring_depth: pervasive
+    default_routing: pagerduty
+    canaries: true
+    alarm_actions_enabled: true
+
+# -----------------------------------------------------------------------------
+# Routing destinations. Source: design/06-observability.md, design/12
+# -----------------------------------------------------------------------------
+routing_destinations:
+  pagerduty:        { pages: true,  ticket: true,  digest: true }
+  jira_and_commercial: { pages: false, ticket: true,  digest: true, commercial_event: true }
+  digest_and_jira:  { pages: false, ticket: true,  digest: true }
+  digest:           { pages: false, ticket: false, digest: true }
+  review_queue:     { pages: false, ticket: false, digest: false }
+
+# -----------------------------------------------------------------------------
+# Global defaults. Any alarm may override.
+# -----------------------------------------------------------------------------
+defaults:
+  period_seconds: 300
+  evaluation_periods: 2
+  datapoints_to_alarm: 2
+  treat_missing_data: notBreaching
+  tags:
+    platform-managed: "true"
+  # Suppression: alarms are suppressed while the environment is outside its HOOP
+  # or inside a declared maintenance window. See design/14-environment-tiers.md.
+  respect_hoop_suppression: true
+  respect_maintenance_window: true
+
+# -----------------------------------------------------------------------------
+# Resource types IN SCOPE.
+#
+# An EventBridge resource-creation event for a type NOT in this list produces an
+# EXCEPTION RECORD, never a silent no-op. See design/06 and prompt 4.1.
+#
+# "agent_required: true" means the CloudWatch agent must be installed for some
+# alarms in the set. Absence of the agent is itself a gap — see the
+# telemetry_gap block and design/11-developer-access.md.
+# -----------------------------------------------------------------------------
+resource_types_in_scope:
+  - AWS::EC2::Instance
+  - AWS::RDS::DBInstance
+  - AWS::RDS::DBCluster
+  - AWS::ECS::Service
+  - AWS::Lambda::Function
+  - AWS::ElasticLoadBalancingV2::LoadBalancer
+  - AWS::ElasticLoadBalancingV2::TargetGroup
+  - AWS::S3::Bucket
+  - AWS::DynamoDB::Table
+  - AWS::SQS::Queue
+  - AWS::ElastiCache::ReplicationGroup
+  - AWS::ApiGateway::RestApi
+  - AWS::ApiGatewayV2::Api
+  - AWS::EFS::FileSystem
+  - AWS::AutoScaling::AutoScalingGroup
+
+# Types explicitly known and deliberately NOT instrumented. These do not raise an
+# exception; they are recorded as "known, no alarms applicable".
+resource_types_no_alarms:
+  - AWS::IAM::Role
+  - AWS::IAM::Policy
+  - AWS::EC2::SecurityGroup
+  - AWS::EC2::Subnet
+  - AWS::EC2::RouteTable
+  - AWS::KMS::Key            # covered by CloudTrail event alarms, not metrics
+  - AWS::SecretsManager::Secret
+  - AWS::CloudFormation::Stack
+
+# =============================================================================
+# ALARM SETS
+#
+# threshold_by_tier: omit a tier to suppress that alarm in that tier.
+# severity_by_tier:  overrides the tier default_routing where stated.
+# =============================================================================
+
+alarm_sets:
+
+  # ---------------------------------------------------------------------------
+  AWS::EC2::Instance:
+    agent_required: true
+    alarms:
+
+      - id: ec2-cpu-high
+        metric: CPUUtilization
+        namespace: AWS/EC2
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 3
+        datapoints_to_alarm: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        treat_missing_data: notBreaching
+        threshold_by_tier: { dev: 95, test: 95, uat: 85, prod: 80 }   # [DEFAULT]
+        note: >
+          Sustained 15 min. Deliberately loose in dev/test — a build machine at
+          95% is working, not failing.
+
+      - id: ec2-status-check-failed
+        metric: StatusCheckFailed
+        namespace: AWS/EC2
+        statistic: Maximum
+        period_seconds: 60
+        evaluation_periods: 2
+        datapoints_to_alarm: 2
+        comparison: GreaterThanOrEqualToThreshold
+        treat_missing_data: breaching
+        threshold_by_tier: { dev: 1, test: 1, uat: 1, prod: 1 }       # [DEFAULT]
+        note: >
+          Hypervisor-level, no agent required. treat_missing_data is breaching
+          because absence here means the instance is unreachable.
+
+      - id: ec2-disk-high
+        metric: disk_used_percent
+        namespace: CWAgent
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        unit: Percent
+        treat_missing_data: notBreaching
+        dimensions_additional: [path, device, fstype]
+        threshold_by_tier: { dev: 90, test: 90, uat: 85, prod: 85 }   # [DEFAULT]
+        remediation_runbook: ec2-disk-exhaustion
+
+      - id: ec2-memory-high
+        metric: mem_used_percent
+        namespace: CWAgent
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        treat_missing_data: notBreaching
+        threshold_by_tier: { uat: 90, prod: 90 }                      # [TUNE]
+        note: >
+          Omitted in dev/test. Memory thresholds are workload-specific; 90 is a
+          starting point, not a considered value.
+
+      - id: ec2-agent-telemetry-gap
+        metric: mem_used_percent
+        namespace: CWAgent
+        statistic: SampleCount
+        period_seconds: 300
+        evaluation_periods: 3
+        datapoints_to_alarm: 3
+        comparison: LessThanThreshold
+        treat_missing_data: breaching          # <-- the whole point of this alarm
+        threshold_by_tier: { dev: 1, test: 1, uat: 1, prod: 1 }
+        severity_by_tier:
+          dev: digest
+          test: digest_and_jira
+          uat: jira_and_commercial
+          prod: pagerduty
+        correlation_required:
+          - ec2-status-check-failed == OK      # instance provably alive
+          - vpc_flow_logs_active == true       # passing traffic
+          - hoop_state != scheduled_down       # not a scheduled turndown
+        note: >
+          SENTINEL ALARM. mem_used_percent exists only if the CloudWatch agent is
+          running. Instance alive + traffic flowing + telemetry silent is the
+          agent-killed signature. See design/11-developer-access.md.
+          Escalate only if the gap survives the next SSM association run.
+        grace_period_seconds: 900
+
+      - id: ec2-instance-age
+        metric: derived
+        source: config_resource_age
+        period_seconds: 86400
+        comparison: GreaterThanThreshold
+        threshold_by_tier: { uat: 45, prod: 30 }                      # [TUNE]
+        unit: Days
+        severity_by_tier: { uat: digest_and_jira, prod: digest_and_jira }
+        note: >
+          Patching posture proxy under the golden-AMI model — instance age is the
+          metric, not patch state. See design/09. Never pages.
+
+  # ---------------------------------------------------------------------------
+  AWS::RDS::DBInstance:
+    agent_required: false
+    alarms:
+
+      - id: rds-cpu-high
+        metric: CPUUtilization
+        namespace: AWS/RDS
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        treat_missing_data: notBreaching
+        threshold_by_tier: { dev: 95, test: 95, uat: 85, prod: 80 }   # [DEFAULT]
+
+      - id: rds-connections-high
+        metric: DatabaseConnections
+        namespace: AWS/RDS
+        statistic: Maximum
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        treat_missing_data: notBreaching
+        threshold_mode: percent_of_max_connections                    # [DEFAULT]
+        threshold_by_tier: { uat: 80, prod: 80 }
+        note: >
+          Threshold is a PERCENTAGE of the instance class max_connections, which
+          the instrumentation Lambda must resolve at alarm-creation time from the
+          parameter group. A fixed number is wrong across instance classes.
+        remediation_runbook: rds-high-connections
+
+      - id: rds-free-storage-low
+        metric: FreeStorageSpace
+        namespace: AWS/RDS
+        statistic: Minimum
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: LessThanThreshold
+        unit: Bytes
+        treat_missing_data: breaching
+        threshold_mode: percent_of_allocated
+        threshold_by_tier: { dev: 10, test: 10, uat: 15, prod: 20 }   # [DEFAULT]
+        note: Resolve against AllocatedStorage at creation time.
+
+      - id: rds-freeable-memory-low
+        metric: FreeableMemory
+        namespace: AWS/RDS
+        statistic: Minimum
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: LessThanThreshold
+        unit: Bytes
+        treat_missing_data: notBreaching
+        threshold_mode: percent_of_instance_memory
+        threshold_by_tier: { uat: 10, prod: 10 }                      # [TUNE]
+
+      - id: rds-read-replica-lag
+        metric: ReplicaLag
+        namespace: AWS/RDS
+        statistic: Maximum
+        period_seconds: 60
+        evaluation_periods: 5
+        comparison: GreaterThanThreshold
+        unit: Seconds
+        treat_missing_data: notBreaching
+        applies_when: { read_replica: true }
+        threshold_by_tier: { uat: 300, prod: 60 }                     # [TUNE]
+        note: >
+          Prod threshold must be tighter than the tenant's RPO. Default 2h RPO
+          makes 60s conservative and appropriate.
+
+      - id: rds-failover-event
+        metric: event
+        source: rds_event_category
+        event_categories: [failover, failure, maintenance, deletion]
+        treat_missing_data: notBreaching
+        severity_by_tier:
+          dev: digest
+          test: digest_and_jira
+          uat: jira_and_commercial
+          prod: pagerduty
+        note: EventBridge rule, not a metric alarm.
+
+      - id: rds-auto-restart-detected
+        metric: event
+        source: rds_event_category
+        event_categories: [notification]
+        event_message_match: "DB instance started"
+        applies_when: { hoop_configured: true, hoop_state: scheduled_down }
+        severity_by_tier: { dev: digest, test: digest, uat: digest_and_jira }
+        note: >
+          THE SEVEN-DAY PROBLEM. AWS auto-starts stopped RDS instances after 7
+          days. The scheduler must re-stop and RECORD each occurrence, and the
+          cost report must surface it. See design/14-environment-tiers.md.
+
+  # ---------------------------------------------------------------------------
+  AWS::RDS::DBCluster:
+    inherits: AWS::RDS::DBInstance
+    additional_alarms:
+      - id: aurora-volume-bytes-high
+        metric: VolumeBytesUsed
+        namespace: AWS/RDS
+        statistic: Maximum
+        period_seconds: 3600
+        comparison: GreaterThanThreshold
+        threshold_by_tier: { prod: null }                             # [TUNE]
+        note: No sensible default — depends entirely on the workload.
+
+  # ---------------------------------------------------------------------------
+  AWS::ECS::Service:
+    agent_required: false
+    alarms:
+
+      - id: ecs-running-vs-desired
+        metric: derived
+        source: "RunningTaskCount / DesiredTaskCount"
+        namespace: ECS/ContainerInsights
+        statistic: Average
+        period_seconds: 60
+        evaluation_periods: 3
+        comparison: LessThanThreshold
+        treat_missing_data: breaching
+        threshold_by_tier: { dev: 1.0, test: 1.0, uat: 1.0, prod: 1.0 }
+        note: >
+          Any shortfall is a shortfall. treat_missing_data breaching because a
+          service reporting nothing is not a service running fine.
+        remediation_runbook: ecs-task-flapping
+
+      - id: ecs-task-restart-rate
+        metric: derived
+        source: task_stopped_events_per_window
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        treat_missing_data: notBreaching
+        threshold_by_tier: { dev: 10, test: 10, uat: 5, prod: 3 }     # [DEFAULT]
+        capture_on_alarm: [stoppedReason, exitCode, taskDefinitionArn]
+        note: >
+          stoppedReason and exitCode are the ONLY evidence for OOM kills and
+          scheduler evictions — the app cannot log its own death. Capture is
+          mandatory, and these are visible to developers per design/11.
+        remediation_runbook: ecs-task-flapping
+
+      - id: ecs-cpu-high
+        metric: CPUUtilization
+        namespace: AWS/ECS
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        threshold_by_tier: { uat: 85, prod: 80 }                      # [DEFAULT]
+
+      - id: ecs-memory-high
+        metric: MemoryUtilization
+        namespace: AWS/ECS
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        threshold_by_tier: { dev: 95, test: 95, uat: 90, prod: 85 }   # [DEFAULT]
+        note: Leading indicator of the OOM kill that ecs-task-restart-rate catches after the fact.
+
+  # ---------------------------------------------------------------------------
+  AWS::Lambda::Function:
+    agent_required: false
+    alarms:
+
+      - id: lambda-error-rate
+        metric: derived
+        source: "Errors / Invocations"
+        namespace: AWS/Lambda
+        statistic: Sum
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        unit: Percent
+        treat_missing_data: notBreaching
+        threshold_by_tier: { dev: 25, test: 25, uat: 5, prod: 1 }     # [DEFAULT]
+        minimum_invocations: 10
+        note: >
+          Rate, not count — a count threshold is meaningless across functions
+          invoked once a day and ten thousand times a minute. minimum_invocations
+          prevents 1-of-1 failures alarming at 100%.
+        remediation_runbook: lambda-error-rate
+
+      - id: lambda-throttles
+        metric: Throttles
+        namespace: AWS/Lambda
+        statistic: Sum
+        period_seconds: 300
+        evaluation_periods: 1
+        comparison: GreaterThanThreshold
+        threshold_by_tier: { uat: 5, prod: 0 }                        # [DEFAULT]
+
+      - id: lambda-duration-approaching-timeout
+        metric: Duration
+        namespace: AWS/Lambda
+        statistic: p99
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Milliseconds
+        threshold_mode: percent_of_configured_timeout                 # [DEFAULT]
+        threshold_by_tier: { uat: 80, prod: 75 }
+        note: Resolve against the function's configured timeout at creation time.
+
+      - id: lambda-dlq-depth
+        metric: ApproximateNumberOfMessagesVisible
+        namespace: AWS/SQS
+        statistic: Maximum
+        period_seconds: 300
+        evaluation_periods: 1
+        comparison: GreaterThanThreshold
+        treat_missing_data: notBreaching
+        applies_when: { dlq_configured: true }
+        threshold_by_tier: { dev: 10, test: 10, uat: 1, prod: 0 }     # [DEFAULT]
+
+      - id: lambda-concurrent-executions
+        metric: ConcurrentExecutions
+        namespace: AWS/Lambda
+        statistic: Maximum
+        period_seconds: 60
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        threshold_mode: percent_of_account_limit
+        threshold_by_tier: { prod: 80 }                               # [DEFAULT]
+
+  # ---------------------------------------------------------------------------
+  AWS::ElasticLoadBalancingV2::LoadBalancer:
+    agent_required: false
+    alarms:
+
+      - id: alb-5xx-rate
+        metric: derived
+        source: "HTTPCode_ELB_5XX_Count / RequestCount"
+        namespace: AWS/ApplicationELB
+        statistic: Sum
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        unit: Percent
+        treat_missing_data: notBreaching
+        threshold_by_tier: { dev: 25, test: 25, uat: 5, prod: 1 }     # [DEFAULT]
+        minimum_requests: 20
+        remediation_runbook: alb-5xx-elevated
+
+      - id: alb-target-5xx-rate
+        metric: derived
+        source: "HTTPCode_Target_5XX_Count / RequestCount"
+        namespace: AWS/ApplicationELB
+        statistic: Sum
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        unit: Percent
+        threshold_by_tier: { uat: 5, prod: 2 }                        # [DEFAULT]
+        note: Distinguishes application failure from load balancer failure.
+
+      - id: alb-target-response-time
+        metric: TargetResponseTime
+        namespace: AWS/ApplicationELB
+        statistic: p99
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Seconds
+        threshold_by_tier: { uat: null, prod: null }                  # [TUNE]
+        threshold_source: questionnaire_7_4
+        note: >
+          MUST derive from questionnaire field 7.4 (acceptable response time).
+          That value is used THREE times: canary timeout, SLA pass condition, and
+          this alarm. Do not hardcode. See design/06 "Canaries".
+
+      - id: alb-rejected-connections
+        metric: RejectedConnectionCount
+        namespace: AWS/ApplicationELB
+        statistic: Sum
+        period_seconds: 300
+        evaluation_periods: 1
+        comparison: GreaterThanThreshold
+        threshold_by_tier: { uat: 10, prod: 0 }                       # [DEFAULT]
+
+  AWS::ElasticLoadBalancingV2::TargetGroup:
+    alarms:
+      - id: tg-unhealthy-hosts
+        metric: UnHealthyHostCount
+        namespace: AWS/ApplicationELB
+        statistic: Maximum
+        period_seconds: 60
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        treat_missing_data: breaching
+        threshold_by_tier: { dev: 0, test: 0, uat: 0, prod: 0 }       # [DEFAULT]
+
+      - id: tg-no-healthy-hosts
+        metric: HealthyHostCount
+        namespace: AWS/ApplicationELB
+        statistic: Minimum
+        period_seconds: 60
+        evaluation_periods: 2
+        comparison: LessThanThreshold
+        treat_missing_data: breaching
+        threshold_by_tier: { dev: 1, test: 1, uat: 1, prod: 1 }
+        severity_by_tier: { uat: pagerduty, prod: pagerduty }
+        note: >
+          Total outage. Pages even in UAT, overriding the tier default — real
+          users are in UAT and a dead environment is a customer-facing failure.
+
+  # ---------------------------------------------------------------------------
+  AWS::S3::Bucket:
+    agent_required: false
+    alarms:
+      - id: s3-5xx-rate
+        metric: 5xxErrors
+        namespace: AWS/S3
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        unit: Percent
+        applies_when: { request_metrics_enabled: true }
+        threshold_by_tier: { uat: 1, prod: 1 }                        # [DEFAULT]
+
+      - id: s3-replication-failure
+        metric: OperationsFailedReplication
+        namespace: AWS/S3
+        statistic: Sum
+        period_seconds: 900
+        evaluation_periods: 1
+        comparison: GreaterThanThreshold
+        applies_when: { replication_configured: true }
+        threshold_by_tier: { uat: 0, prod: 0 }
+        note: Load-bearing for cross-region evidence and backup replication.
+
+      - id: s3-public-access-change
+        metric: event
+        source: cloudtrail
+        event_names:
+          - PutBucketAcl
+          - PutBucketPolicy
+          - DeletePublicAccessBlock
+          - PutBucketPublicAccessBlock
+        severity_by_tier:
+          dev: digest_and_jira
+          test: digest_and_jira
+          uat: pagerduty
+          prod: pagerduty
+        note: >
+          Not a metric alarm. Config auto-remediation reverts; this alarm exists
+          so the attempt is visible even when remediation succeeds.
+
+  # ---------------------------------------------------------------------------
+  AWS::DynamoDB::Table:
+    alarms:
+      - id: ddb-throttled-requests
+        metric: ThrottledRequests
+        namespace: AWS/DynamoDB
+        statistic: Sum
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        threshold_by_tier: { dev: 100, test: 100, uat: 10, prod: 0 }  # [DEFAULT]
+
+      - id: ddb-system-errors
+        metric: SystemErrors
+        namespace: AWS/DynamoDB
+        statistic: Sum
+        period_seconds: 300
+        evaluation_periods: 1
+        comparison: GreaterThanThreshold
+        threshold_by_tier: { uat: 5, prod: 0 }
+
+      - id: ddb-consumed-vs-provisioned
+        metric: derived
+        source: "ConsumedReadCapacityUnits / ProvisionedReadCapacityUnits"
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        applies_when: { billing_mode: PROVISIONED }
+        threshold_by_tier: { uat: 85, prod: 80 }                      # [DEFAULT]
+
+  # ---------------------------------------------------------------------------
+  AWS::SQS::Queue:
+    alarms:
+      - id: sqs-message-age
+        metric: ApproximateAgeOfOldestMessage
+        namespace: AWS/SQS
+        statistic: Maximum
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        unit: Seconds
+        threshold_by_tier: { uat: 3600, prod: 900 }                   # [TUNE]
+
+      - id: sqs-dlq-depth
+        metric: ApproximateNumberOfMessagesVisible
+        namespace: AWS/SQS
+        statistic: Maximum
+        period_seconds: 300
+        evaluation_periods: 1
+        comparison: GreaterThanThreshold
+        applies_when: { is_dlq: true }
+        threshold_by_tier: { dev: 10, test: 10, uat: 1, prod: 0 }
+
+  # ---------------------------------------------------------------------------
+  AWS::ElastiCache::ReplicationGroup:
+    alarms:
+      - id: cache-cpu-high
+        metric: EngineCPUUtilization
+        namespace: AWS/ElastiCache
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        threshold_by_tier: { uat: 85, prod: 80 }                      # [DEFAULT]
+
+      - id: cache-evictions
+        metric: Evictions
+        namespace: AWS/ElastiCache
+        statistic: Sum
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        threshold_by_tier: { uat: 1000, prod: 100 }                   # [TUNE]
+
+      - id: cache-memory-pressure
+        metric: DatabaseMemoryUsagePercentage
+        namespace: AWS/ElastiCache
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        threshold_by_tier: { uat: 90, prod: 85 }                      # [DEFAULT]
+
+  # ---------------------------------------------------------------------------
+  AWS::ApiGateway::RestApi:
+    alarms:
+      - id: apigw-5xx-rate
+        metric: 5XXError
+        namespace: AWS/ApiGateway
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 2
+        comparison: GreaterThanThreshold
+        unit: Percent
+        threshold_by_tier: { dev: 25, test: 25, uat: 5, prod: 1 }     # [DEFAULT]
+
+      - id: apigw-latency
+        metric: Latency
+        namespace: AWS/ApiGateway
+        statistic: p99
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Milliseconds
+        threshold_source: questionnaire_7_4                           # [TUNE]
+        threshold_by_tier: { uat: null, prod: null }
+
+  AWS::ApiGatewayV2::Api:
+    inherits: AWS::ApiGateway::RestApi
+
+  # ---------------------------------------------------------------------------
+  AWS::EFS::FileSystem:
+    alarms:
+      - id: efs-burst-credit-low
+        metric: BurstCreditBalance
+        namespace: AWS/EFS
+        statistic: Minimum
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: LessThanThreshold
+        applies_when: { throughput_mode: bursting }
+        threshold_by_tier: { uat: 1.0e+12, prod: 2.0e+12 }            # [DEFAULT]
+
+      - id: efs-percent-io-limit
+        metric: PercentIOLimit
+        namespace: AWS/EFS
+        statistic: Average
+        period_seconds: 300
+        evaluation_periods: 3
+        comparison: GreaterThanThreshold
+        unit: Percent
+        threshold_by_tier: { uat: 90, prod: 85 }                      # [DEFAULT]
+
+  # ---------------------------------------------------------------------------
+  AWS::AutoScaling::AutoScalingGroup:
+    alarms:
+      - id: asg-in-service-below-desired
+        metric: GroupInServiceInstances
+        namespace: AWS/AutoScaling
+        statistic: Minimum
+        period_seconds: 60
+        evaluation_periods: 5
+        comparison: LessThanThreshold
+        treat_missing_data: breaching
+        threshold_mode: reference_metric
+        threshold_reference: GroupDesiredCapacity
+        threshold_by_tier: { dev: 1.0, test: 1.0, uat: 1.0, prod: 1.0 }
+        note: >
+          Must not fire during a HOOP turndown, when desired is deliberately 0.
+          respect_hoop_suppression handles this — verify it.
+
+      - id: asg-failed-scaling
+        metric: event
+        source: autoscaling_event
+        event_types: [EC2_INSTANCE_LAUNCH_ERROR, EC2_INSTANCE_TERMINATE_ERROR]
+        severity_by_tier: { uat: jira_and_commercial, prod: pagerduty }
+
+# =============================================================================
+# CROSS-CUTTING: telemetry gap detection
+# Source: design/11-developer-access.md
+# =============================================================================
+telemetry_gap:
+  sentinel_metric: { namespace: CWAgent, metric: mem_used_percent }
+  log_stream_staleness:
+    check_interval_seconds: 900
+    stale_after_seconds_by_tier: { dev: 86400, test: 86400, uat: 7200, prod: 3600 }
+    note: >
+      CloudWatch Logs does not alarm on absence natively. This is a scheduled
+      check against lastIngestionTime per EXPECTED stream. Absence is only
+      detectable against a declared expectation — the expectation registry is
+      populated by this instrumentation layer.
+  discriminator:
+    agent_killed:
+      status_checks: passing
+      flow_logs: traffic_present
+      ssm_ping: any
+      cw_telemetry: silent
+      hoop_state: not_scheduled_down
+  grace_period_seconds: 900
+  escalate_if_survives: next_ssm_association_run
+  ssh_inbound_detection:
+    enabled: true
+    note: >
+      There is no SSH path in this architecture. Inbound on 22 in flow logs is a
+      finding in its own right, independent of telemetry.
+    severity_by_tier: { dev: digest_and_jira, test: digest_and_jira, uat: pagerduty, prod: pagerduty }
+
+# =============================================================================
+# CROSS-CUTTING: safety rails (framework-level, not per-alarm)
+# Source: design/07-response-automation.md
+# =============================================================================
+safety_rails:
+  circuit_breaker: { same_remediation_count: 3, window_seconds: 3600, action: stop_and_page }
+  rate_limit: { max_automated_actions_per_account_per_hour: 20 }
+  stage_3_requires_redundancy_check: true
+  stage_3_one_resource_at_a_time: true
+  kill_switch: { per_account: true, global: true, requires_deployment: false }
+  every_action_emits_change_record: true
+
+# =============================================================================
+# EXCEPTION HANDLING — prompt 4.1
+# =============================================================================
+exceptions:
+  unrecognised_resource_type:
+    action: create_exception_record
+    never: silent_no_op
+    surfaces_in: [instrumentation_digest, platform_health_report]
+  agent_not_installed:
+    action: create_exception_record
+    also: trigger_ssm_association
+  threshold_unset:
+    action: create_exception_record
+    note: >
+      A [TUNE] threshold of null means the alarm cannot be created. That is an
+      exception, not a skip — it must appear in the digest as pending.
+  metric_not_available:
+    action: create_exception_record
+    note: e.g. S3 request metrics not enabled on the bucket.
