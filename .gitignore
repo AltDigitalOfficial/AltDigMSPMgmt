@@ -19,6 +19,18 @@ config/identity.env*
 .terraform/
 .terraform.lock.hcl.bak
 
+# Completed onboarding questionnaires carry named contacts with direct email
+# addresses — technical, escalation, change approver, billing, developer
+# manager. Same class of data as config/contacts.env and the same rule.
+#
+# The example and the schema are placeholders and structure only, and are
+# re-included below.
+*.questionnaire.yaml
+*.questionnaire.yml
+*.questionnaire.json
+!questionnaire.example.yaml
+!questionnaire.schema.json
+
 # Terraform variable files hold responder email addresses — personal data by
 # the same rule as config/contacts.env. Same glob-not-exact-match reasoning:
 # a terraform.tfvars.bak must not survive the rule. The .example file holds

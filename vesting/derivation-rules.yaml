@@ -1,0 +1,174 @@
+# AltDigital Managed Platform — vesting derivation rules
+#
+# ===========================================================================
+# THIS FILE IS CONFIGURATION, NOT CODE. IT IS MEANT TO BE EDITED.
+# ===========================================================================
+#
+# The onboarding questionnaire marks fields [A] asked, [D] derived, or [P]
+# placeholder. Prompt 3.1 is explicit that every [D] field must be COMPUTED by
+# the pipeline rather than typed by whoever is filling the form. This file is
+# how they are computed.
+#
+# It is a data document on purpose. The same instruction appears in prompt 4.1
+# for the instrumentation Lambda — "a configuration document, not a switch
+# statement" — and the reason is identical: adding a framework, changing a
+# retention floor, or re-tiering an environment should be a reviewable diff
+# that a non-programmer can read, not a code change.
+#
+# ---------------------------------------------------------------------------
+# What is deliberately NOT here
+# ---------------------------------------------------------------------------
+# Anything that is a judgement call at onboarding time stays an [A] question.
+# The test for belonging here is: given the answers, is there exactly one
+# correct output, and would a human deriving it by hand ever legitimately
+# disagree? If they could disagree, it is not derived — it is a decision, and
+# burying a decision in a rules file makes it invisible.
+
+# ---------------------------------------------------------------------------
+# 2.7 — Conformance packs, derived from 2.1 frameworks in scope
+# ---------------------------------------------------------------------------
+# UNVERIFIED NAMES. These are AWS sample conformance pack template names and
+# AWS renames and re-versions them (PCI 3.2.1 -> 4.0 being the obvious one
+# coming). scripts/derive-vesting.py does NOT assume they resolve; it warns,
+# and the vesting pipeline checks them against the account before deploying.
+#
+# Verify with the AWS samples repository or:
+#   aws configservice describe-conformance-packs
+#
+# A pack name that does not resolve fails the deploy, not the derivation —
+# which is the right order, because a typo here should not block a
+# questionnaire review.
+conformance_packs:
+  hipaa:
+    - Operational-Best-Practices-for-HIPAA-Security
+  pci-dss:
+    - Operational-Best-Practices-for-PCI-DSS-3.2.1
+  soc2:
+    - Operational-Best-Practices-for-SOC-2
+  # "other" deliberately maps to nothing. A framework nobody has named cannot
+  # have a pack derived for it, and silently applying a default would be worse
+  # than applying none — it would look like coverage.
+  other: []
+
+# ---------------------------------------------------------------------------
+# 2.8 — Log retention floor, derived from 2.1
+# ---------------------------------------------------------------------------
+# The questionnaire says "union of applicable frameworks". Union of retention
+# periods means the LONGEST, not the sum and not the most common.
+#
+# These are floors in DAYS and they set an Object Lock COMPLIANCE retention,
+# which cannot be shortened by anyone including account root. Raising a number
+# here is cheap; lowering it does nothing for data already written under the
+# old value. Treat every increase as permanent for six years of billing.
+#
+#   hipaa    2190  six years. HIPAA §164.316(b)(2)(i) requires documentation
+#                  retention for six years from creation or last effective
+#                  date. Applied to logs as the platform's reading of
+#                  "documentation", which is conservative — see D-010.
+#   pci-dss   365  one year, with three months immediately available.
+#                  Requirement 10.7 (10.5.1 in 3.2.1).
+#   soc2      365  no statutory period exists. SOC 2 requires evidence
+#                  covering the audit period, typically twelve months. This is
+#                  a house number, not a citation, and is marked as such.
+#   other     365  the platform default, applied when a framework is named
+#                  that this file does not know.
+retention_floor_days:
+  hipaa: 2190
+  pci-dss: 365
+  soc2: 365
+  other: 365
+default: 365
+
+# ---------------------------------------------------------------------------
+# 3.1 — Primary region
+# ---------------------------------------------------------------------------
+# Derived, with one gate. 2.2 asks whether any data relates to NON-US
+# individuals — note the questionnaire's own emphasis that this is about data
+# SUBJECTS, not where the customer is headquartered.
+#
+# If yes, the pipeline does NOT pick a region. It stops. Choosing an EU or UK
+# region on a customer's behalf implies a residency and transfer position
+# (GDPR Article 44 onward) that is a legal determination, not a config value.
+# The platform's allowed region list is US-only today, so "yes" means the
+# answer is outside what this platform can currently provide.
+primary_region:
+  default: us-east-2
+  non_us_data_subjects: HALT
+
+# ---------------------------------------------------------------------------
+# 7.7 — Monitoring tier, derived from environment
+# ---------------------------------------------------------------------------
+# Design doc 14 (Environment Tiers) is NOT present in the design package, so
+# these tiers are derived from what the questionnaire itself states rather than
+# from 14. The questionnaire is unambiguous on the load-bearing point (3a.9):
+# UAT is "always production-equivalent for data handling", because real users
+# bring real data. So UAT is NOT a lower tier than production for anything
+# touching data.
+#
+# The distinction below is about alerting volume and response expectation, not
+# about controls. Controls are identical everywhere; nobody is paged at 3am for
+# a dev box.
+monitoring_tier:
+  prod: full
+  uat: production-equivalent
+  test: reduced
+  dev: reduced
+
+# Which environments page a human out of hours. Separate from tier because
+# "monitored thoroughly" and "wakes someone up" are different decisions and
+# conflating them is how alert fatigue starts.
+pages_out_of_hours:
+  prod: true
+  uat: false
+  test: false
+  dev: false
+
+# ---------------------------------------------------------------------------
+# 6.4 — Dedicated Host requirement, derived from 6.1
+# ---------------------------------------------------------------------------
+# Licensing, NOT security. Questionnaire section 6 is about customer-owned
+# licences; the security-motivated dedicated-infrastructure question is 5.9,
+# added separately (see docs/isolation-tiers.md). Conflating them produces a
+# client paying a tenancy premium for a reason nobody can later explain.
+#
+# Windows Server and SQL Server BYOL under most Microsoft agreements require
+# dedicated hardware with visible physical cores. Other licences generally do
+# not.
+dedicated_host_required_for_licences:
+  - sql-server
+  - windows-server
+
+# ---------------------------------------------------------------------------
+# 2.3 — Egress profile default, derived from data classification
+# ---------------------------------------------------------------------------
+# A DEFAULT, not a determination. 3.2 asks the customer directly, and their
+# answer wins. This is what to pre-fill and what to argue from.
+#
+# Note 'regulated' maps to `isolated` rather than `locked`. That is deliberate
+# and is the analysis in docs/isolation-tiers.md: `isolated` has no NAT and no
+# internet path at all, which is both cheaper AND more restrictive than the
+# Network Firewall profile. `locked` is not implemented (B-010), and defaulting
+# to an unimplemented profile would fail vesting at the network step.
+egress_profile_default:
+  regulated: isolated
+  confidential: controlled
+  internal: controlled
+  public: public-facing
+default_egress_profile: controlled
+
+# ---------------------------------------------------------------------------
+# 4.1 / 4.2 — Resilience defaults
+# ---------------------------------------------------------------------------
+# The questionnaire states these defaults inline. Repeated here so the pipeline
+# has one source and a reviewer can see them without cross-referencing.
+resilience_defaults:
+  rto_hours: 4
+  rpo_hours: 2
+  sla_tier: standard
+
+# ---------------------------------------------------------------------------
+# Environments vested
+# ---------------------------------------------------------------------------
+# Three always; UAT is opt-in per 3a.1 and raises cost.
+environments_always: [dev, test, prod]
+environments_optional: [uat]

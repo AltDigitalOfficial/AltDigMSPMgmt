@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://altdigital.ai/schemas/vesting-questionnaire-v1.json",
+  "title": "AltDigital Managed Platform — onboarding questionnaire",
+
+  "description": "Structured form of starter_docs/onboarding-questionnaire.md, which is the INPUT to account vesting rather than a document that gets filed. Only [A] asked fields appear here. [D] derived fields are computed by scripts/derive-vesting.py from vesting/derivation-rules.yaml and are rejected if supplied, because a derived value that can be typed is a derived value that can be wrong. [P] placeholder fields are owned outside this process and are marked required-but-nullable so their absence is visible rather than assumed.",
+
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "identity", "compliance", "network", "environments", "resilience", "security", "licensing", "monitoring", "change", "exit"],
+
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Pinned. A questionnaire is an audit artifact re-reviewed on the triggers listed in the source document, so a record written today must still be readable when its schema has moved on."
+    },
+
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["partner", "client_name", "client_slug", "application_name", "application_code", "service_model", "partner_is_application_owner", "technical_contact", "escalation_contact", "change_approver", "billing_contact"],
+      "properties": {
+        "partner": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,17}$",
+          "description": "1.0 — partner slug. Must already exist and be active in the registry; create-client-ou.sh blocks otherwise. 18 chars to fit the account alias budget."
+        },
+        "client_name":       { "type": "string", "minLength": 1, "description": "1.1 — legal or trading name." },
+        "client_slug":       { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,17}$", "description": "1.1 — machine-safe client id used in account alias and root email." },
+        "application_name":  { "type": "string", "minLength": 1, "description": "1.2" },
+        "application_code":  { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,9}$", "description": "1.3 — 10 chars. Tighter than client because the email local part is capped at 64 octets by RFC 5321, which binds before the 63-char account alias." },
+        "service_model":     { "enum": ["A", "B", "C"], "description": "1.4 — drives patching ownership, SLA scope, DNS and certificate ownership." },
+        "partner_is_application_owner": { "type": "boolean", "description": "1.0b — if true the partner appears in two columns of the responsibility matrix, which needs saying out loud rather than inferring." },
+        "technical_contact": { "$ref": "#/$defs/contact", "description": "1.5 — instrumentation digest recipient." },
+        "escalation_contact":{ "$ref": "#/$defs/contact", "description": "1.6" },
+        "change_approver":   { "$ref": "#/$defs/contact", "description": "1.7 — change reconciliation routing." },
+        "billing_contact":   { "$ref": "#/$defs/contact", "description": "1.8" }
+      }
+    },
+
+    "compliance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frameworks", "non_us_data_subjects", "data_classification", "cardholder_data", "phi", "baa_window_partner_to_client_hours"],
+      "properties": {
+        "frameworks": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "enum": ["hipaa", "pci-dss", "soc2", "other", "none"] },
+          "description": "2.1 — drives conformance packs, retention floor and pen test cadence. 'none' must be alone; enforced in derive-vesting.py, since JSON Schema cannot express 'this value excludes all others' without oneOf gymnastics that obscure the rule."
+        },
+        "non_us_data_subjects": {
+          "type": "boolean",
+          "description": "2.2 — asks about DATA SUBJECTS, not customer location. True HALTS vesting: region choice then carries a residency and transfer position that is a legal determination, and the platform's allowed regions are US-only."
+        },
+        "data_classification": { "enum": ["public", "internal", "confidential", "regulated"], "description": "2.3 — seeds the egress profile default and monitoring tier." },
+        "cardholder_data":     { "type": "boolean", "description": "2.4 — PCI CDE scoping." },
+        "phi":                 { "type": "boolean", "description": "2.5 — HIPAA scoping and BAA requirement." },
+        "baa_window_partner_to_client_hours": {
+          "type": ["integer", "null"], "minimum": 1,
+          "description": "2.6 — marked [P] in the source: owned by Art and Wayne, not asked of the customer here. Nullable so an unanswered value is VISIBLE. Null blocks vesting where PHI is true; a missing key would let it pass unnoticed, which is the failure this nullability exists to prevent. AltDigital's own window (2.6a) is not here at all — it comes from the partner's registry record and must be strictly tighter."
+        }
+      }
+    },
+
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["egress_profile", "internet_exposure", "inbound_cross_tenant_api", "outbound_allowlist"],
+      "properties": {
+        "egress_profile": {
+          "enum": ["isolated", "controlled", "dns-filtered", "locked", "public-facing"],
+          "description": "3.2 — the customer's answer overrides the classification-derived default. 'locked' is accepted here but NOT implemented (B-010); derive-vesting.py flags it rather than failing at the network step after three accounts exist."
+        },
+        "internet_exposure":        { "enum": ["inbound", "outbound", "both", "neither"], "description": "3.3 — WAF, CloudFront and Shield decisions." },
+        "inbound_cross_tenant_api": { "type": "boolean", "description": "3.4 — true is documented as an arm's-length public API. No private connectivity is provisioned between tenants, ever." },
+        "outbound_allowlist":       { "type": "array", "items": { "type": "string" }, "description": "3.5 — domains for the Network Firewall or DNS Firewall rule set." }
+      }
+    },
+
+    "environments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uat_required", "timezone", "hoop", "manual_turnup_authorised"],
+      "properties": {
+        "uat_required": { "type": "boolean", "description": "3a.1 — opt-in fourth account. Raises AWS cost." },
+        "release_cadence": { "enum": ["continuous", "monthly", "quarterly", "ad-hoc"], "description": "3a.2 — drives HOOP versus seasonal teardown. Required when uat_required is true; enforced in derive-vesting.py." },
+        "usage_pattern":   { "enum": ["year-round", "seasonal"], "description": "3a.3 — seasonal makes the account eligible for the dormant lifecycle." },
+        "timezone":        { "type": "string", "minLength": 1, "description": "3a.7 — IANA name, e.g. America/Chicago. One timezone for all HOOPs." },
+        "hoop": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dev", "test"],
+          "properties": {
+            "dev":  { "$ref": "#/$defs/hoop", "description": "3a.4" },
+            "test": { "$ref": "#/$defs/hoop", "description": "3a.5" },
+            "uat":  { "$ref": "#/$defs/hoop", "description": "3a.6 — saving here is modest; users test on their own schedule." }
+          }
+        },
+        "manual_turnup_authorised": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "3a.8 — who may bring an environment up outside its HOOP. Empty means nobody can, which is a support call waiting to happen." }
+      }
+    },
+
+    "resilience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rto_hours", "rpo_hours", "sla_tier", "maintenance_window"],
+      "properties": {
+        "rto_hours":  { "type": "number", "exclusiveMinimum": 0, "description": "4.1 — default 4. Drives restore test thresholds." },
+        "rpo_hours":  { "type": "number", "exclusiveMinimum": 0, "description": "4.2 — default 2. Drives backup frequency and PITR." },
+        "sla_tier":   { "enum": ["standard", "multi-region-premium"], "description": "4.3" },
+        "backup_retention_days": { "type": ["integer", "null"], "minimum": 1, "description": "4.4 — null means the platform default applies." },
+        "maintenance_window": {
+          "$ref": "#/$defs/window",
+          "description": "4.5 — MUST fall inside the HOOP for scheduled environments. derive-vesting.py checks this: a maintenance window outside the HOOP means the instances are off when Patch Manager runs, so patching silently never happens and every report says compliant."
+        }
+      }
+    },
+
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dedicated_kms_key", "fips_or_cloudhsm", "external_key_material", "migrating_secrets", "customer_staff_need_access", "no_regulated_data_in_lower_envs_ack", "developer_manager", "dedicated_infrastructure_required"],
+      "properties": {
+        "dedicated_kms_key":      { "type": "boolean", "description": "5.1 — beyond the standard storage/database/secrets set." },
+        "fips_or_cloudhsm":       { "type": "boolean", "description": "5.2" },
+        "external_key_material":  { "type": "boolean", "description": "5.3 — BYOK. Creates an EXTERNAL-origin key, which AWS cannot rotate and cannot recover if the customer loses the material." },
+        "migrating_secrets":      { "type": "boolean", "description": "5.4" },
+        "customer_staff_need_access": { "type": "boolean", "description": "5.6 — federated permission set scope." },
+        "no_regulated_data_in_lower_envs_ack": {
+          "const": true,
+          "description": "5.7 — must be TRUE. Modelled as a const rather than a boolean because a questionnaire that records 'customer declined to acknowledge' and proceeds anyway is worse than one that cannot be submitted. If a customer will not acknowledge it, that is a scope conversation, not a field value."
+        },
+        "developer_manager": { "$ref": "#/$defs/contact", "description": "5.8 — dev team digest recipient." },
+        "dedicated_infrastructure_required": {
+          "type": "boolean",
+          "description": "5.9 — SECURITY-motivated, distinct from section 6 which is about LICENCES. Default false; docs/isolation-tiers.md carries the argument. Conflating the two produces a client paying a tenancy premium nobody can later explain."
+        },
+        "dedicated_infrastructure_driver": { "enum": ["contract-clause", "framework-control", "procurement-policy", null], "description": "5.9a — determines whether it is negotiable. Required when 5.9 is true." },
+        "dedicated_infrastructure_control_ref": { "type": ["string", "null"], "description": "5.9b — if a framework is cited, which control. Frameworks are cited far more often than read; none of HIPAA, PCI-DSS or SOC 2 requires dedicated physical hardware." }
+      }
+    },
+
+    "licensing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["customer_owned_licences", "entitlement_evidence_provided", "microsoft_licensing_via"],
+      "properties": {
+        "customer_owned_licences": { "type": "array", "uniqueItems": true, "items": { "enum": ["sql-server", "windows-server", "other", "none"] }, "description": "6.1 — drives the Dedicated Host derivation." },
+        "entitlement_evidence_provided": { "type": "boolean", "description": "6.2 — compliance record." },
+        "microsoft_licensing_via": { "enum": ["altdigital", "customer", "not-applicable"], "description": "6.3 — billing line item." }
+      }
+    },
+
+    "monitoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["working_definition", "endpoints", "success_condition", "acceptable_response_ms", "existing_test_suite", "journey_requires_auth"],
+      "properties": {
+        "working_definition": {
+          "type": "string", "minLength": 20,
+          "description": "7.1 — 'what would a user notice first if it broke?' The source document calls this the only question a customer can genuinely fail to answer well, and it drives BOTH the canary and the SLA measurement. minLength is a blunt instrument against a one-word answer; it cannot detect a useless twenty-character one, and this remains a conversation rather than a form field."
+        },
+        "endpoints":              { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "7.2" },
+        "success_condition":      { "type": "string", "minLength": 1, "description": "7.3 — the canary assertion." },
+        "acceptable_response_ms": { "type": "integer", "exclusiveMinimum": 0, "description": "7.4 — canary timeout AND the SLA pass condition. One number, two consumers, deliberately." },
+        "existing_test_suite":    { "enum": ["playwright", "other", "none"], "description": "7.5 — decides Fargate canary runner versus native Synthetics." },
+        "journey_requires_auth":  { "type": "boolean", "description": "7.6 — canary credentials via Secrets Manager." }
+      }
+    },
+
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cicd_tooling", "deployment_frequency"],
+      "properties": {
+        "cicd_tooling":         { "type": "string", "minLength": 1, "description": "8.1 — OIDC federation for the AppDeployer role." },
+        "deployment_frequency": { "enum": ["multiple-daily", "daily", "weekly", "monthly", "rarely"], "description": "8.2 — reconciliation tuning." },
+        "customer_escalation_contacts": { "type": "array", "items": { "$ref": "#/$defs/contact" }, "description": "8.4 — customer-side PagerDuty escalation." }
+      }
+    },
+
+    "exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ip_boundary_ack", "post_exit_governance_loss_ack", "truveon_retention_desired"],
+      "properties": {
+        "ip_boundary_ack":               { "const": true, "description": "9.1 — const for the same reason as 5.7." },
+        "post_exit_governance_loss_ack": { "const": true, "description": "9.2 — the customer loses platform governance on exit. Acknowledged before vesting, not discovered at exit." },
+        "truveon_retention_desired":     { "type": "boolean", "description": "9.3 — billing arrangement." }
+      }
+    }
+  },
+
+  "$defs": {
+    "contact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "email"],
+      "properties": {
+        "name":  { "type": "string", "minLength": 1 },
+        "email": { "type": "string", "format": "email", "minLength": 3 },
+        "phone": { "type": "string" }
+      },
+      "description": "Contacts are personal data. A completed questionnaire therefore must NEVER be committed — enforced in .gitignore and the pre-commit hook, the same treatment as config/contacts.env."
+    },
+    "hoop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["always_on"],
+      "properties": {
+        "always_on": { "type": "boolean" },
+        "days":      { "type": "array", "items": { "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] } },
+        "start":     { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+        "end":       { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" }
+      },
+      "description": "Hours of Planned Operation. always_on true ignores the rest; false requires days, start and end, enforced in derive-vesting.py because JSON Schema's if/then for this reads far worse than the check it replaces."
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["days", "start", "end"],
+      "properties": {
+        "days":  { "type": "array", "minItems": 1, "items": { "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] } },
+        "start": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+        "end":   { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" }
+      }
+    }
+  }
+}

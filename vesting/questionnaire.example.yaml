@@ -1,0 +1,88 @@
+# Example completed questionnaire. Placeholder contacts only.
+#
+# A REAL completed questionnaire must never be committed: it carries named
+# contacts with direct email addresses, which the repository rules treat as
+# personal data the same way as config/contacts.env. Enforced in .gitignore
+# and the pre-commit hook. Name real ones *.questionnaire.yaml.
+#
+# Shaped on the OEight / Arc8 relationship for realism. The values here are
+# illustrative and are NOT Arc8's actual contract terms.
+
+schema_version: 1
+
+identity:
+  partner: oeight
+  client_name: "OEight"
+  client_slug: oeight
+  application_name: "Arc8"
+  application_code: arc8
+  service_model: B
+  partner_is_application_owner: true    # OEight owns the Arc8 IP
+  technical_contact:  { name: "Placeholder Tech",   email: "tech@example.com" }
+  escalation_contact: { name: "Placeholder Esc",    email: "esc@example.com" }
+  change_approver:    { name: "Placeholder Appr",   email: "appr@example.com" }
+  billing_contact:    { name: "Placeholder Bill",   email: "bill@example.com" }
+
+compliance:
+  frameworks: [hipaa, soc2]
+  non_us_data_subjects: false
+  data_classification: regulated
+  cardholder_data: false
+  phi: true
+  baa_window_partner_to_client_hours: 48
+
+network:
+  egress_profile: isolated
+  internet_exposure: outbound
+  inbound_cross_tenant_api: false
+  outbound_allowlist: []
+
+environments:
+  uat_required: false
+  timezone: America/Chicago
+  hoop:
+    dev:  { always_on: false, days: [mon, tue, wed, thu, fri], start: "07:00", end: "19:00" }
+    test: { always_on: false, days: [mon, tue, wed, thu, fri], start: "07:00", end: "19:00" }
+  manual_turnup_authorised: ["OEight engineering leads"]
+
+resilience:
+  rto_hours: 4
+  rpo_hours: 2
+  sla_tier: standard
+  backup_retention_days: null
+  maintenance_window: { days: [tue], start: "08:00", end: "10:00" }
+
+security:
+  dedicated_kms_key: false
+  fips_or_cloudhsm: false
+  external_key_material: false
+  migrating_secrets: false
+  customer_staff_need_access: true
+  no_regulated_data_in_lower_envs_ack: true
+  developer_manager: { name: "Placeholder Mgr", email: "mgr@example.com" }
+  dedicated_infrastructure_required: false
+  dedicated_infrastructure_driver: null
+  dedicated_infrastructure_control_ref: null
+
+licensing:
+  customer_owned_licences: [none]
+  entitlement_evidence_provided: false
+  microsoft_licensing_via: not-applicable
+
+monitoring:
+  working_definition: "A clinician can sign in and retrieve a patient record within a few seconds. If sign-in fails or the record list is empty, users notice immediately."
+  endpoints: ["https://arc8.example.com/health"]
+  success_condition: "HTTP 200 and body contains \"ok\""
+  acceptable_response_ms: 2000
+  existing_test_suite: none
+  journey_requires_auth: true
+
+change:
+  cicd_tooling: "GitHub Actions"
+  deployment_frequency: weekly
+  customer_escalation_contacts: []
+
+exit:
+  ip_boundary_ack: true
+  post_exit_governance_loss_ack: true
+  truveon_retention_desired: false
