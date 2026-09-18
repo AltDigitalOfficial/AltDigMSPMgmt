@@ -1049,3 +1049,61 @@ materially cheaper at organization scale.
 latency of an Athena query during a live incident can be judged against its
 cost. Ingest into CloudWatch Logs is charged per GB and an organization trail
 across every account is not a small volume.
+
+---
+
+## B-032 · The revalidation sweep is now load-bearing
+
+**Built** — 2026-09-18, closing a defect rather than adding a feature.
+
+`engine.py` referenced a "scheduled sweep" in three comments. It did not exist:
+`baseline/60-response.yaml` had no schedule rule. The comments described a
+mechanism that was never built, so `awaiting-settle` was a terminal state that
+neither revalidated nor paged.
+
+That mattered more than it first appeared. The settle table is
+`clear_log_files` 120s, `restart_service` 180s, `cycle_ecs_task` 300s,
+`scale_out` 600s, default 300s, against `MAX_INLINE_SETTLE` of 120s — so every
+action but one settles above the cap. `awaiting-settle` was the *ordinary*
+outcome of a remediation, not an edge case, which made the platform's normal
+behaviour "change something on a customer's resource, then never look again and
+never tell anyone".
+
+Now built: a sparse GSI on the history table, `platform-response-sweep` every
+two minutes, and `run_sweep()` returning `resolved-after-settle` or
+`unresolved-after-settle`. A revalidation the engine could not *read* retries
+three times before paging regardless; an alarm that is genuinely still
+breaching pages on the first.
+
+**Consequence for operations** — the sweep rule is enabled while the alarm
+trigger is still disabled, which looks backwards and is not. Disabling the
+sweep restores the silent-parking behaviour above. `platform-response-sweep-
+stalled` alarms on it, with `TreatMissingData: breaching`, because a rule that
+has stopped emitting reports no data at all.
+
+**Revisit when** — the alarm trigger is enabled (B-031) and real volume shows
+whether two minutes is the right cadence.
+
+---
+
+## B-033 · Sweep failures are deliberately not escalated
+
+**Decided** — 2026-09-18, during the first deploy of the sweep rule.
+
+Every terminal path in the engine now escalates unless the state means the
+thing is fine, including states the engine does not recognise. Applying that to
+the sweep's *own* failure was wrong: the sweep runs every two minutes, so one
+broken dependency produced an escalation every two minutes. Observed live — the
+GSI was still `CREATING` and every query failed.
+
+A sweep failure now re-raises without escalating. The function's Errors alarm
+and `platform-response-sweep-stalled` both deduplicate; a per-invocation
+escalation does not, and the reliable end state of an alert every two minutes
+is a muted topic that then swallows the incident pages too.
+
+No incident is lost by this: parked items stay parked and are revalidated when
+the sweep recovers.
+
+**Revisit when** — anything else in the platform escalates from a schedule. The
+general rule this is an instance of: *an else-branch on a timer needs
+deduplication that an else-branch on an event does not.*

@@ -50,6 +50,7 @@ import os
 import boto3
 
 HISTORY_TABLE = os.environ.get("HISTORY_TABLE", "platform-remediation-history")
+PENDING_INDEX = os.environ.get("PENDING_INDEX", "pending-revalidation")
 KILL_SWITCH_PARAM = os.environ.get("KILL_SWITCH_PARAM", "/platform/response/enabled")
 RATE_LIMIT_PER_HOUR = int(os.environ.get("RATE_LIMIT_PER_HOUR", "20"))
 CIRCUIT_BREAKER_COUNT = int(os.environ.get("CIRCUIT_BREAKER_COUNT", "3"))
@@ -168,6 +169,97 @@ def recent_attempts(resource_id, action):
     ]
 
 
+# ---------------------------------------------------------------------------
+# Pending revalidation
+# ---------------------------------------------------------------------------
+# Only clear_log_files (120s) settles inside MAX_INLINE_SETTLE. scale_out is
+# 600s, cycle_ecs_task 300s, restart_service 180s, and the default is 300s — so
+# "the engine acted and cannot yet tell whether it worked" is the NORMAL
+# outcome of a remediation, not an edge case.
+#
+# That makes the follow-up mandatory. Without it the platform's usual behaviour
+# is: take an action on a customer's production resource, then never look
+# again and never tell anyone — the exact silent path Jamie's else rule exists
+# to forbid, and the worst one in the set, because something was changed.
+#
+# Written to the history table on a SPARSE index: only these items carry
+# revalidate_after, so the sweep's query returns pending work and nothing else,
+# and costs nothing when there is none.
+
+
+def record_pending(ctx, action, stage_no, settle_seconds, dossier, attempt=1):
+    """Park an incident for the sweep to revalidate once the action has settled."""
+    now = _now()
+    due = now + datetime.timedelta(seconds=settle_seconds)
+    dynamodb.put_item(
+        TableName=HISTORY_TABLE,
+        Item={
+            # Same table, distinguishable key. The '#pending' suffix keeps these
+            # out of recent_attempts(), which queries on resource#action exactly.
+            "resource_action": {"S": f"{ctx['resource_id']}#{action}#pending"},
+            "attempted_at": {"S": now.isoformat()},
+            "pending": {"S": "1"},              # sparse GSI partition, constant
+            "revalidate_after": {"S": due.isoformat()},
+            "resource_id": {"S": ctx["resource_id"]},
+            "resource_type": {"S": ctx["resource_type"]},
+            "alarm_name": {"S": ctx["alarm_name"]},
+            "alarm_id": {"S": ctx["alarm_id"]},
+            "action": {"S": action},
+            "stage": {"N": str(stage_no)},
+            "attempt": {"N": str(attempt)},
+            "outcome": {"S": "awaiting-settle"},
+            "actions_taken": {"S": json.dumps(dossier.get("actions_taken") or [],
+                                              default=str)[:30000]},
+            # Longer than any settle period by a wide margin, so a sweep that is
+            # disabled or failing leaves the evidence rather than silently
+            # expiring it.
+            "expires_at": {"N": str(int((now + datetime.timedelta(days=30)).timestamp()))},
+        },
+    )
+    return due
+
+
+def due_revalidations(limit=25):
+    """Pending items whose settle period has elapsed."""
+    resp = dynamodb.query(
+        TableName=HISTORY_TABLE,
+        IndexName=PENDING_INDEX,
+        KeyConditionExpression="pending = :p AND revalidate_after <= :now",
+        ExpressionAttributeValues={":p": {"S": "1"}, ":now": {"S": _now().isoformat()}},
+        Limit=limit,
+    )
+    out = []
+    for i in resp.get("Items", []):
+        out.append({
+            "resource_action": i["resource_action"]["S"],
+            "attempted_at": i["attempted_at"]["S"],
+            "resource_id": i["resource_id"]["S"],
+            "resource_type": i["resource_type"]["S"],
+            "alarm_name": i["alarm_name"]["S"],
+            "alarm_id": i["alarm_id"]["S"],
+            "action": i["action"]["S"],
+            "stage": int(i["stage"]["N"]),
+            "attempt": int(i.get("attempt", {}).get("N", "1")),
+            "actions_taken": json.loads(i.get("actions_taken", {}).get("S", "[]")),
+        })
+    return out
+
+
+def clear_pending(item):
+    """Remove the marker. Called once the sweep has reached a verdict.
+
+    Deleting a marker is not deleting a resource — the CLAUDE.md prohibition is
+    about the things automation manages, not its own bookkeeping. The attempt
+    record written by record_attempt() survives independently, so the audit
+    trail of what was DONE is untouched by clearing what is PENDING.
+    """
+    dynamodb.delete_item(
+        TableName=HISTORY_TABLE,
+        Key={"resource_action": {"S": item["resource_action"]},
+             "attempted_at": {"S": item["attempted_at"]}},
+    )
+
+
 def account_actions_this_hour():
     """Every action in the account inside the window, for the rate limit.
 
@@ -179,7 +271,11 @@ def account_actions_this_hour():
     cutoff = (_now() - datetime.timedelta(seconds=WINDOW_SECONDS)).isoformat()
     resp = dynamodb.scan(
         TableName=HISTORY_TABLE,
-        FilterExpression="attempted_at >= :cutoff AND outcome <> :blocked",
+        # attribute_not_exists(revalidate_after) excludes pending markers. The
+        # action each marker refers to already has its own attempt item, so
+        # counting both would halve the effective rate limit.
+        FilterExpression=("attempted_at >= :cutoff AND outcome <> :blocked "
+                          "AND attribute_not_exists(revalidate_after)"),
         ExpressionAttributeValues={":cutoff": {"S": cutoff}, ":blocked": {"S": "blocked"}},
         Select="COUNT",
     )

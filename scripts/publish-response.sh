@@ -51,6 +51,16 @@ info "Validating the runbook catalog"
   "$(win_path "${REPO_ROOT}/design/06a-alarm-specification.yaml")" \
   || die "runbooks/catalog.yaml is invalid. Nothing packaged."
 
+# Regenerate the human-readable runbooks from the same catalog that is about
+# to ship. Generated rather than maintained: a hand-written copy would be wrong
+# within two edits, and wrong in the worst direction — a document describing a
+# remediation the platform no longer performs is worse than no document,
+# because it is believed.
+#
+# Done at PACKAGING so the document and the deployed behaviour cannot diverge.
+info "Rendering docs/runbooks.md"
+"${PY}" "$(win_path "${REPO_ROOT}/scripts/lib/render_runbooks.py")"   "$(win_path "${REPO_ROOT}/runbooks/catalog.yaml")"   "$(win_path "${REPO_ROOT}/docs/runbooks.md")"   || die "Could not render docs/runbooks.md"
+
 info "Packaging"
 zip_deterministic "${BUILD}"
 HASH="$(package_hash "${BUILD}/package.zip")"

@@ -61,3 +61,8 @@ node_modules/
 *.log
 tmp/
 scratch/
+
+# Build artifact: validate_catalog.py emits it from runbooks/catalog.yaml at
+# packaging. Committing it would let a stale copy ship if the YAML changed and
+# packaging was skipped — the catalog has one source and it is the YAML.
+runbooks/src/catalog.json

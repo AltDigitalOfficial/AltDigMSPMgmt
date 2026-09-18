@@ -128,8 +128,10 @@ Resources:
       TableName: platform-remediation-history
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - { AttributeName: resource_action, AttributeType: S }
-        - { AttributeName: attempted_at,    AttributeType: S }
+        - { AttributeName: resource_action,  AttributeType: S }
+        - { AttributeName: attempted_at,     AttributeType: S }
+        - { AttributeName: pending,          AttributeType: S }
+        - { AttributeName: revalidate_after, AttributeType: S }
       KeySchema:
         # Partitioned by (resource, action) so the circuit breaker's question —
         # "how often has THIS action run on THIS resource" — is a single query
@@ -137,6 +139,22 @@ Resources:
         # scan, which is acceptable because the TTL below bounds the table.
         - { AttributeName: resource_action, KeyType: HASH }
         - { AttributeName: attempted_at,    KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        # SPARSE, deliberately. Only an item parked for revalidation carries
+        # `pending`, so this index contains outstanding work and nothing else:
+        # the sweep's query returns exactly what is due and costs nothing on the
+        # overwhelming majority of runs where nothing is.
+        #
+        # A constant partition key is normally a mistake — it is one hot
+        # partition. It is right here because the index is bounded by the number
+        # of remediations in flight in a single account, which is capped at 20
+        # per hour by the rate limit.
+        - IndexName: pending-revalidation
+          KeySchema:
+            - { AttributeName: pending,          KeyType: HASH }
+            - { AttributeName: revalidate_after, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
@@ -174,6 +192,51 @@ Resources:
         - UseDefaultLogsKey
         - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
         - !Ref LogsKeyArn
+
+  # A gap is a finding. An alarm with no runbook means somebody answered a page
+  # from a blank console, which is the situation this whole phase exists to
+  # remove — so it is counted rather than left in a log nobody reads.
+  ResponseGapFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref DossierLogGroup
+      FilterName: PlatformResponseGap
+      FilterPattern: '{ $.record_type = "response-gap" }'
+      MetricTransformations:
+        - MetricNamespace: AltDigital/Platform
+          MetricName: ResponseGaps
+          MetricValue: '1'
+          DefaultValue: 0
+
+  ResponseGapAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-response-gap
+      AlarmDescription: >-
+        An alarm fired with no runbook for its (alarm x resource) pair. The
+        alarm paged on its own, so the incident was seen — but nothing was
+        gathered, so whoever answered started from a blank console.
+        Read /aws/platform/incident-dossiers for which pair. The fix is an
+        entry in runbooks/catalog.yaml, and an entry that only GATHERS is worth
+        having: most incidents are resolved by the gather stage naming a recent
+        deployment, not by a remediation.
+        Low urgency by design — this is a coverage gap to review, not an
+        incident. The incident already paged.
+      Namespace: AltDigital/Platform
+      MetricName: ResponseGaps
+      Statistic: Sum
+      # A day, not five minutes. This counts catalog coverage, which is a thing
+      # you review over a week — alarming on it every five minutes would make a
+      # backlog look like an emergency.
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - MetaLowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
 
   # -------------------------------------------------------------------------
   # Execution role — the interesting part is the absences
@@ -219,8 +282,20 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: ['dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan']
-                Resource: !GetAtt RemediationHistory.Arn
+                # DeleteItem is scoped to this table and is used only to clear a
+                # pending-revalidation marker once the sweep has reached a
+                # verdict. It removes the engine's own bookkeeping, never a
+                # managed resource — the CLAUDE.md prohibition on deletion is
+                # about the things automation acts on. The attempt record that
+                # proves what was DONE is a separate item and is not touched.
+                Action:
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:Query'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:DeleteItem'
+                Resource:
+                  - !GetAtt RemediationHistory.Arn
+                  - !Sub '${RemediationHistory.Arn}/index/pending-revalidation'
               - Effect: Allow
                 Action: 'ssm:GetParameter'
                 Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/response/*'
@@ -372,7 +447,15 @@ Resources:
             - MetaLowUrgency
             - !Ref LowUrgencyTopicArn
             - !Ref AlertTopicArn
+          # Always the low-urgency topic, regardless of tier. Used for the two
+          # states that report a PLATFORM gap rather than an unhandled
+          # incident: no-runbook (the alarm paged on its own) and
+          # awaiting-settle (the sweep is about to revalidate). Paging twice for
+          # one incident is how a notification rule gets written that then
+          # swallows the real pages too.
+          LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
           MAX_INLINE_SETTLE: '120'
+          REVALIDATION_ATTEMPTS: '3'
       Tags:
         - { Key: platform-managed, Value: 'true' }
 
@@ -423,6 +506,87 @@ Resources:
       Targets:
         - Id: response
           Arn: !GetAtt ResponseFunction.Arn
+
+  # Revalidation sweep.
+  #
+  # ENABLED, while the alarm trigger above is disabled — which looks backwards
+  # and is not. The settle table is clear_log_files 120s, restart_service 180s,
+  # cycle_ecs_task 300s, scale_out 600s, default 300s, against an inline cap of
+  # 120s. Every action but one settles above the cap, so "the engine acted and
+  # cannot yet tell whether it worked" is the ordinary outcome of a remediation.
+  #
+  # Before this rule existed, that outcome was terminal: the engine parked
+  # nothing, nothing revalidated, and nothing paged. The platform's normal
+  # behaviour was to change something on a customer's resource and then never
+  # look again or mention it. Disabling this would restore exactly that, and it
+  # would do so silently, so it is enabled from the start and the engine is
+  # gated by the kill switch and the trigger rule instead.
+  #
+  # Two minutes rather than five: the sweep only reads until something is due,
+  # and the wait it adds lands on an incident that is already open.
+  RevalidationSweepRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-response-sweep
+      Description: >-
+        Revalidates remediations whose settle period has elapsed. Without it,
+        every action that settles above MAX_INLINE_SETTLE — which is all but
+        one — is never re-checked and never escalated.
+      ScheduleExpression: 'rate(2 minutes)'
+      State: ENABLED
+      Targets:
+        - Id: sweep
+          Arn: !GetAtt ResponseFunction.Arn
+          Input: '{"mode":"sweep"}'
+
+  SweepInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ResponseFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RevalidationSweepRule.Arn
+
+  # The sweep is now load-bearing: if it stops running, remediations park and
+  # are never revalidated, and the failure is silent — which is the property
+  # that makes it worth an alarm of its own rather than relying on the
+  # function's Errors alarm.
+  SweepStalledAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-response-sweep-stalled
+      AlarmDescription: >-
+        The revalidation sweep has not invoked successfully for 15 minutes. Any
+        remediation taken in that window has not been re-checked and will not
+        page on its own. Check the platform-response-sweep rule and the
+        platform-response function.
+      Namespace: AWS/Events
+      MetricName: Invocations
+      Dimensions:
+        - Name: RuleName
+          Value: !Ref RevalidationSweepRule
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      # A rule that has stopped emitting reports no data at all, so missing
+      # data must breach. The default would treat silence as health, which is
+      # the precise failure this alarm exists to catch.
+      TreatMissingData: breaching
+      # Same shape as ResponseGapAlarm: AlertTopicArn is optional, and an
+      # empty action list is rejected at create rather than ignored.
+      AlarmActions: !If
+        - MetaLowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+      # OK actions too, unusually. A stalled sweep is a condition somebody has
+      # to go and fix, so the "it is running again" signal is the one that says
+      # whether the fix worked.
+      OKActions: !If
+        - MetaLowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
 
   AlarmInvokePermission:
     Type: AWS::Lambda::Permission
