@@ -1,0 +1,150 @@
+# AltDigital Managed Platform — runbook catalog
+#
+# ===========================================================================
+# THIS IS DATA. The framework is generic; this file is what it does.
+# ===========================================================================
+#
+# Prompt 5.1: "Structure it so that a runbook is defined by data — (alarm type
+# x resource type) mapped to a set of stage 1 gather actions, stage 2
+# remediations, stage 3 remediations — and the framework handles staging,
+# revalidation, safety rails and dossier assembly generically."
+#
+# So adding a runbook is an entry here. It is never a code change, and it is
+# never a new SSM document: there is ONE automation document and it is driven
+# by this file.
+#
+# ---------------------------------------------------------------------------
+# The key is (alarm × resource), not alarm alone
+# ---------------------------------------------------------------------------
+# Design doc 07: "Every runbook is the same four-stage escalation, keyed to
+# (alarm type × resource type)."
+#
+# The distinction matters. "CPU high" on an EC2 instance and "CPU high" on an
+# RDS instance share a name and share nothing else — one might warrant clearing
+# a log volume, the other a connection-pool inspection. Keying on the alarm
+# alone would force every action to re-derive the resource type at runtime,
+# which is the switch statement this format exists to avoid.
+#
+# Alarm ids are 06a's, so this file and design/06a-alarm-specification.yaml
+# refer to the same things by the same names.
+#
+# ---------------------------------------------------------------------------
+# Stage 3 is deliberately EMPTY
+# ---------------------------------------------------------------------------
+# Doc 07 permits mildly disruptive actions at stage 3 where the resource is
+# genuinely redundant: cycle an ECS task, drain and replace an instance behind
+# a load balancer, restart a service on a multi-instance fleet.
+#
+# CLAUDE.md states a hard rule that reads directly against several of those:
+#
+#   "Never write code that terminates, deletes, deregisters, rolls back or
+#    purges a resource as part of automated remediation. Operational automation
+#    is additive or reversible."
+#
+# Cycling a task stops it. Draining an instance deregisters it. Those are the
+# named verbs. The two documents disagree, and resolving that by picking one
+# quietly would be the wrong kind of decision for an assistant to make — so
+# stage 3 is structurally supported, enforced by every rail, and populated by
+# nobody. An alarm that exhausts stage 2 escalates to stage 4 and pages.
+#
+# The framework still implements the stage 3 rails (redundancy check, one
+# resource at a time) because prompt 5.1 requires them in the framework rather
+# than in runbooks, and because they must exist and be tested before any action
+# is ever added here — not written in a hurry alongside the first one.
+#
+# Tracked as B-029.
+
+schema_version: 1
+
+# ---------------------------------------------------------------------------
+# Stage 1 — gather. Always runs, always read-only.
+# ---------------------------------------------------------------------------
+# Doc 07 lists six gather actions and singles one out: "Was there a deployment
+# or configuration change in the last 30 minutes? ... That deployment question
+# resolves a large share of real incidents on its own."
+#
+# So `recent_changes` is in the default set for every runbook rather than being
+# something each one opts into. A gather step nobody remembered to add is a
+# dossier that omits the answer most likely to be the answer.
+default_gather:
+  - metrics_window          # the alarm's metric either side of the trigger
+  - recent_changes          # CloudTrail writes in the last 30 minutes
+  - resource_configuration  # current config, via Config
+  - alarm_history           # has this fired recently, and how did it resolve
+  - related_health          # other platform alarms on the same resource
+
+runbooks:
+
+  # -------------------------------------------------------------------------
+  "AWS::EC2::Instance":
+
+    ec2-disk-high:
+      description: >
+        Filesystem approaching full. 06a names a remediation runbook for this
+        one explicitly (remediation_runbook: ec2-disk-exhaustion), which is why
+        it is the first entry here.
+      gather:
+        - disk_usage_by_mount   # which filesystem, not just "a filesystem"
+      stage_2: []
+      stage_3: []
+
+    ec2-cpu-high:
+      description: >
+        Sustained high CPU. Almost never actionable without knowing what
+        changed, which is why this entry adds no stage 2 action and leans
+        entirely on the gather stage.
+      gather: []
+      stage_2: []
+      stage_3: []
+
+    ec2-status-check-failed:
+      description: >
+        Instance unreachable at the hypervisor level. Stage 2 has nothing safe
+        to offer — the remedies are all restart-shaped, which is stage 3 by
+        definition.
+      gather: []
+      stage_2: []
+      stage_3: []
+
+  # -------------------------------------------------------------------------
+  "AWS::RDS::DBInstance":
+
+    rds-storage-low:
+      description: >
+        Free storage below the tier threshold. Storage EXPANSION is the
+        textbook stage 2 action here — idempotent, no user impact, and
+        explicitly listed in doc 07 as "expand the volume".
+
+        Not enabled, because it spends money without asking. An automated
+        action that increases a customer's bill is a commercial decision
+        wearing an operational costume, and the size of it is unbounded — a
+        runaway log will expand storage repeatedly until someone notices the
+        invoice. See B-029.
+      gather:
+        - storage_trend         # is this a cliff or a slope
+      stage_2: []
+      stage_3: []
+
+    rds-connections-high:
+      description: >
+        Connection count near the instance maximum. Doc 07 lists "release
+        stuck database connections" as a stage 2 action; doing so requires
+        credentials to the database itself, which the platform deliberately
+        does not hold.
+      gather:
+        - connection_trend
+      stage_2: []
+      stage_3: []
+
+  # -------------------------------------------------------------------------
+  "AWS::Lambda::Function":
+
+    lambda-error-rate:
+      description: >
+        Error rate above the tier threshold. The gather stage is the whole
+        value: recent_changes answers it more often than not, because a Lambda
+        error rate that moves is almost always a deployment.
+      gather:
+        - recent_invocation_errors   # the actual exceptions, not the count
+      stage_2: []
+      stage_3: []

@@ -21,9 +21,16 @@ produces no evidence.
 
 | Item | State |
 |---|---|
-| SES identity for `altdigital.ai` | **created**, `us-east-2`, Platform Tooling account `751479507989` |
-| Verification | **pending** — waiting on the records below |
-| Digest sender | report-only until verification completes |
+| SES identity for `altdigital.ai` | created, `us-east-2`, Platform Tooling account `751479507989` |
+| DKIM | **VERIFIED 2026-09-18** — all three CNAMEs resolve, `DkimAttributes.Status = SUCCESS` |
+| Custom MAIL FROM (§2) | not configured |
+| DMARC (§3) | not configured |
+| Digest sender | still report-only — see Sandbox below |
+
+**Verification is done; sending is not.** The domain is authenticated, and SES
+remains in the sandbox, which restricts delivery to *verified addresses*. Those
+are different gates and clearing the first does not clear the second — see the
+Sandbox section.
 
 ---
 
