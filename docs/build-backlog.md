@@ -270,7 +270,34 @@ than a recorded absence.
 |---|---|---|
 | `percent_of_max_connections` | `rds-connections-high` | RDS exposes no API for the instance class's memory, and `max_connections` defaults to the parameter-group **formula** `{DBInstanceClassMemory/12582880}` — so reading the parameter group returns the formula, not a number. |
 | `percent_of_instance_memory` | `rds-freeable-memory-low` | Same root cause. |
-| `reference_metric` | `asg-in-service-below-desired` | Needs a metric-math alarm (`Metrics=[...]`), a different `put_metric_alarm` shape entirely. Not built. |
+| `reference_metric` | `asg-in-service-below-desired` | Needs a metric-math alarm. **Now buildable** — metric math landed with the `derived` support below; this one specifically was not converted and still raises an exception. |
+
+**Update 2026-09-17 — a third alarm class was missed entirely.** Seven alarms
+in 06a carry `metric: derived` with a `source` expression such as
+`Errors / Invocations`. The handler took `derived` as a literal metric name and
+created alarms watching a metric called `derived` in namespace `AWS/Lambda`.
+
+Those alarms existed, looked plausible in a list, and **could never fire** —
+`INSUFFICIENT_DATA` forever. Three were created in the canary, and drift
+detection then recreated them hourly. It is the precise failure this layer is
+built to prevent, shipped by the layer itself.
+
+Metric math is now implemented for the `A / B` ratio form, which covers five of
+the seven, including `lambda-error-rate` and both ALB 5xx rates. The
+`minimum_invocations` guard the spec asks for is expressed in the metric math
+rather than dropped — without it a function invoked twice with one error reads
+as a 50% error rate and alarms on a sample of two:
+
+```
+IF(m2 >= 10, 100*(m1/m2), 0)
+```
+
+**Still unsupported, two of seven:** `config_resource_age` and
+`task_stopped_events_per_window`. Neither is a ratio of two CloudWatch metrics
+— they need data the handler does not have. Both raise
+`derived-metric-unsupported` rather than being approximated, because an
+approximation here produces an alarm that looks right and compares the wrong
+things.
 
 **The option not taken** was a hand-maintained `db.*.*` class-to-memory table.
 It would work today and be silently wrong the first time AWS ships a class

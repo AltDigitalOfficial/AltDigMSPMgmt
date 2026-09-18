@@ -25,6 +25,10 @@
 #    as every invocation erroring at cold start, in every member account, with
 #    a stack trace instead of a reason.
 #
+#    One package, two handlers. drift.py imports handler.py to reuse
+#    plan_alarms — they must never disagree about what an alarm should be, and
+#    shipping them separately would make that possible.
+#
 # 3. Publishes under a CONTENT-ADDRESSED key. CloudFormation decides whether to
 #    update a Lambda by comparing S3Key — publish new code to the same key and
 #    every member account keeps running the old one while the stack reports
@@ -61,6 +65,7 @@ BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 
 cp "${SRC}/handler.py" "${BUILD}/handler.py"
+cp "${SRC}/drift.py"   "${BUILD}/drift.py"
 
 info "Validating design/06a-alarm-specification.yaml"
 "${PY}" "$(win_path "${REPO_ROOT}/scripts/lib/validate_alarm_spec.py")" \
@@ -76,7 +81,7 @@ info "Packaging"
 "${PY}" - "$(win_path "${BUILD}")" <<'PYEOF'
 import sys, zipfile, pathlib
 build = pathlib.Path(sys.argv[1])
-names = sorted(["handler.py", "alarm-spec.json"])
+names = sorted(["handler.py", "drift.py", "alarm-spec.json"])
 with zipfile.ZipFile(build / "package.zip", "w", zipfile.ZIP_DEFLATED) as z:
     for name in names:
         info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))

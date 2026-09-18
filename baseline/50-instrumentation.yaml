@@ -140,6 +140,24 @@ Conditions:
   HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
   UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
 
+  # The platform's OWN meta-alarms — instrumentation exceptions and alarm
+  # drift — follow the same tier routing as the workload alarms they watch.
+  #
+  # They did not, and the omission was invisible until a drift test in the
+  # dev-tier canary paged a phone. These two are wired directly in the template
+  # rather than derived from 06a's routing table, so 06a's rule that dev and
+  # test do not page simply did not reach them.
+  #
+  # The condition is about the ENVIRONMENT, not the severity. Drift in
+  # production is worth waking someone for: a platform alarm modified by hand
+  # is a security-relevant act. The same event in a dev sandbox is worth
+  # knowing and is not worth a phone call.
+  MetaAlarmsLowUrgency: !And
+    - !Not [!Equals [!Ref LowUrgencyTopicArn, '']]
+    - !Or
+      - !Equals [!Ref EnvironmentTier, dev]
+      - !Equals [!Ref EnvironmentTier, test]
+
 Resources:
 
   # -------------------------------------------------------------------------
@@ -198,7 +216,10 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
-      AlarmActions: !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+      AlarmActions: !If
+        - MetaAlarmsLowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
 
   # -------------------------------------------------------------------------
   # Execution role
@@ -232,6 +253,11 @@ Resources:
                   - 'cloudwatch:DescribeAlarms'
                   - 'cloudwatch:TagResource'
                 Resource: '*'
+              # Drift detection enumerates resources through Config rather
+              # than through fifteen per-service list APIs. Read-only.
+              - Effect: Allow
+                Action: 'config:ListDiscoveredResources'
+                Resource: '*'
               - Effect: Allow
                 Action:
                   - 'logs:CreateLogStream'
@@ -239,6 +265,8 @@ Resources:
                 Resource:
                   - !Sub '${ExceptionLogGroup.Arn}'
                   - !Sub '${ExceptionLogGroup.Arn}:*'
+                  - !Sub '${DriftLogGroup.Arn}'
+                  - !Sub '${DriftLogGroup.Arn}:*'
               # Its own execution log group. Separate from the exception group
               # so that a flood of runtime logs cannot bury exception records
               # or push them past retention.
@@ -340,6 +368,173 @@ Resources:
       SourceArn: !GetAtt ResourceCreationRule.Arn
 
   # -------------------------------------------------------------------------
+  # Drift detection
+  # -------------------------------------------------------------------------
+  # Prompt 4.2. Everything the instrumentation Lambda creates can be removed by
+  # one console click, and nothing would notice until an incident went
+  # unalarmed.
+  #
+  # Same package, second handler. drift.py imports handler.py and calls
+  # plan_alarms, so both derive the expected alarm from one code path. A second
+  # definition would let drift "correct" alarms toward whichever copy was
+  # edited last, silently, on a schedule, across every account.
+  DriftLogGroup:
+    Type: AWS::Logs::LogGroup
+    # Retained. A drift record says monitoring that existed was removed or
+    # changed, which is a security-relevant statement about someone's action
+    # rather than an operational log line.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/platform/alarm-drift
+      RetentionInDays: !Ref ExceptionRetentionDays
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  DriftMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref DriftLogGroup
+      FilterName: PlatformAlarmDrift
+      # Matches recreate and correct events, NOT orphan reports or sweep
+      # failures. An orphan is usually a decommissioned resource, and alarming
+      # on it would make the signal routine.
+      FilterPattern: '{ $.event = "recreated-deleted-alarm" || $.event = "corrected-modified-alarm" }'
+      MetricTransformations:
+        - MetricNamespace: AltDigital/Platform
+          MetricName: AlarmDriftCorrected
+          MetricValue: '1'
+          DefaultValue: 0
+
+  DriftAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-alarm-drift
+      AlarmDescription: >-
+        A platform-managed alarm was deleted or modified and has been put back.
+        The alarm is fine now; what needs explaining is why it changed.
+        Read /aws/platform/alarm-drift — a corrected-modified-alarm record
+        carries the previous values. A threshold raised far enough leaves an
+        alarm that exists, evaluates, shows green and can never fire, which is
+        indistinguishable from healthy unless someone compares it to the
+        specification.
+        If the change was deliberate it belongs in
+        design/06a-alarm-specification.yaml, not in the console. This sweep
+        will revert it again otherwise.
+      Namespace: AltDigital/Platform
+      MetricName: AlarmDriftCorrected
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - MetaAlarmsLowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+
+  DriftFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: platform-alarm-drift
+      Runtime: python3.13
+      Handler: drift.handler
+      Role: !GetAtt InstrumentationRole.Arn
+      # A full sweep walks every in-scope resource type through Config and
+      # re-derives every alarm. Minutes rather than seconds once an account
+      # holds real workloads, and a timeout mid-sweep leaves the remaining
+      # types unchecked with no record — the one outcome worth paying to avoid.
+      Timeout: 600
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          EXCEPTION_LOG_GROUP: !Ref ExceptionLogGroup
+          DRIFT_LOG_GROUP: !Ref DriftLogGroup
+          ENVIRONMENT_TIER: !Ref EnvironmentTier
+          ACCEPTABLE_RESPONSE_MS: !Ref AcceptableResponseMs
+          ALERT_TOPIC_ARN: !Ref AlertTopicArn
+          LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
+          ALARM_PREFIX: platform-auto
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  DriftLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/platform-alarm-drift
+      RetentionInDays: 30
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  # Scheduled sweep. Catches deletions the event rule missed, modifications
+  # (which emit no distinctive event worth matching), and alarms never created
+  # because an earlier invocation failed.
+  DriftScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-alarm-drift-schedule
+      Description: Hourly sweep comparing live alarms against the specification.
+      ScheduleExpression: 'rate(1 hour)'
+      State: ENABLED
+      Targets:
+        - Id: drift
+          Arn: !GetAtt DriftFunction.Arn
+
+  # Immediate response to a deletion. The schedule alone would leave up to an
+  # hour with monitoring removed, and an hour is long enough to cover the
+  # window someone deleted the alarm to create.
+  DriftDeleteRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-alarm-drift-on-delete
+      Description: >-
+        CloudWatch DeleteAlarms via CloudTrail. Fires a full sweep rather than
+        parsing the deleted names: an alarm name is
+        platform-auto-RESOURCEID-ALARMID and both halves may contain dashes, so
+        parsing is ambiguous and would fail on exactly the resources with
+        awkward identifiers.
+      EventPattern:
+        source:
+          - aws.monitoring
+        detail-type:
+          - 'AWS API Call via CloudTrail'
+        detail:
+          eventSource:
+            - monitoring.amazonaws.com
+          eventName:
+            - DeleteAlarms
+      State: ENABLED
+      Targets:
+        - Id: drift
+          Arn: !GetAtt DriftFunction.Arn
+
+  DriftSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DriftFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DriftScheduleRule.Arn
+
+  DriftDeletePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DriftFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DriftDeleteRule.Arn
+
+  # -------------------------------------------------------------------------
   # CloudWatch agent
   # -------------------------------------------------------------------------
   # Prompt 4.1: "Include the SSM association that installs the CloudWatch
@@ -378,6 +573,14 @@ Resources:
       MaxErrors: '10%'
 
 Outputs:
+
+  DriftFunctionName:
+    Description: Alarm drift detection, hourly sweep and on-delete
+    Value: !Ref DriftFunction
+
+  DriftLogGroupName:
+    Description: Where drift events are recorded
+    Value: !Ref DriftLogGroup
 
   FunctionName:
     Description: Auto-instrumentation function

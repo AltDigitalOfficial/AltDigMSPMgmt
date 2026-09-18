@@ -55,6 +55,7 @@ considered omission from an unmade decision.
 import datetime
 import json
 import os
+import re
 
 import boto3
 from botocore.exceptions import ClientError
@@ -331,6 +332,292 @@ def routing_for(spec):
     return (TIERS.get(ENVIRONMENT_TIER) or {}).get("default_routing", "digest")
 
 
+RATIO_RE = re.compile(r"^\s*([A-Za-z0-9_]+)\s*/\s*([A-Za-z0-9_]+)\s*$")
+
+
+def derived_metrics(spec, dimension_name, resource_id):
+    """Build a metric-math Metrics array for a `metric: derived` alarm.
+
+    06a marks seven alarms `metric: derived` with a `source` expression. They
+    are RATIOS, and the spec is explicit about why: "a count threshold is
+    meaningless across functions invoked once a day and ten thousand times a
+    minute."
+
+    An earlier version of this handler did not recognise the class at all and
+    took "derived" as a literal metric name — creating alarms on a metric
+    called `derived` in namespace AWS/Lambda, which sit in INSUFFICIENT_DATA
+    forever. They exist, they look plausible in a list, and they can never
+    fire. Drift detection then recreated them hourly.
+
+    Returns (metrics_array, None) or (None, reason).
+
+    Only the `A / B` form is built. Two of the seven — config_resource_age and
+    task_stopped_events_per_window — are not CloudWatch metrics at all and are
+    returned as a reason so they raise an exception rather than being
+    approximated into something that compares the wrong things.
+    """
+    source = (spec.get("source") or "").strip()
+    m = RATIO_RE.match(source)
+    if not m:
+        return None, (
+            f"metric: derived with source '{source}', which is not an A / B ratio of "
+            "two CloudWatch metrics. This one needs a data source the handler does not "
+            "have — see B-024."
+        )
+
+    numerator, denominator = m.group(1), m.group(2)
+    namespace = spec.get("namespace")
+    if not namespace:
+        return None, f"metric: derived source '{source}' has no namespace"
+
+    stat = spec.get("statistic", "Sum")
+    period = spec.get("period_seconds", DEFAULTS.get("period_seconds", 300))
+
+    def stat_block(mid, metric_name):
+        return {
+            "Id": mid,
+            "MetricStat": {
+                "Metric": {
+                    "Namespace": namespace,
+                    "MetricName": metric_name,
+                    "Dimensions": [{"Name": dimension_name, "Value": resource_id}],
+                },
+                "Period": period,
+                "Stat": stat,
+            },
+            "ReturnData": False,
+        }
+
+    # The spec's threshold_by_tier for these is a PERCENTAGE (unit: Percent,
+    # dev: 25 meaning 25%), so the expression scales the ratio by 100.
+    expression = f"100*(m1/m2)"
+
+    # minimum_invocations guards the small-denominator case. Without it a
+    # function invoked twice with one error reads as a 50% error rate and pages
+    # on a sample of two. IF() is metric math, so the guard lives in the
+    # expression rather than in a second alarm.
+    floor = spec.get("minimum_invocations")
+    if floor:
+        expression = f"IF(m2 >= {floor}, 100*(m1/m2), 0)"
+
+    return [
+        stat_block("m1", numerator),
+        stat_block("m2", denominator),
+        {
+            "Id": "e1",
+            "Expression": expression,
+            "Label": f"{numerator}/{denominator} %",
+            "ReturnData": True,
+        },
+    ], None
+
+
+def plan_alarms(resource_type, resource_id):
+    """Work out what alarms this resource SHOULD have. Creates nothing.
+
+    Returns (planned, classes, terminal):
+
+      planned   list of (alarm_id, put_metric_alarm kwargs)
+      classes   how every alarm in the set was classified — suppressed,
+                not_applicable, exceptions, pending_destination, account_level
+      terminal  a result dict when the resource cannot be planned at all
+                (unknown type, no alarm set), otherwise None
+
+    Split out from handler() so drift detection uses the SAME definition of
+    what an alarm should look like. Drift comparing live alarms against a
+    second, separately maintained idea of the expected shape would "correct"
+    alarms toward whichever copy was edited last — silently, on a schedule,
+    across every account.
+    """
+    if resource_type in NO_ALARMS:
+        # The spec's own words: "known, no alarms applicable". Recorded in the
+        # return value, not raised, because the decision is in the spec.
+        return None, None, {"status": "known-no-alarms", "resource_type": resource_type}
+
+    if resource_type not in IN_SCOPE:
+        record_exception("unrecognised-resource-type", {
+            "resource_type": resource_type, "resource_id": resource_id,
+            "message": "Not in resource_types_in_scope and not in "
+                       "resource_types_no_alarms. This resource is running with no "
+                       "platform monitoring. Add it to one of those lists in "
+                       "design/06a-alarm-specification.yaml — the second list is how "
+                       "a deliberate omission is recorded."})
+        return None, None, {"status": "exception", "reason": "unrecognised-resource-type"}
+
+    try:
+        alarms, type_cfg = resolve_set(resource_type)
+    except ValueError as exc:
+        record_exception("spec-error", {"resource_type": resource_type, "error": str(exc)})
+        return None, None, {"status": "exception", "reason": "spec-error"}
+
+    if not alarms:
+        record_exception("no-alarm-set", {
+            "resource_type": resource_type,
+            "message": "In scope per the spec but alarm_sets has no entry for it."})
+        return None, None, {"status": "exception", "reason": "no-alarm-set"}
+
+    planned = []
+    classes = {"suppressed": [], "not_applicable": [], "exceptions": [],
+               "pending_destination": [], "account_level": []}
+
+    for spec in alarms:
+        aid = spec.get("id", "?")
+
+        # Event-based entries are not metric alarms. 06a says so explicitly:
+        # "EventBridge rule, not a metric alarm." They carry a source
+        # (rds_event_category, cloudtrail, autoscaling_event) and a selector
+        # (event_categories, event_names or event_types) instead of a threshold.
+        #
+        # They are also not PER-RESOURCE. A CloudTrail rule matching
+        # PutBucketAcl belongs once in the account, not once per bucket, and
+        # creating one per resource would produce N identical rules all firing
+        # together on the same event.
+        #
+        # Classified here and built at account level. NOT an exception — an
+        # exception per resource for something correctly handled elsewhere is
+        # the noise that buries real ones. The account-level rules do not exist
+        # yet; that is B-026, not a per-resource fault.
+        if spec.get("metric") == "event":
+            classes["account_level"].append(aid)
+            continue
+
+        by_tier = spec.get("threshold_by_tier") or {}
+
+        # Tier omitted -> suppressed by decision. Silent, per the spec.
+        if ENVIRONMENT_TIER not in by_tier:
+            classes["suppressed"].append(aid)
+            continue
+
+        tier_value = by_tier[ENVIRONMENT_TIER]
+
+        # Present but null -> [TUNE] nobody has set. Exception, not a skip.
+        if tier_value is None:
+            record_exception("threshold-unset", {
+                "alarm_id": aid, "resource_type": resource_type,
+                "resource_id": resource_id,
+                "message": "threshold_by_tier gives null for this tier. The spec marks "
+                           "such values [TUNE]: they are workload-specific and nobody "
+                           "has decided this one. The alarm CANNOT be created, and that "
+                           "is an exception rather than a skip so it shows as pending."})
+            classes["exceptions"].append({"alarm": aid, "reason": "threshold-unset"})
+            continue
+
+        ok, why = applies(spec, resource_type, resource_id)
+        if ok is None:
+            record_exception("applies-when-unevaluable", {
+                "alarm_id": aid, "resource_type": resource_type,
+                "resource_id": resource_id, "message": why})
+            classes["exceptions"].append({"alarm": aid, "reason": "applies-when-unevaluable"})
+            continue
+        if ok is False:
+            classes["not_applicable"].append(aid)
+            continue
+
+        threshold, why = resolve_threshold(spec, resource_type, resource_id, tier_value)
+        if threshold is None:
+            record_exception("threshold-unresolvable", {
+                "alarm_id": aid, "resource_type": resource_type,
+                "resource_id": resource_id, "threshold_mode": spec.get("threshold_mode"),
+                "message": why})
+            classes["exceptions"].append({"alarm": aid, "reason": "threshold-unresolvable"})
+            continue
+
+        if spec.get("threshold_mode") == "reference_metric":
+            # Needs a metric math alarm, a different put_metric_alarm shape
+            # entirely — Metrics=[...] rather than MetricName/Threshold.
+            # Recorded rather than approximated, because approximating would
+            # produce an alarm that looks right and compares the wrong things.
+            record_exception("threshold-mode-not-implemented", {
+                "alarm_id": aid, "resource_type": resource_type,
+                "resource_id": resource_id,
+                "message": "reference_metric requires a metric math alarm, which this "
+                           "handler does not yet build. See B-025."})
+            classes["exceptions"].append(
+                {"alarm": aid, "reason": "reference-metric-unimplemented"})
+            continue
+
+        routing = routing_for(spec)
+        pages = (ROUTING.get(routing) or {}).get("pages", False)
+
+        if pages:
+            actions = [ALERT_TOPIC_ARN] if ALERT_TOPIC_ARN else []
+        elif LOW_URGENCY_TOPIC_ARN:
+            actions = [LOW_URGENCY_TOPIC_ARN]
+            classes["pending_destination"].append(
+                {"alarm": aid, "routing": routing, "sent_to": "low-urgency"})
+        else:
+            # No destination at all. The alarm is still created — it evaluates
+            # and is visible in the console — but nothing is notified, and that
+            # is recorded rather than left to be inferred from an empty
+            # AlarmActions list.
+            actions = []
+            classes["pending_destination"].append(
+                {"alarm": aid, "routing": routing, "sent_to": "nowhere"})
+
+        dimension_name = type_cfg.get("dimension") or _dimension_for(resource_type)
+
+        derived = None
+        if spec.get("metric") == "derived":
+            derived, why = derived_metrics(spec, dimension_name, resource_id)
+            if derived is None:
+                record_exception("derived-metric-unsupported", {
+                    "alarm_id": aid, "resource_type": resource_type,
+                    "resource_id": resource_id, "source": spec.get("source"),
+                    "message": why})
+                classes["exceptions"].append(
+                    {"alarm": aid, "reason": "derived-metric-unsupported"})
+                continue
+
+        name = f"{ALARM_PREFIX}-{resource_id}-{aid}".replace("/", "-")[:255]
+        params = {
+            "AlarmName": name,
+            "AlarmDescription": (
+                f"{spec.get('note') or spec.get('metric')}\n\n"
+                f"Auto-instrumented from design/06a-alarm-specification.yaml "
+                f"({aid}) at tier '{ENVIRONMENT_TIER}', routing '{routing}'. "
+                f"Edit the specification, not this alarm — drift detection "
+                f"reverts hand edits."),
+            "EvaluationPeriods": spec.get(
+                "evaluation_periods", DEFAULTS.get("evaluation_periods", 2)),
+            "Threshold": threshold,
+            "ComparisonOperator": spec["comparison"],
+            "TreatMissingData": spec.get(
+                "treat_missing_data", DEFAULTS.get("treat_missing_data", "notBreaching")),
+            "Tags": [
+                {"Key": "platform-managed", "Value": "true"},
+                {"Key": "platform-auto-instrumented", "Value": "true"},
+                {"Key": "platform-alarm-id", "Value": aid},
+                {"Key": "platform-routing", "Value": routing},
+            ],
+        }
+        # A metric alarm and a metric-math alarm are different SHAPES, not the
+        # same shape with an extra field. Metrics=[...] and
+        # Namespace/MetricName/Dimensions/Statistic/Period are mutually
+        # exclusive, and supplying both is rejected.
+        if derived is not None:
+            params["Metrics"] = derived
+        else:
+            params["Namespace"] = spec.get("namespace")
+            params["MetricName"] = spec["metric"]
+            params["Dimensions"] = [{"Name": dimension_name, "Value": resource_id}]
+            params["Statistic"] = spec.get("statistic", "Average")
+            params["Period"] = spec.get(
+                "period_seconds", DEFAULTS.get("period_seconds", 300))
+            # Unit belongs to the metric, not to an expression.
+            if spec.get("unit"):
+                params["Unit"] = spec["unit"]
+
+        if spec.get("datapoints_to_alarm"):
+            params["DatapointsToAlarm"] = spec["datapoints_to_alarm"]
+        if actions:
+            params["AlarmActions"] = actions
+            params["OKActions"] = actions
+
+        planned.append((aid, params))
+
+    return planned, classes, None
+
+
 def handler(event, context):
     detail = event.get("detail", {}) or {}
     ci = detail.get("configurationItem") or detail.get("configurationItemSummary") or {}
@@ -345,168 +632,13 @@ def handler(event, context):
             "event": event})
         return {"status": "exception", "reason": "unparseable-event"}
 
-    if resource_type in NO_ALARMS:
-        # The spec's own words: "known, no alarms applicable". Recorded in the
-        # return value, not raised, because the decision is in the spec.
-        print(json.dumps({"status": "known-no-alarms", "resource_type": resource_type}))
-        return {"status": "known-no-alarms", "resource_type": resource_type}
+    planned, classes, terminal = plan_alarms(resource_type, resource_id)
+    if terminal is not None:
+        print(json.dumps(terminal))
+        return terminal
 
-    if resource_type not in IN_SCOPE:
-        record_exception("unrecognised-resource-type", {
-            "resource_type": resource_type, "resource_id": resource_id,
-            "message": "Not in resource_types_in_scope and not in "
-                       "resource_types_no_alarms. This resource is running with no "
-                       "platform monitoring. Add it to one of those lists in "
-                       "design/06a-alarm-specification.yaml — the second list is how "
-                       "a deliberate omission is recorded."})
-        return {"status": "exception", "reason": "unrecognised-resource-type"}
-
-    try:
-        alarms, type_cfg = resolve_set(resource_type)
-    except ValueError as exc:
-        record_exception("spec-error", {"resource_type": resource_type, "error": str(exc)})
-        return {"status": "exception", "reason": "spec-error"}
-
-    if not alarms:
-        record_exception("no-alarm-set", {
-            "resource_type": resource_type,
-            "message": "In scope per the spec but alarm_sets has no entry for it."})
-        return {"status": "exception", "reason": "no-alarm-set"}
-
-    created, suppressed, not_applicable, exceptions = [], [], [], []
-    pending_destination, account_level = [], []
-
-    for spec in alarms:
-        aid = spec.get("id", "?")
-
-        # Event-based entries are not metric alarms. 06a says so explicitly:
-        # "EventBridge rule, not a metric alarm." They carry a source
-        # (rds_event_category, cloudtrail, autoscaling_event) and a selector
-        # (event_categories, event_names or event_types) instead of a
-        # threshold.
-        #
-        # They are also not PER-RESOURCE. A CloudTrail rule matching
-        # PutBucketAcl belongs once in the account, not once per bucket, and
-        # creating one per resource would produce N identical rules all firing
-        # together on the same event.
-        #
-        # So they are classified here and built at account level in the
-        # baseline template. NOT an exception — an exception per resource for
-        # something correctly handled elsewhere is the noise that buries real
-        # ones. The account-level rules do not exist yet; that is B-026, not a
-        # per-resource fault.
-        if spec.get("metric") == "event":
-            account_level.append(aid)
-            continue
-
-        by_tier = spec.get("threshold_by_tier") or {}
-
-        # Tier omitted -> suppressed by decision. Silent, per the spec.
-        if ENVIRONMENT_TIER not in by_tier:
-            suppressed.append(aid)
-            continue
-
-        tier_value = by_tier[ENVIRONMENT_TIER]
-
-        # Present but null -> [TUNE] nobody has set. Exception, not a skip.
-        if tier_value is None:
-            record_exception("threshold-unset", {
-                "alarm_id": aid, "resource_type": resource_type,
-                "resource_id": resource_id,
-                "message": "threshold_by_tier gives null for this tier. The spec marks "
-                           "such values [TUNE]: they are workload-specific and nobody "
-                           "has decided this one. The alarm CANNOT be created, and that "
-                           "is an exception rather than a skip so it shows as pending."})
-            exceptions.append({"alarm": aid, "reason": "threshold-unset"})
-            continue
-
-        ok, why = applies(spec, resource_type, resource_id)
-        if ok is None:
-            record_exception("applies-when-unevaluable", {
-                "alarm_id": aid, "resource_type": resource_type,
-                "resource_id": resource_id, "message": why})
-            exceptions.append({"alarm": aid, "reason": "applies-when-unevaluable"})
-            continue
-        if ok is False:
-            not_applicable.append(aid)
-            continue
-
-        threshold, why = resolve_threshold(spec, resource_type, resource_id, tier_value)
-        if threshold is None:
-            record_exception("threshold-unresolvable", {
-                "alarm_id": aid, "resource_type": resource_type,
-                "resource_id": resource_id, "threshold_mode": spec.get("threshold_mode"),
-                "message": why})
-            exceptions.append({"alarm": aid, "reason": "threshold-unresolvable"})
-            continue
-
-        if spec.get("threshold_mode") == "reference_metric":
-            # Needs a metric math alarm (this metric against a reference
-            # metric), which is a different put_metric_alarm shape entirely —
-            # Metrics=[...] rather than MetricName/Threshold. Not built, and
-            # recorded rather than approximated, because approximating it would
-            # produce an alarm that looks right and compares the wrong things.
-            record_exception("threshold-mode-not-implemented", {
-                "alarm_id": aid, "resource_type": resource_type,
-                "resource_id": resource_id,
-                "message": "reference_metric requires a metric math alarm, which this "
-                           "handler does not yet build. See B-025."})
-            exceptions.append({"alarm": aid, "reason": "reference-metric-unimplemented"})
-            continue
-
-        routing = routing_for(spec)
-        pages = (ROUTING.get(routing) or {}).get("pages", False)
-
-        if pages:
-            actions = [ALERT_TOPIC_ARN] if ALERT_TOPIC_ARN else []
-        elif LOW_URGENCY_TOPIC_ARN:
-            actions = [LOW_URGENCY_TOPIC_ARN]
-            pending_destination.append(
-                {"alarm": aid, "routing": routing, "sent_to": "low-urgency"})
-        else:
-            # No destination at all. The alarm is still created — it evaluates
-            # and is visible in the console — but nothing is notified, and that
-            # is recorded rather than left to be inferred from an empty
-            # AlarmActions list.
-            actions = []
-            pending_destination.append(
-                {"alarm": aid, "routing": routing, "sent_to": "nowhere"})
-
-        name = f"{ALARM_PREFIX}-{resource_id}-{aid}".replace("/", "-")[:255]
-        params = {
-            "AlarmName": name,
-            "AlarmDescription": (
-                f"{spec.get('note') or spec.get('metric')}\n\n"
-                f"Auto-instrumented from design/06a-alarm-specification.yaml "
-                f"({aid}) at tier '{ENVIRONMENT_TIER}', routing '{routing}'. "
-                f"Edit the specification, not this alarm."),
-            "Namespace": spec.get("namespace"),
-            "MetricName": spec["metric"],
-            "Dimensions": [{"Name": type_cfg.get("dimension") or _dimension_for(resource_type),
-                            "Value": resource_id}],
-            "Statistic": spec.get("statistic", "Average"),
-            "Period": spec.get("period_seconds", DEFAULTS.get("period_seconds", 300)),
-            "EvaluationPeriods": spec.get(
-                "evaluation_periods", DEFAULTS.get("evaluation_periods", 2)),
-            "Threshold": threshold,
-            "ComparisonOperator": spec["comparison"],
-            "TreatMissingData": spec.get(
-                "treat_missing_data", DEFAULTS.get("treat_missing_data", "notBreaching")),
-            "Tags": [
-                {"Key": "platform-managed", "Value": "true"},
-                {"Key": "platform-auto-instrumented", "Value": "true"},
-                {"Key": "platform-alarm-id", "Value": aid},
-                {"Key": "platform-routing", "Value": routing},
-            ],
-        }
-        if spec.get("datapoints_to_alarm"):
-            params["DatapointsToAlarm"] = spec["datapoints_to_alarm"]
-        if spec.get("unit"):
-            params["Unit"] = spec["unit"]
-        if actions:
-            params["AlarmActions"] = actions
-            params["OKActions"] = actions
-
+    created = []
+    for aid, params in planned:
         try:
             cloudwatch.put_metric_alarm(**params)
             created.append(aid)
@@ -514,22 +646,21 @@ def handler(event, context):
             # Carry on through the rest of the set. Aborting would leave the
             # resource partially instrumented AND stop alarms that would have
             # worked, for a failure usually specific to one metric.
-            exceptions.append({"alarm": aid, "reason": "put-failed", "error": str(exc)})
+            classes["exceptions"].append(
+                {"alarm": aid, "reason": "put-failed", "error": str(exc)})
 
-    if any(e["reason"] == "put-failed" for e in exceptions):
+    if any(e["reason"] == "put-failed" for e in classes["exceptions"]):
         record_exception("alarm-creation-failed", {
             "resource_type": resource_type, "resource_id": resource_id,
             "created": created,
-            "failed": [e for e in exceptions if e["reason"] == "put-failed"]})
+            "failed": [e for e in classes["exceptions"] if e["reason"] == "put-failed"]})
 
-    # Four outcomes, not three. The first version collapsed "nothing was
-    # created" into "exception", so an S3 bucket in dev — where every alarm in
-    # its set is either suppressed by tier or handled by an account-level event
-    # rule — reported status "exception" with an empty exceptions list.
-    #
-    # That is the same mistake this handler exists to avoid, made one level up:
-    # a resource with no alarms BY DESIGN read identically to one that failed
-    # to be instrumented.
+    # Four outcomes, not three. An earlier version collapsed "nothing was
+    # created" into "exception", so an S3 bucket in dev — where every alarm is
+    # either suppressed by tier or handled by an account-level event rule —
+    # reported status "exception" with an empty exceptions list. That is the
+    # same distinct-outcomes error this handler exists to avoid, one level up.
+    exceptions = classes["exceptions"]
     if exceptions and created:
         status = "partial"
     elif exceptions:
@@ -546,11 +677,11 @@ def handler(event, context):
         "environment_tier": ENVIRONMENT_TIER,
         "created": created,
         # Three distinct reasons an alarm does not exist, kept apart on purpose.
-        "suppressed_by_tier": suppressed,
-        "not_applicable": not_applicable,
+        "suppressed_by_tier": classes["suppressed"],
+        "not_applicable": classes["not_applicable"],
         "exceptions": exceptions,
-        "pending_destination": pending_destination,
-        "account_level_event_rules": account_level,
+        "pending_destination": classes["pending_destination"],
+        "account_level_event_rules": classes["account_level"],
     }
     print(json.dumps(result))
     return result
