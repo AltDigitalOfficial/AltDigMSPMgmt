@@ -35,7 +35,50 @@ done
 TF="$(find_tool terraform)" || die "terraform not found. Run scripts/setup-tooling.sh."
 TFDIR="${REPO_ROOT}/pagerduty"
 
-[[ -n "${PAGERDUTY_TOKEN:-}" ]] || die "PAGERDUTY_TOKEN is not set.
+# ---------------------------------------------------------------------------
+# Token resolution: environment first, then Secrets Manager
+# ---------------------------------------------------------------------------
+# An explicit PAGERDUTY_TOKEN in the environment always wins. That is not just
+# politeness about overrides — it is the path for running as a different
+# identity without rewriting the stored secret, which matters when someone is
+# testing a restricted token.
+#
+# Otherwise it is read from Platform Tooling. Two things that buys and one it
+# does not:
+#
+#   rotation  one place, and nothing downstream needs redeploying, because the
+#             token is read fresh on every run. Contrast the ROUTING keys,
+#             which CloudFormation bakes into an SNS subscription endpoint at
+#             deploy time and never re-resolves.
+#   audit     every retrieval is a CloudTrail event. This token can delete
+#             escalation policies — it can switch off every page the platform
+#             sends — so knowing when it was used matters more for this
+#             credential than for any other one here.
+#   NOT       use-time secrecy. Terraform reads the token from its environment,
+#             so it ends up in a process environment either way.
+if [[ -z "${PAGERDUTY_TOKEN:-}" ]]; then
+  export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
+  if require_cli 2>/dev/null && TOOLING="$(get_param /org/account/altdig-infra-tooling)"      && [[ -n "${TOOLING}" && "${TOOLING}" != "None" ]]; then
+    info "Reading the API token from Secrets Manager (${TOOLING})"
+    TCREDS="$(aws sts assume-role       --role-arn "arn:aws:iam::${TOOLING}:role/OrganizationAccountAccessRole"       --role-session-name platform-pd-read       --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'       --output text 2>/dev/null | no_cr)" || true
+    if [[ -n "${TCREDS}" ]]; then
+      read -r TAK TSK TST <<<"${TCREDS}"
+      FETCHED="$(AWS_PROFILE='' AWS_ACCESS_KEY_ID="${TAK}" AWS_SECRET_ACCESS_KEY="${TSK}"         AWS_SESSION_TOKEN="${TST}" MSYS_NO_PATHCONV=1         aws secretsmanager get-secret-value           --secret-id platform/pagerduty/api-token           --query SecretString --output text 2>/dev/null | no_cr)" || true
+      if [[ -n "${FETCHED}" ]]; then
+        PAGERDUTY_TOKEN="$(printf '%s' "${FETCHED}"           | "$(command -v python || command -v python3)" -c             'import json,sys; print(json.load(sys.stdin)["api_token"])')"
+        export PAGERDUTY_TOKEN
+        ok "token retrieved (${#PAGERDUTY_TOKEN} characters, not printed)"
+      fi
+    fi
+  fi
+fi
+
+[[ -n "${PAGERDUTY_TOKEN:-}" ]] || die "No PagerDuty API token available.
+
+      Store one once and this script finds it from then on:
+        scripts/set-pagerduty-token.sh
+
+      Or export PAGERDUTY_TOKEN for a single run.
 
       PagerDuty -> Integrations -> API Access Keys -> Create New API Key.
       Leave 'Read-only API Key' UNCHECKED: this configuration creates a
