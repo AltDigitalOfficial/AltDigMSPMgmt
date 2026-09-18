@@ -7,19 +7,19 @@ Description: >-
   the member baseline StackSet.
 
 # ---------------------------------------------------------------------------
-# Design doc 06 is missing
+# Where the alarm content lives
 # ---------------------------------------------------------------------------
-# Prompt 4.1 says "implement the standard alarm sets in the table in design
-# 06". design/ does not contain 06-observability.md, so there is no table
-# to implement and none has been invented.
+# This template is the MECHANISM only. The alarm content is
+# design/06a-alarm-specification.yaml, which is authoritative and is consumed
+# directly by the Lambda rather than transcribed — so changing an alarm is a
+# data edit and a republish, with no change to this template.
 #
-# What is built here is the MECHANISM, which is fully specified by the prompt
-# itself. The alarm content lives in instrumentation/alarm-sets.yaml and is
-# marked provisional; replacing it when 06 arrives is a data edit and a
-# republish, with no change to this template. That is exactly what the prompt's
-# "a configuration document, not a switch statement" instruction buys.
-#
-# Tracked as B-024.
+# That separation was the point of the prompt's "a configuration document, not
+# a switch statement" instruction, and it paid off on 2026-09-17: docs 06 and
+# 06a arrived after this was built and replacing the provisional alarm set was
+# a data swap. The interim instrumentation/alarm-sets.yaml was deleted at the
+# same time, because two copies of an alarm definition is the failure this
+# design exists to prevent. B-024 closed.
 #
 # ---------------------------------------------------------------------------
 # Config as the trigger, not CloudTrail
@@ -319,6 +319,15 @@ Resources:
                   - 'logs:CreateLogStream'
                   - 'logs:PutLogEvents'
                 Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/platform-instrumentation*'
+              # Thresholds that 06a deliberately keeps outside itself. Today
+              # that is questionnaire 7.4 at
+              # /platform/monitoring/acceptable-response-ms, written by the
+              # canary stack and used by alb-target-response-time — the alarm
+              # 06a says MUST derive from the customer's own answer rather than
+              # be hardcoded. Read-only and scoped to that prefix.
+              - Effect: Allow
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/monitoring/*'
       Tags:
         - { Key: platform-managed, Value: 'true' }
 

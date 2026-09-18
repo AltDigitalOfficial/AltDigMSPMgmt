@@ -1,0 +1,728 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — synthetic monitoring. One canary per tenant
+  service, run either by CloudWatch Synthetics or by a Fargate task wrapping an
+  existing Playwright suite. Both publish the same metrics, so the alarms below
+  are defined once and apply to either.
+
+# ---------------------------------------------------------------------------
+# Why one template with a runner switch, rather than two templates
+# ---------------------------------------------------------------------------
+# Prompt 4.3 requires the Fargate runner to publish "on the same metric names,
+# so the downstream alarm path is identical either way". Two templates would
+# each carry their own copy of the alarms and the claim would hold only for as
+# long as somebody remembered to edit both. Here the alarms sit outside every
+# Condition: there is one definition, and the runner is a parameter. The
+# identical path is a property of the file rather than a convention.
+#
+# The cost is a template with two conditional halves, most of which is inert on
+# any given deployment. That is the right trade — an inert resource is visible
+# in the template; a drifted second copy of an alarm is not.
+#
+# ---------------------------------------------------------------------------
+# Questionnaire 7.4 is used THREE times
+# ---------------------------------------------------------------------------
+# design/06 says twice — canary pass condition and SLA measurement condition.
+# design/06a adds the third at `alb-target-response-time`, whose
+# `threshold_source: questionnaire_7_4` says "MUST derive from questionnaire
+# field 7.4 ... Do not hardcode."
+#
+# The prompt says to make that explicit "so nobody changes one without the
+# other". Making it explicit in a comment would not survive contact with a
+# hurried edit, so it is structural instead: this template takes the value ONCE
+# as AcceptableResponseMs and writes it to
+#
+#     /platform/monitoring/acceptable-response-ms
+#
+# which is the only place any of the three consumers reads it from. The canary
+# script reads the SSM parameter, the SLA alarm below reads the same value
+# through !Ref, and the instrumentation Lambda resolves the ALB alarm's
+# threshold from that parameter. Changing it here changes all three; there is
+# no second place to forget.
+#
+# ---------------------------------------------------------------------------
+# Question 7.3 is free text and cannot be executed
+# ---------------------------------------------------------------------------
+# The questionnaire asks for a "success condition" as prose, and prose cannot
+# become an assertion without somebody translating it. Executing customer-
+# supplied text would be worse than useless — it would be a remote code
+# execution path into every tenant account, reachable through an intake form.
+#
+# So the structured form is narrow and deliberately dull: an expected status
+# code and a string that must appear in the body. Anything a tenant describes
+# that does not reduce to those two belongs in a Playwright suite and takes the
+# Fargate path, which is one of the reasons that path exists.
+#
+# The translation from 7.3 prose to these parameters is a HUMAN step at vesting
+# and is not yet wired into derive-vesting.py. B-034.
+
+Metadata:
+  cfn-lint:
+    config:
+      # W1030 only, and only because of AuthSecretArn.
+      #
+      # The parameter is optional — it is required when questionnaire 7.6 says
+      # the journey authenticates and meaningless otherwise — so its default is
+      # empty, and every use of it sits inside `!If [HasAuth, ...]`. cfn-lint
+      # resolves parameter defaults without regard to Conditions, so it checks
+      # the empty string against the ARN format of a statement that cannot
+      # deploy while the string is empty.
+      #
+      # Suppressed at template level because cfn-lint attributes the finding to
+      # the PARAMETER rather than to the resource, so a resource-scoped ignore
+      # never matches it. The cost is that a genuinely malformed ARN parameter
+      # in THIS template would not be caught; there is one ARN parameter here
+      # and it is this one. cfn-guard still runs over the file unchanged.
+      ignore_checks: [W1030]
+
+Parameters:
+
+  CanaryName:
+    Type: String
+    AllowedPattern: '^[a-z0-9-]{1,21}$'
+    Description: >-
+      Synthetics caps canary names at 21 characters and allows lowercase,
+      numbers and hyphens only. Also the CanaryName metric dimension, which is
+      why the Fargate path is constrained by the same rule even though nothing
+      in ECS cares — the dimension value must match for the alarms to work.
+
+  RunnerType:
+    Type: String
+    AllowedValues: [synthetics, fargate]
+    Default: synthetics
+    Description: >-
+      Questionnaire 7.5. `fargate` where the tenant already maintains a
+      Playwright suite; CloudWatch Synthetics has no Playwright runtime, so
+      reusing their suite means running it ourselves and reporting the result.
+
+  Endpoint:
+    Type: String
+    Description: 'Questionnaire 7.2. Full URL including scheme.'
+    AllowedPattern: '^https?://.+'
+
+  ExpectedStatus:
+    Type: Number
+    Default: 200
+    Description: 'Questionnaire 7.3, structured half one.'
+
+  BodyMustContain:
+    Type: String
+    Default: ''
+    Description: >-
+      Questionnaire 7.3, structured half two. Empty means status code only,
+      which is a weaker check than it looks: an error page served with 200 is
+      the common way a service fails while appearing healthy.
+
+  AcceptableResponseMs:
+    Type: Number
+    MinValue: 1
+    Description: >-
+      Questionnaire 7.4. Canary pass condition, SLA measurement condition, and
+      the ALB target-response-time alarm threshold. One number, three
+      consumers — see the header.
+
+  JourneyRequiresAuth:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: 'Questionnaire 7.6.'
+
+  AuthSecretArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Secrets Manager ARN holding the canary's credentials. Required when
+      JourneyRequiresAuth is true. The canary receives the ARN, never the
+      credential — Synthetics environment variables are stored and displayed in
+      plaintext, so a secret placed in one is a secret published to anyone with
+      read access to the canary.
+
+  ScheduleExpression:
+    Type: String
+    Default: 'rate(5 minutes)'
+
+  EnvironmentTier:
+    Type: String
+    AllowedValues: [dev, test, uat, prod]
+
+  ArtifactBucket:
+    Type: String
+    Description: 'Platform Tooling bucket holding the packaged canary script.'
+
+  ArtifactsBucketName:
+    Type: String
+    Description: >-
+      Where this canary writes its screenshots and HAR files. Created once per
+      account by canaries/00-canary-artifacts.yaml and shared by every canary
+      in the account, each under its own prefix.
+
+      Not created here: a bucket created by a stack that can fail is a stack
+      that cannot be retried, because the retained bucket then fails the next
+      create's existence check. See that template's header.
+
+  ArtifactKey:
+    Type: String
+    Description: 'Content-addressed key of the canary package.'
+
+  AlertTopicArn:
+    Type: String
+    Default: ''
+
+  LowUrgencyTopicArn:
+    Type: String
+    Default: ''
+
+  # --- Fargate-only -------------------------------------------------------
+  PlaywrightImageUri:
+    Type: String
+    Default: ''
+    Description: >-
+      The tenant's own test image. The platform does not build it and does not
+      inject anything into it — see the ResultsFunction comment for why.
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: ''
+
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: ''
+
+  TaskCpu:
+    Type: String
+    Default: '1024'
+
+  TaskMemory:
+    Type: String
+    Default: '2048'
+
+Conditions:
+  IsSynthetics: !Equals [!Ref RunnerType, synthetics]
+  IsFargate: !Equals [!Ref RunnerType, fargate]
+  HasAuth: !Equals [!Ref JourneyRequiresAuth, 'true']
+  SyntheticsWithAuth: !And [!Condition IsSynthetics, !Condition HasAuth]
+  FargateWithAuth: !And [!Condition IsFargate, !Condition HasAuth]
+  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+  # Canary failure is user-visible by definition, so unlike the generic alarm
+  # tiers UAT pages here: design/06 says "Production canary failure pages", and
+  # 06a already overrides UAT to page for total outage on the same reasoning —
+  # real users are in UAT.
+  LowUrgency: !And
+    - !Not [!Equals [!Ref LowUrgencyTopicArn, '']]
+    - !Or
+      - !Equals [!Ref EnvironmentTier, dev]
+      - !Equals [!Ref EnvironmentTier, test]
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # The single source for questionnaire 7.4
+  # -------------------------------------------------------------------------
+  AcceptableResponseParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /platform/monitoring/acceptable-response-ms
+      Type: String
+      Value: !Ref AcceptableResponseMs
+      Description: >-
+        Questionnaire 7.4. Read by the canary script as its pass condition and
+        by the instrumentation Lambda as the alb-target-response-time
+        threshold. The SLA alarm in this template uses the same value directly.
+        Do not set this by hand — it is owned by the canary stack so that the
+        three consumers cannot disagree.
+
+  # -------------------------------------------------------------------------
+  # Native CloudWatch Synthetics
+  # -------------------------------------------------------------------------
+  CanaryRole:
+    Type: AWS::IAM::Role
+    Condition: IsSynthetics
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CanaryExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:PutObject', 's3:GetBucketLocation']
+                # Scoped to this canary's prefix. Canaries in one account share
+                # a bucket, and one canary overwriting another's evidence is
+                # the kind of thing only noticed while relying on it.
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsBucketName}/${CanaryName}/*'
+              - Effect: Allow
+                Action: 's3:GetBucketLocation'
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsBucketName}'
+              - Effect: Allow
+                Action: ['kms:GenerateDataKey', 'kms:Decrypt']
+                # The artifacts bucket is SSE-KMS, so PutObject without this
+                # fails with AccessDenied naming S3 rather than KMS.
+                Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService': !Sub 's3.${AWS::Region}.amazonaws.com'
+              - Effect: Allow
+                Action: 's3:ListAllMyBuckets'
+                Resource: '*'
+              - Effect: Allow
+                Action: ['logs:CreateLogStream', 'logs:PutLogEvents', 'logs:CreateLogGroup']
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cwsyn-*'
+              - Effect: Allow
+                # Namespace-scoped. A canary that could write anywhere in
+                # CloudWatch could silence an alarm by publishing a healthy
+                # value on someone else's metric.
+                Action: 'cloudwatch:PutMetricData'
+                Resource: '*'
+                Condition:
+                  StringEquals: { 'cloudwatch:namespace': 'CloudWatchSynthetics' }
+              - Effect: Allow
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/monitoring/*'
+
+  # Secret access is a separate resource rather than a conditional statement
+  # inside the role above. cfn-guard cannot traverse an !If at list-item level:
+  # it reported the role as having no statements at all instead of checking the
+  # ones it has. A permission hidden that way passes every rule written to
+  # examine it, which is the worst way for a policy check to fail.
+  CanarySecretPolicy:
+    Type: AWS::IAM::Policy
+    Condition: SyntheticsWithAuth
+    Properties:
+      PolicyName: CanarySecret
+      Roles: [!Ref CanaryRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'secretsmanager:GetSecretValue'
+            Resource: !Ref AuthSecretArn
+
+  Canary:
+    Type: AWS::Synthetics::Canary
+    Condition: IsSynthetics
+    Properties:
+      Name: !Ref CanaryName
+      # Prefixed by canary name so one account-level bucket serves every
+      # canary without their artifacts interleaving.
+      ArtifactS3Location: !Sub 's3://${ArtifactsBucketName}/${CanaryName}'
+      ExecutionRoleArn: !GetAtt CanaryRole.Arn
+      # Pinned, and checked against `aws synthetics describe-runtime-versions`
+      # rather than taken from documentation: syn-python-selenium-4.1 was the
+      # version the design-era docs showed and it is now DEPRECATED, which
+      # surfaces as a 400 at stack creation with no hint that the cause is age.
+      # Runtimes deprecate on a rolling schedule, so this needs revisiting —
+      # B-036 carries the check.
+      RuntimeVersion: syn-python-selenium-12.0
+      StartCanaryAfterCreation: true
+      Schedule:
+        Expression: !Ref ScheduleExpression
+      # Explicit, because the default silently expires run data and the
+      # screenshots and HAR files are the triage aid design/06 singles out.
+      # Failures kept longer than successes: a failure is evidence, a success is
+      # a data point already captured in the metric.
+      SuccessRetentionPeriod: 7
+      FailureRetentionPeriod: 30
+      RunConfig:
+        # A hard stop well above AcceptableResponseMs, not derived from it.
+        # These measure different things: AcceptableResponseMs is the pass
+        # condition — exceed it and the run FAILS and reports a duration — while
+        # this is the point at which the run is killed and reports nothing.
+        # Deriving one from the other would turn every slow response into a
+        # missing data point instead of a recorded failure, which is the more
+        # useful of the two.
+        TimeoutInSeconds: 60
+        ActiveTracing: false
+        EnvironmentVariables:
+          # No credential appears here. Synthetics stores and displays these in
+          # plaintext; the canary gets an ARN and fetches the secret itself.
+          CANARY_NAME: !Ref CanaryName
+          ENDPOINT: !Ref Endpoint
+          EXPECTED_STATUS: !Ref ExpectedStatus
+          BODY_MUST_CONTAIN: !Ref BodyMustContain
+          RESPONSE_MS_PARAM: !Ref AcceptableResponseParam
+          AUTH_SECRET_ARN: !If [HasAuth, !Ref AuthSecretArn, '']
+      Code:
+        Handler: heartbeat.handler
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-canary, Value: !Ref CanaryName }
+
+  # -------------------------------------------------------------------------
+  # Fargate runner for existing Playwright suites
+  # -------------------------------------------------------------------------
+  # design/06 justifies this by saying "There is no native Playwright runtime in
+  # CloudWatch Synthetics". That is NO LONGER TRUE — as of 2026-09-18 the
+  # account offers syn-nodejs-playwright-8.0, and has offered some Playwright
+  # runtime since 2024-11. The design package predates it.
+  #
+  # The runner is kept anyway, on a narrower justification than the one the
+  # design gives. The native Playwright runtime runs a canary SCRIPT written to
+  # the Synthetics Playwright API; it does not run a tenant's existing suite
+  # with its own config, fixtures, projects and dependencies. Questionnaire 7.5
+  # asks whether there is an "existing test suite to reuse", and reuse is the
+  # word that matters — a suite that has to be rewritten to fit a runtime is not
+  # being reused.
+  #
+  # Where a tenant's suite is small enough to port, the native runtime is now
+  # the better answer: no cluster, no image to maintain, and screenshots and HAR
+  # capture for free. B-035 covers adding it as a third RunnerType.
+  #
+  # The platform runs the tenant's image unmodified and reads the result from
+  # the task's exit code. No wrapper is injected and no entrypoint is
+  # overridden.
+  #
+  # The alternative — mounting a reporting shim into their container — was
+  # rejected because it makes the platform a participant in their test run. A
+  # shim that fails takes their suite down; a shim that needs their Node version
+  # makes their image upgrade our problem. Exit code zero is the one contract
+  # every test runner already honours, Playwright included.
+  #
+  # What this costs: granularity. We learn pass or fail and how long it took,
+  # not which of forty assertions failed. That detail is in their own test
+  # output, which is where someone debugging a failed suite is going to look
+  # regardless.
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: IsFargate
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  # Same reasoning as CanarySecretPolicy. The ECS agent reads the secret to
+  # inject it, so this is on the EXECUTION role; the task role below gets
+  # nothing.
+  TaskExecutionSecretPolicy:
+    Type: AWS::IAM::Policy
+    Condition: FargateWithAuth
+    Properties:
+      PolicyName: CanarySecret
+      Roles: [!Ref TaskExecutionRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'secretsmanager:GetSecretValue'
+            Resource: !Ref AuthSecretArn
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Condition: IsFargate
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      # No Policies key at all, rather than an empty list. The tenant's test
+      # image runs under this role and is trusted with nothing — in particular
+      # it cannot publish its own metrics, because a suite able to write its own
+      # SuccessPercent could report itself healthy while failing.
+      #
+      # An empty list says the same thing to CloudFormation and something
+      # different to cfn-guard, which read it as a policy it could not inspect.
+
+  CanaryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: IsFargate
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/platform/canary/${CanaryName}'
+      RetentionInDays: 30
+      # The tenant's own test output lands here, and a failing UI test prints
+      # whatever was on the page.
+      KmsKeyId: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+
+  CanaryCluster:
+    Type: AWS::ECS::Cluster
+    Condition: IsFargate
+    Properties:
+      ClusterName: !Sub 'platform-canary-${CanaryName}'
+      ClusterSettings:
+        - { Name: containerInsights, Value: enabled }
+
+  CanaryTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: IsFargate
+    Properties:
+      Family: !Sub 'platform-canary-${CanaryName}'
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: suite
+          Image: !Ref PlaywrightImageUri
+          Essential: true
+          Environment:
+            - { Name: CANARY_ENDPOINT, Value: !Ref Endpoint }
+            - { Name: CANARY_ACCEPTABLE_RESPONSE_MS, Value: !Ref AcceptableResponseMs }
+          Secrets: !If
+            - HasAuth
+            # Injected by the ECS agent, not by the task. The credential never
+            # passes through a platform-authored process.
+            - [{ Name: CANARY_AUTH, ValueFrom: !Ref AuthSecretArn }]
+            - !Ref 'AWS::NoValue'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CanaryLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: suite
+
+  SuiteScheduleRole:
+    Type: AWS::IAM::Role
+    Condition: IsFargate
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunCanaryTask
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'ecs:RunTask'
+                Resource: !Ref CanaryTaskDefinition
+                Condition:
+                  ArnEquals: { 'ecs:cluster': !GetAtt CanaryCluster.Arn }
+              - Effect: Allow
+                Action: 'iam:PassRole'
+                Resource:
+                  - !GetAtt TaskRole.Arn
+                  - !GetAtt TaskExecutionRole.Arn
+                Condition:
+                  StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' }
+
+  SuiteScheduleRule:
+    Type: AWS::Events::Rule
+    Condition: IsFargate
+    Properties:
+      Name: !Sub 'platform-canary-${CanaryName}'
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: suite
+          Arn: !GetAtt CanaryCluster.Arn
+          RoleArn: !GetAtt SuiteScheduleRole.Arn
+          EcsParameters:
+            TaskDefinitionArn: !Ref CanaryTaskDefinition
+            LaunchType: FARGATE
+            TaskCount: 1
+            NetworkConfiguration:
+              AwsVpcConfiguration:
+                Subnets: !Ref SubnetIds
+                SecurityGroups: !Ref SecurityGroupIds
+                AssignPublicIp: DISABLED
+
+  # The half that makes the two runners equivalent: it turns an ECS task result
+  # into the same metrics Synthetics publishes, in the same namespace, on the
+  # same dimension. Everything downstream — the alarms below, the response
+  # engine, PagerDuty — cannot tell which runner produced them, which is the
+  # point.
+  ResultsRole:
+    Type: AWS::IAM::Role
+    Condition: IsFargate
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: PublishCanaryMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'cloudwatch:PutMetricData'
+                Resource: '*'
+                Condition:
+                  StringEquals: { 'cloudwatch:namespace': 'CloudWatchSynthetics' }
+              - Effect: Allow
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/monitoring/*'
+
+  ResultsFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsFargate
+    Properties:
+      FunctionName: !Sub 'platform-canary-results-${CanaryName}'
+      Runtime: python3.12
+      Handler: results.handler
+      Role: !GetAtt ResultsRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          CANARY_NAME: !Ref CanaryName
+          TASK_DEFINITION_FAMILY: !Sub 'platform-canary-${CanaryName}'
+          RESPONSE_MS_PARAM: !Ref AcceptableResponseParam
+
+  TaskStateChangeRule:
+    Type: AWS::Events::Rule
+    Condition: IsFargate
+    Properties:
+      Name: !Sub 'platform-canary-result-${CanaryName}'
+      EventPattern:
+        source: ['aws.ecs']
+        detail-type: ['ECS Task State Change']
+        detail:
+          clusterArn: [!GetAtt CanaryCluster.Arn]
+          lastStatus: ['STOPPED']
+      State: ENABLED
+      Targets:
+        - Id: results
+          Arn: !GetAtt ResultsFunction.Arn
+
+  ResultsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsFargate
+    Properties:
+      FunctionName: !GetAtt ResultsFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TaskStateChangeRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Alarms — defined ONCE, outside every Condition
+  # -------------------------------------------------------------------------
+  # Not in design/06a, deliberately. 06a is consumed by the instrumentation
+  # Lambda, which alarms resources AWS Config discovers. A Fargate-run canary is
+  # not a discoverable resource — there is no AWS::Synthetics::Canary to find —
+  # so putting the canary alarms in 06a would cover one runner and not the
+  # other, and would do it silently.
+  #
+  # AWS::Synthetics::Canary is therefore listed in 06a's resource_types_no_alarms
+  # so the instrumentation Lambda does not also alarm the native canaries and
+  # produce two alarms per canary with different names. See docs/deviations.md.
+
+  CanaryFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'platform-canary-${CanaryName}-failed'
+      AlarmDescription: !Sub >-
+        The synthetic check for ${CanaryName} failed against ${Endpoint}.
+        Generic alarms say a thing is running; this one says it does not work.
+        Treat as user-visible until proven otherwise.
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Ref CanaryName
+      Statistic: Average
+      Period: 300
+      # Two periods, not one. A single failed run is frequently the canary's own
+      # network path rather than the service — the design's own warning that
+      # nothing should page for something a human cannot act on applies to the
+      # monitoring as much as to the workload.
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      # A canary that has stopped reporting is a canary that is not checking.
+      # Treating that as healthy is the specific failure synthetic monitoring
+      # exists to avoid.
+      TreatMissingData: breaching
+      AlarmActions: !If
+        - LowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If
+        - LowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+
+  # The SLA measurement condition. Same number as the canary's pass condition,
+  # by construction rather than by convention.
+  #
+  # Synthetics only, and on ResponseTimeMs rather than the built-in Duration.
+  #
+  # Duration measures the whole canary RUN — container start, boto3 init, the
+  # step, teardown. On the first live run against a service answering in 185ms,
+  # Duration reported 10,100ms. Thresholding that against the tenant's agreed
+  # response time alarms on our own cold start, and reports it to them as their
+  # latency. ResponseTimeMs is published by the canary script and is the request
+  # and nothing else.
+  #
+  # The Fargate runner has no equivalent and deliberately gets no SLA alarm.
+  # Task wall-clock includes Fargate provisioning, so it has the same defect as
+  # Duration and worse; and the platform does not instrument the tenant's suite,
+  # so it cannot see the suite's own timings. Questionnaire 7.4 is instead
+  # enforced INSIDE the suite — the task definition passes it as
+  # CANARY_ACCEPTABLE_RESPONSE_MS, the suite fails itself when it is exceeded,
+  # and that surfaces through SuccessPercent and CanaryFailedAlarm above.
+  #
+  # So the failure path is identical for both runners, as prompt 4.3 requires,
+  # and the latency path is honest about only one of them being able to measure
+  # it. A Duration-based alarm on the Fargate side would have looked identical
+  # and reported a number that was mostly container startup.
+  CanarySlaAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsSynthetics
+    Properties:
+      AlarmName: !Sub 'platform-canary-${CanaryName}-slow'
+      AlarmDescription: !Sub >-
+        ${CanaryName} answered, but slower than the agreed acceptable response
+        time of ${AcceptableResponseMs}ms (questionnaire 7.4). This is the SLA
+        measurement condition and the same value the canary uses to pass or
+        fail a run.
+      Namespace: CloudWatchSynthetics
+      MetricName: ResponseTimeMs
+      Dimensions:
+        - Name: CanaryName
+          Value: !Ref CanaryName
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref AcceptableResponseMs
+      ComparisonOperator: GreaterThanThreshold
+      # Not breaching: a missing ResponseTimeMs means no run completed, which
+      # CanaryFailedAlarm above already reports. Two alarms for one cause is how
+      # a pager gets ignored.
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - LowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+
+Outputs:
+  CanaryName:
+    Value: !Ref CanaryName
+  RunnerType:
+    Value: !Ref RunnerType
+  AcceptableResponseParam:
+    Description: 'The single source for questionnaire 7.4.'
+    Value: !Ref AcceptableResponseParam
+  MetricNamespace:
+    Description: >-
+      Identical for both runners. CloudWatchSynthetics is not an AWS/ reserved
+      namespace, so the Fargate results Lambda can publish into it.
+    Value: CloudWatchSynthetics

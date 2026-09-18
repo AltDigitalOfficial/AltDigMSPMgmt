@@ -120,6 +120,26 @@ resource_types_no_alarms:
   - AWS::Logs::MetricFilter
   - AWS::SSM::Association
 
+  # Canaries are alarmed by canaries/10-canary.yaml, not from here.
+  #
+  # Added 2026-09-18 while building prompt 4.3. The reason is not that a canary
+  # is unimportant — it is the most important thing in this file, being the only
+  # check that says the service WORKS rather than that it is running.
+  #
+  # The reason is that half of them are invisible to this mechanism. A tenant
+  # with an existing Playwright suite is monitored by a Fargate task publishing
+  # the same metrics, and there is no AWS::Synthetics::Canary resource for AWS
+  # Config to discover. Alarming canaries from here would cover the native
+  # runner and silently miss the Fargate one, and prompt 4.3 requires the
+  # downstream alarm path to be identical either way. So both are alarmed by the
+  # canary template, which is the one place that knows about both.
+  #
+  # Listed here rather than omitted so the instrumentation Lambda treats a
+  # canary as "known, deliberately not instrumented" instead of raising an
+  # exception for a type it does not recognise — and so that it does not create
+  # a second alarm, with a different name, on the native canaries only.
+  - AWS::Synthetics::Canary
+
   # AWS Config's own pseudo-resources. Not resources at all — they are Config's
   # records OF resources, emitted once per rule evaluation, so they arrive at
   # the rate Config evaluates rather than the rate infrastructure changes.

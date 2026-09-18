@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — one canary artifacts bucket per account, shared
+  by every canary deployed into it. Deploy once per account, before any canary.
+
+# ---------------------------------------------------------------------------
+# Why this is a separate stack, and separate from the canaries themselves
+# ---------------------------------------------------------------------------
+# It was a resource inside canaries/10-canary.yaml until 2026-09-18, when the
+# first deployment failed on the canary runtime version and could not then be
+# retried. The sequence is worth recording because it applies to any bucket a
+# template creates:
+#
+#   1. Stack create fails on an unrelated resource.
+#   2. Rollback runs. The bucket carries DeletionPolicy: Retain, so it stays.
+#   3. Every retry fails AWS::EarlyValidation::ResourceExistenceCheck, because
+#      the bucket it wants to create already exists.
+#
+# The stack is now unretryable and the error names neither the bucket nor the
+# retain policy — it says "Validation failed with 1 error(s)", with no resource
+# events at all, because the failure happens before provisioning starts. Across
+# a StackSet that is one poisoned account per failed rollout, each needing a
+# manual bucket deletion before it can be retried.
+#
+# Dropping Retain is not the fix. CloudFormation cannot delete a non-empty
+# bucket, so the stack would then fail on DELETE instead of on CREATE — the same
+# trap moved to the other end.
+#
+# The fix is that the bucket outlives the canaries. One per account, created
+# once, shared by every canary through a prefix. Canary stacks come and go as
+# tenant services come and go; the bucket does not, so its lifecycle stops
+# interacting with theirs.
+#
+# It is also just better: an account with six monitored services had six buckets
+# under the old arrangement, for no reason anybody could state.
+
+Parameters:
+  LogsKeyArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Defaults to the platform storage key alias in this account.
+
+Conditions:
+  UseDefaultKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  CanaryArtifacts:
+    Type: AWS::S3::Bucket
+    # Retain is correct HERE, where it was wrong in the canary stack. This stack
+    # holds one resource and will not fail partway through creating it, so the
+    # retry trap above cannot arise; and on deliberate teardown the run
+    # artifacts of a service being decommissioned are the thing most likely to
+    # be wanted afterwards.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-canary-artifacts-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !If
+                - UseDefaultKey
+                - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-storage'
+                - !Ref LogsKeyArn
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          # Screenshots and HAR files are a copy of whatever the canary saw,
+          # including any authenticated page it reached. Useful for triage for
+          # about as long as an incident stays open; a liability indefinitely.
+          - Id: expire-run-artifacts
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  CanaryArtifactsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CanaryArtifacts
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt CanaryArtifacts.Arn
+              - !Sub '${CanaryArtifacts.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': 'false' }
+
+Outputs:
+  BucketName:
+    Description: 'Pass to canaries/10-canary.yaml as ArtifactsBucketName.'
+    Value: !Ref CanaryArtifacts
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'

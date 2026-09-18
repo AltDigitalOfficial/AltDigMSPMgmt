@@ -101,6 +101,8 @@ ACCEPTABLE_RESPONSE_MS = os.environ.get("ACCEPTABLE_RESPONSE_MS", "")
 
 cloudwatch = boto3.client("cloudwatch")
 logs = boto3.client("logs")
+# Thresholds 06a deliberately keeps outside itself — see THRESHOLD_SOURCES.
+ssm = boto3.client("ssm")
 
 with open(SPEC_PATH, encoding="utf-8") as fh:
     SPEC = json.load(fh)
@@ -220,6 +222,45 @@ def _lambda_cfg(resource_id):
         return boto3.client("lambda").get_function_configuration(FunctionName=resource_id)
     except (ClientError, KeyError):
         return None
+
+
+# Where a threshold_source reads from. One entry today; a dict rather than an
+# `if` because 06a can add sources without this becoming a chain of special
+# cases, and because an UNKNOWN source must be distinguishable from a known one
+# that happens to be missing.
+THRESHOLD_SOURCES = {
+    # Questionnaire 7.4, written by the canary stack and read by all three
+    # consumers. See canaries/10-canary.yaml.
+    "questionnaire_7_4": "/platform/monitoring/acceptable-response-ms",
+}
+
+
+def threshold_from_source(source):
+    """Resolve a threshold the spec deliberately keeps outside itself.
+
+    Returns (value, reason_if_none). Seconds, not milliseconds: the parameter
+    holds questionnaire 7.4 in ms because that is the unit the canary's
+    Duration metric uses, while alb-target-response-time is `unit: Seconds`.
+    Converting here rather than storing both keeps one source of truth and puts
+    the conversion where the unit mismatch actually is.
+    """
+    param = THRESHOLD_SOURCES.get(source)
+    if param is None:
+        return None, (f"06a names threshold_source '{source}', which this Lambda "
+                      "does not know how to resolve. Add it to THRESHOLD_SOURCES "
+                      "rather than hardcoding the value into the spec.")
+    try:
+        raw = ssm.get_parameter(Name=param)["Parameter"]["Value"]
+    except Exception as exc:
+        return None, (f"{param} could not be read ({type(exc).__name__}). It is "
+                      "written by the canary stack from questionnaire 7.4; an "
+                      "account with no canary deployed has not answered that "
+                      "question, so this alarm cannot be created yet.")
+    try:
+        ms = int(raw)
+    except ValueError:
+        return None, f"{param} holds '{raw}', which is not an integer count of ms."
+    return ms / 1000.0, None
 
 
 def resolve_threshold(spec, resource_type, resource_id, tier_value):
@@ -489,6 +530,30 @@ def plan_alarms(resource_type, resource_id):
             continue
 
         tier_value = by_tier[ENVIRONMENT_TIER]
+
+        # A null tier value with a threshold_source is not an unset [TUNE]
+        # value — it is a value that lives somewhere else on purpose.
+        #
+        # 06a marks alb-target-response-time with
+        # `threshold_source: questionnaire_7_4` and the instruction "MUST derive
+        # from questionnaire field 7.4 ... Do not hardcode. That value is used
+        # THREE times: canary timeout, SLA pass condition, and this alarm."
+        #
+        # Until this was wired the alarm raised threshold-unset on every ALB in
+        # every account, which is both noise and a real gap: the one alarm the
+        # spec ties to the customer's own definition of acceptable was the one
+        # alarm that never got created.
+        if tier_value is None and spec.get("threshold_source"):
+            tier_value, why = threshold_from_source(spec["threshold_source"])
+            if tier_value is None:
+                record_exception("threshold-source-unavailable", {
+                    "alarm_id": aid, "resource_type": resource_type,
+                    "resource_id": resource_id,
+                    "threshold_source": spec["threshold_source"],
+                    "message": why})
+                classes["exceptions"].append(
+                    {"alarm": aid, "reason": "threshold-source-unavailable"})
+                continue
 
         # Present but null -> [TUNE] nobody has set. Exception, not a skip.
         if tier_value is None:

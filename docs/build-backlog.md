@@ -1107,3 +1107,86 @@ the sweep recovers.
 **Revisit when** — anything else in the platform escalates from a schedule. The
 general rule this is an instance of: *an else-branch on a timer needs
 deduplication that an else-branch on an event does not.*
+
+---
+
+## B-034 · Questionnaire 7.3 is free text and nothing translates it
+
+**Open** — 2026-09-18, prompt 4.3.
+
+7.3 asks for a "success condition" in prose. `canaries/10-canary.yaml` takes it
+as two structured parameters instead — `ExpectedStatus` and `BodyMustContain` —
+because executing customer-supplied text would be a remote code execution path
+into a tenant account reachable through an intake form.
+
+The translation from prose to those two parameters is currently a human step at
+vesting and is **not wired into `scripts/derive-vesting.py`**. A vested client
+today produces no canary parameters, so the canary stack is deployed by hand.
+
+**Revisit when** — the first real tenant is vested. The likely answer is that
+7.3 gains structure in the questionnaire itself rather than being parsed, since
+the parse would be guesswork on a field the design already calls the one
+customers answer badly.
+
+---
+
+## B-035 · CloudWatch Synthetics now has a native Playwright runtime
+
+**Open** — 2026-09-18.
+
+design/06 says "There is no native Playwright runtime in CloudWatch Synthetics"
+and builds the Fargate runner on that basis. That is no longer true:
+`syn-nodejs-playwright-8.0` is available, and some Playwright runtime has been
+since 2024-11. The design package predates it.
+
+The Fargate runner is still justified, on a narrower basis than the design
+gives: the native runtime runs a canary *script* written to the Synthetics
+Playwright API, not a tenant's existing suite with its own config, fixtures and
+dependencies. Questionnaire 7.5 asks about a suite "to reuse", and a suite that
+must be rewritten is not being reused.
+
+**Revisit when** — a tenant turns up whose suite is small enough to port. A
+third `RunnerType` would drop the cluster, the image and the results Lambda, and
+get screenshots and HAR capture for free.
+
+---
+
+## B-036 · Synthetics runtime versions deprecate on a rolling schedule
+
+**Open** — 2026-09-18.
+
+`syn-python-selenium-4.1` was the version the design-era documentation showed.
+It is deprecated, and the failure is a 400 at stack creation reading
+*"Deprecated runtime version specified"* — clear once seen, invisible until the
+first deploy.
+
+`canaries/10-canary.yaml` now pins `syn-python-selenium-12.0`, verified against
+`aws synthetics describe-runtime-versions`. Nothing watches for that pin going
+stale, and the symptom will be that new canary deployments fail while existing
+canaries keep running — so it will surface during an onboarding rather than in
+monitoring.
+
+**Revisit when** — building the provisioning saga (Phase 12), which is the
+natural home for a precondition check.
+
+---
+
+## B-037 · Fargate canary runner is built but untested
+
+**Open** — 2026-09-18.
+
+`RunnerType=fargate` is complete in the template — cluster, task definition,
+scheduled RunTask, and the results Lambda that turns an exit code into the same
+metrics — and `results.py` is unit-tested across all five branches (pass, fail,
+killed with no exit code, missing suite container, missing timestamps).
+
+It has **never been deployed**, because it needs a tenant Playwright image and
+there is no tenant. The synthetics path is deployed and verified in the canary
+account; the Fargate path is code review and unit tests only.
+
+Specifically unverified: whether the ECS Task State Change event carries
+`containers[].exitCode` in the shape `results.py` expects, and whether the
+`awsvpc` networking parameters are right for a private subnet with no public IP.
+
+**Revisit when** — the first tenant with an existing suite, or sooner with a
+throwaway image that exits 0 and 1 on alternate runs.

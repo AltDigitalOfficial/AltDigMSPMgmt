@@ -757,3 +757,32 @@ most important constraint"* in prompt 6.1 and was unreadable until today.
 `prompts/`, `diagrams/` and `truveon/` subdirectories the prompts also assume
 are NOT being created: the package is flat, it works flat, and inventing
 subdirectories for four files would trade one layout mismatch for another.
+
+---
+
+## Canary alarms live in the canary template, not in design/06a
+
+**Accepted** — 2026-09-18, prompt 4.3.
+
+06a is authoritative for alarm configuration and is consumed directly by the
+instrumentation Lambda, which alarms resources AWS Config discovers. Canary
+alarms are defined in `canaries/10-canary.yaml` instead.
+
+**Why.** Half the canaries are invisible to that mechanism. A tenant with an
+existing Playwright suite is monitored by a Fargate task publishing the same
+metrics, and there is no `AWS::Synthetics::Canary` for Config to find. Alarming
+canaries from 06a would cover the native runner and silently miss the Fargate
+one — and prompt 4.3 requires the downstream alarm path to be identical either
+way.
+
+`AWS::Synthetics::Canary` is therefore added to 06a's `resource_types_no_alarms`,
+which is the mechanism that file defines for "known, deliberately not
+instrumented". Without it the instrumentation Lambda would either raise an
+exception for an unrecognised type, or create a second alarm with a different
+name on the native canaries only.
+
+**What this costs.** Canary alarm thresholds are not tier-keyed the way 06a's
+are. They are instead keyed on the questionnaire: 7.4 for latency, and pass/fail
+for availability. That is arguably more correct for a canary — a synthetic check
+either reproduces the user's experience or it does not — but it is a second
+convention, and a reader looking only at 06a will not find canary alarms.

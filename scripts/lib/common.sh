@@ -262,7 +262,16 @@ zip_deterministic() {
   "${py}" - "$(win_path "${build}")" <<'ZIPEOF'
 import sys, zipfile, pathlib
 build = pathlib.Path(sys.argv[1])
-names = sorted(f.name for f in build.iterdir() if f.is_file() and f.name != "package.zip")
+# Recursive. CloudWatch Synthetics requires a Python canary at python/<name>.py
+# inside the zip, so a flat walk silently produced a package the runtime could
+# not find a handler in. Sorted relative POSIX paths keep the archive
+# byte-identical across runs and across Windows and Linux, which is what makes
+# the content hash a usable cache key.
+names = sorted(
+    f.relative_to(build).as_posix()
+    for f in build.rglob("*")
+    if f.is_file() and f.name != "package.zip"
+)
 with zipfile.ZipFile(build / "package.zip", "w", zipfile.ZIP_DEFLATED) as z:
     for name in names:
         info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
@@ -496,13 +505,27 @@ normalise_phone() {
 # 'could not be processed by glob.glob', which reads like a bad pattern rather
 # than a bad path, and cfn-lint still exits 0 on it under some invocations —
 # so a lint run could report success having linted nothing at all.
+# Discovery is by CONTENT, not by a directory list.
+#
+# It was `for d in org identity baseline` until 2026-09-18, which meant
+# security/, alerting/, registry/, reporting/ and vesting/ had never been linted
+# or guarded — eleven of sixteen templates checked, and the pre-commit hook
+# reporting clean the whole time. The same fault was found and fixed in
+# validate.sh a day earlier and left here, which is the argument for one
+# implementation rather than two: fixing a bug in a copy leaves the bug.
+#
+# A directory list is a thing to remember, and remembering is the failure mode
+# these scripts exist to remove, so it cannot be part of the mechanism.
+# design/ is excluded because it holds source material, including a YAML alarm
+# specification that is not a template.
 find_templates() {
-  local d
-  for d in org identity baseline; do
-    [[ -d "${REPO_ROOT}/${d}" ]] || continue
-    find "${REPO_ROOT}/${d}" \( -name '*.yaml' -o -name '*.yml' \) -print
-  done | sort | while read -r t; do printf '%s
-' "$(win_path "${t}")"; done
+  find "${REPO_ROOT}"     -type d \( -name .git -o -name design -o -name node_modules \) -prune -o     -type f \( -name '*.yaml' -o -name '*.yml' \) -print   | sort | while read -r t; do
+      # head, not grep over the whole file: the marker is required to be on the
+      # first line, so this cannot match an incidental mention in a comment.
+      head -n 5 "${t}" | grep -q 'AWSTemplateFormatVersion' || continue
+      printf '%s
+' "$(win_path "${t}")"
+    done
 }
 
 cfn_validate() {
