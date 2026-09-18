@@ -128,6 +128,17 @@ Parameters:
 
       Empty leaves them actionless, which was the state before this existed.
 
+  ToolingAccountId:
+    Type: String
+    Default: ''
+    Description: >-
+      Platform Tooling account, which runs the instrumentation digest and
+      therefore needs to READ this account's alarms and exception log.
+
+      Empty creates no reader role at all. That is the safe default: a
+      cross-account trust should exist because someone passed the account id,
+      not because a parameter was forgotten.
+
   ExceptionRetentionDays:
     Type: Number
     Default: 365
@@ -152,6 +163,8 @@ Conditions:
   # production is worth waking someone for: a platform alarm modified by hand
   # is a security-relevant act. The same event in a dev sandbox is worth
   # knowing and is not worth a phone call.
+  HasTooling: !Not [!Equals [!Ref ToolingAccountId, '']]
+
   MetaAlarmsLowUrgency: !And
     - !Not [!Equals [!Ref LowUrgencyTopicArn, '']]
     - !Or
@@ -381,6 +394,62 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt ResourceCreationRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Digest reader
+  # -------------------------------------------------------------------------
+  # The instrumentation digest runs centrally in Platform Tooling and reads
+  # each member account through this role.
+  #
+  # READ ONLY, and narrowly. It is emphatically not
+  # OrganizationAccountAccessRole: a digest needs to list alarms and read one
+  # log group, and granting administrator access to send an email would put a
+  # standing cross-account admin path into every member account for the
+  # convenience of a daily report.
+  #
+  # The trust is to the Tooling ACCOUNT rather than to a specific role in it,
+  # which is the looser of the two options. Tightening it to a named role would
+  # couple every member account's baseline to a role name in another account —
+  # so a rename there would silently break the digest everywhere, and the
+  # symptom would be an absent email nobody notices. The account boundary is
+  # the control that matters here; Tooling is a platform account with no
+  # workloads.
+  DigestReaderRole:
+    Type: AWS::IAM::Role
+    Condition: HasTooling
+    Properties:
+      RoleName: PlatformDigestReader
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:root'
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadInstrumentationState
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # DescribeAlarms has no resource-level permissions, so '*' is the
+              # only expressible form. It is a read of alarm configuration and
+              # state; there is nothing sensitive in it that the account owner
+              # does not already share with the platform.
+              - Effect: Allow
+                Action: 'cloudwatch:DescribeAlarms'
+                Resource: '*'
+              # Scoped to the exception group specifically. The digest reports
+              # what could not be instrumented; it has no business reading
+              # application logs, which is where regulated data would be.
+              - Effect: Allow
+                Action:
+                  - 'logs:FilterLogEvents'
+                  - 'logs:GetLogEvents'
+                Resource:
+                  - !Sub '${ExceptionLogGroup.Arn}'
+                  - !Sub '${ExceptionLogGroup.Arn}:*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
 
   # -------------------------------------------------------------------------
   # Drift detection

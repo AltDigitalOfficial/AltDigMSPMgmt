@@ -242,6 +242,45 @@ get_param() {
     --query Parameter.Value --output text 2>/dev/null | no_cr || true
 }
 
+# --- lambda packaging ------------------------------------------------------
+#
+# publish_artifact <build_dir> <key_prefix> <bucket> -> prints the object key
+#
+# Zips with python rather than zip(1): Git for Windows does not ship zip, and
+# more importantly the archive must be DETERMINISTIC. The object key is a hash
+# of the package so that identical input produces an identical key — which is
+# what stops CloudFormation missing an update and stops a no-op publish
+# creating a new object. A zip stores each entry's mtime, so the same source
+# zipped twice hashes differently and content-addressing degrades into "a new
+# key every run". Fixed date_time and sorted entries remove both.
+#
+# Shared rather than copied. Two publish scripts existed with the same thirty
+# lines, which is the arrangement where one gets a fix and the other does not.
+zip_deterministic() {
+  local build="$1"
+  local py; py="$(command -v python || command -v python3)"
+  "${py}" - "$(win_path "${build}")" <<'ZIPEOF'
+import sys, zipfile, pathlib
+build = pathlib.Path(sys.argv[1])
+names = sorted(f.name for f in build.iterdir() if f.is_file() and f.name != "package.zip")
+with zipfile.ZipFile(build / "package.zip", "w", zipfile.ZIP_DEFLATED) as z:
+    for name in names:
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = 0o644 << 16
+        z.writestr(info, (build / name).read_bytes())
+print(f"  {len(names)} file(s): {', '.join(names)}")
+ZIPEOF
+}
+
+package_hash() {
+  local py; py="$(command -v python || command -v python3)"
+  "${py}" -c "
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:16])
+" "$(win_path "$1")"
+}
+
 # --- organizations ---------------------------------------------------------
 
 org_exists() {

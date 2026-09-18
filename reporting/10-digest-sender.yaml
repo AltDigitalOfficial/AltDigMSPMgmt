@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — instrumentation digest sender. Batched, per
+  account, to the application owner's named contact. Deployed to the Platform
+  Tooling account.
+
+# ---------------------------------------------------------------------------
+# Prerequisite: a verified SES identity
+# ---------------------------------------------------------------------------
+# SES will not send from an unverified domain, and verifying altdigital.ai
+# requires DNS records that only someone with access to the zone can add. That
+# is an operator action, not something this template can do.
+#
+# Until it exists, deploy with DigestSender empty: the Lambda runs, gathers,
+# renders, and logs what it would have sent without calling SES. That is a
+# genuinely useful state — the content can be reviewed before a single message
+# reaches a client's technical contact, and getting that wrong in front of a
+# customer is harder to undo than a missing email.
+#
+# ---------------------------------------------------------------------------
+# Why this is central and not per-account
+# ---------------------------------------------------------------------------
+# One SES identity, one sending domain, one reputation. A sender in every
+# member account would need a verified identity per tenant — and SES sending
+# reputation is per-identity, so a tenant whose contact has rotted would be
+# quietly damaging a reputation nobody is watching.
+#
+# It also puts the registry lookup local: Tooling holds the registry, which is
+# where the contacts are.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+    Description: Artifact bucket holding the digest package.
+
+  ArtifactKey:
+    Type: String
+    Description: >-
+      Content-addressed package key. The hash is in the key because
+      CloudFormation compares S3Key to decide whether to update a function.
+
+  RegistryTable:
+    Type: String
+    Default: platform-registry
+    Description: Registry table. Supplies the account list and the contacts.
+
+  DigestSender:
+    Type: String
+    Default: ''
+    Description: >-
+      Verified SES address messages are sent FROM, e.g.
+      platform@altdigital.ai.
+
+      Empty puts the Lambda in a report-only mode: it gathers and renders and
+      logs, and calls no SES API. Deliberately the default — the first digest a
+      client's technical contact receives should be one somebody has read.
+
+  DigestCc:
+    Type: String
+    Default: ''
+    Description: >-
+      AltDigital address CC'd on every digest.
+
+      Design doc 06: "The CC to AltDigital means a bounce or a departed contact
+      is visible to us rather than lost." Without it a rotted contact is
+      invisible — the send succeeds, the mailbox is gone, and the evidence
+      trail says we communicated when we did not.
+
+  WindowHours:
+    Type: Number
+    Default: 24
+    AllowedValues: [24, 168]
+    Description: >-
+      Digest window. 24 for daily, 168 for weekly. Design doc 06 allows either
+      per account; the schedule below must be changed to match.
+
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(0 13 ? * MON-FRI *)'
+    Description: >-
+      When the digest runs. Default 13:00 UTC on weekdays — morning in US
+      Central, and deliberately NOT a weekend: a digest arriving on Saturday is
+      read on Monday alongside Monday's, which is how two get skimmed as one.
+
+  EvidenceBucket:
+    Type: String
+    Default: ''
+    Description: >-
+      Object Lock archive receiving the send records.
+
+      Prompt 4.4 wants these in Truveon with timestamp and recipient. Truveon
+      does not exist, so they go to the immutable archive — arguably their
+      right home regardless, since the record is the evidence that monitoring
+      requirements were communicated and an auditor will want it unalterable.
+      The Truveon hand-off stays outstanding rather than silently skipped.
+
+Conditions:
+  HasSender: !Not [!Equals [!Ref DigestSender, '']]
+
+Resources:
+
+  # Platform Tooling has no logs key of its own — alias/platform-logs is
+  # created by the MEMBER baseline, which does not reach platform accounts. So
+  # one is created here, under the same alias, so the convention holds
+  # everywhere and a future reporting stack in this account has a key to use.
+  LogsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts platform log groups in the Tooling account
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          # CloudWatch Logs encrypts with the key on the service's own behalf,
+          # so the grant is to the regional logs service principal and scoped
+          # by the log group ARN it is acting for. Without the EncryptionContext
+          # condition this would let the service encrypt for any log group in
+          # the account.
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal: { Service: !Sub 'logs.${AWS::Region}.amazonaws.com' }
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  LogsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-logs
+      TargetKeyId: !Ref LogsKey
+
+  # -------------------------------------------------------------------------
+  # Bounce handling
+  # -------------------------------------------------------------------------
+  # Prompt 4.4: "a bounced digest is a finding, because it means the contact
+  # has rotted."
+  #
+  # Without a configuration set SES accepts the message, the recipient's server
+  # rejects it, and nothing here ever learns. The send looks successful, the
+  # evidence record says a digest was delivered, and the claim that monitoring
+  # requirements were communicated is false — which is worse than not sending,
+  # because it is a false record rather than an absent one.
+  DigestConfigurationSet:
+    Type: AWS::SES::ConfigurationSet
+    Condition: HasSender
+    Properties:
+      Name: platform-digest
+      ReputationOptions:
+        ReputationMetricsEnabled: true
+      SendingOptions:
+        SendingEnabled: true
+
+  BounceTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasSender
+    Properties:
+      TopicName: platform-digest-bounces
+      DisplayName: Digest bounces and complaints
+
+  BounceTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: HasSender
+    Properties:
+      Topics: [!Ref BounceTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSesToPublish
+            Effect: Allow
+            Principal: { Service: ses.amazonaws.com }
+            Action: 'sns:Publish'
+            Resource: !Ref BounceTopic
+            Condition:
+              StringEquals:
+                'AWS:SourceAccount': !Ref AWS::AccountId
+
+  DigestEventDestination:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Condition: HasSender
+    Properties:
+      ConfigurationSetName: !Ref DigestConfigurationSet
+      EventDestination:
+        Name: bounces-and-complaints
+        Enabled: true
+        # REJECT and RENDERING_FAILURE are included alongside the obvious two.
+        # A rejected or unrenderable message never reaches anyone either, and
+        # treating only BOUNCE as failure would leave those silent.
+        MatchingEventTypes:
+          - BOUNCE
+          - COMPLAINT
+          - REJECT
+          - RENDERING_FAILURE
+        SnsDestination:
+          TopicARN: !Ref BounceTopic
+
+  # -------------------------------------------------------------------------
+  # Sender
+  # -------------------------------------------------------------------------
+  DigestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformDigestSender
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SendDigests
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['dynamodb:Query']
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${RegistryTable}'
+                  - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${RegistryTable}/index/*'
+              # Assume the narrow reader role in member accounts. Named
+              # explicitly rather than wildcarded across roles: this function
+              # may assume PlatformDigestReader and nothing else, so a
+              # compromise of it cannot reach OrganizationAccountAccessRole.
+              - Effect: Allow
+                Action: 'sts:AssumeRole'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformDigestReader'
+              - Effect: Allow
+                Action: ['ses:SendEmail']
+                Resource: '*'
+              - Effect: Allow
+                Action: ['s3:PutObject']
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${EvidenceBucket}/digest-evidence/*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/platform-digest*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  DigestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: platform-digest
+      Runtime: python3.13
+      Handler: digest.handler
+      Role: !GetAtt DigestRole.Arn
+      # One assume-role plus two paginated reads per account, serially. Minutes
+      # at forty accounts. A timeout part way leaves some clients digested and
+      # others not, with no record of which — so the budget is generous.
+      Timeout: 900
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          REGISTRY_TABLE: !Ref RegistryTable
+          DIGEST_SENDER: !Ref DigestSender
+          DIGEST_CC: !Ref DigestCc
+          READER_ROLE_NAME: PlatformDigestReader
+          EVIDENCE_BUCKET: !Ref EvidenceBucket
+          WINDOW_HOURS: !Ref WindowHours
+          SES_CONFIGURATION_SET: !If [HasSender, !Ref DigestConfigurationSet, '']
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  DigestLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/platform-digest
+      RetentionInDays: 90
+      KmsKeyId: !GetAtt LogsKey.Arn
+
+  DigestScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-digest-schedule
+      Description: Batched instrumentation digest, per account.
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: digest
+          Arn: !GetAtt DigestFunction.Arn
+
+  DigestSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DigestFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DigestScheduleRule.Arn
+
+Outputs:
+
+  FunctionName:
+    Description: Digest sender
+    Value: !Ref DigestFunction
+
+  Mode:
+    Description: Whether digests are actually sent
+    Value: !If [HasSender, 'sending', 'report-only — no verified SES sender configured']
+
+  BounceTopicArn:
+    Condition: HasSender
+    Description: Bounces, complaints, rejects and rendering failures
+    Value: !Ref BounceTopic

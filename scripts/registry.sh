@@ -54,6 +54,7 @@ Partners
 
 Clients
   put-client     --partner S --slug S [--state STATE] [--ip-owner WHO]
+                 [--tech-contact EMAIL] [--dev-manager EMAIL]
   list-clients   [--partner S]
 
 Accounts
@@ -84,7 +85,7 @@ CMD="$1"; shift
 
 SLUG=""; PARTNER=""; STATE=""; NOTIFY_HOURS=""; ALTDIG_HOURS=""; OWNER=""
 BAA=""; IP_OWNER=""; ACCOUNT_ID=""; ENVIRONMENT=""; APP=""; VERSION=""
-NAME=""; REASON=""; REVIEW_BY=""
+NAME=""; REASON=""; REVIEW_BY=""; TECH_CONTACT=""; DEV_MANAGER=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,6 +97,8 @@ while [[ $# -gt 0 ]]; do
     --owner)            OWNER="$2"; shift 2 ;;
     --baa)              BAA="$2"; shift 2 ;;
     --ip-owner)         IP_OWNER="$2"; shift 2 ;;
+    --tech-contact)     TECH_CONTACT="$2"; shift 2 ;;
+    --dev-manager)      DEV_MANAGER="$2"; shift 2 ;;
     --account-id)       ACCOUNT_ID="$2"; shift 2 ;;
     --env)              ENVIRONMENT="$2"; shift 2 ;;
     --app)              APP="$2"; shift 2 ;;
@@ -307,11 +310,27 @@ cmd_put_client() {
   "slug":             {"S": "${SLUG}"},
   "state":            {"S": "${STATE}"},
   "ip_owner":         $(ddb_str "${IP_OWNER:-unrecorded}"),
+  "tech_contact":     $(ddb_str "${TECH_CONTACT}"),
+  "dev_manager":      $(ddb_str "${DEV_MANAGER}"),
   "updated_at":       {"S": "$(now_iso)"}
 }
 JSON
 )"
   ok "client ${PARTNER}/${SLUG} recorded: state=${STATE} ip-owner=${IP_OWNER:-unrecorded}"
+  # Questionnaire 1.5 and 5.8. These are the ONLY personal data in the
+  # registry, and they are here because the instrumentation digest has nowhere
+  # else to find a recipient — design doc 06 makes that digest the documented
+  # evidence that monitoring requirements were communicated, so a digest with
+  # no addressee is a compliance gap rather than a missing nicety.
+  #
+  # DynamoDB, not the repository. Same rule as config/contacts.env: personal
+  # data lives in a system with access control and an audit trail, never in
+  # git.
+  if [[ -z "${TECH_CONTACT}" ]]; then
+    warn "No --tech-contact. The instrumentation digest for this client has no
+      recipient and will be skipped, which loses the evidence that monitoring
+      requirements were communicated. Questionnaire field 1.5."
+  fi
 }
 
 cmd_list_clients() {

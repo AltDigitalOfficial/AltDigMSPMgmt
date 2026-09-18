@@ -72,29 +72,10 @@ info "Validating design/06a-alarm-specification.yaml"
   "$(win_path "${SPEC}")" "$(win_path "${BUILD}/alarm-spec.json")" \
   || die "The alarm specification is invalid. Nothing packaged."
 
-# Zipped with python, not zip(1). Git for Windows does not ship zip, and more
-# importantly the archive must be DETERMINISTIC: the key is a hash of the
-# package, so identical input must produce an identical key. A zip stores each
-# entry's mtime, so the same source zipped twice hashes differently and
-# content-addressing degrades into "a new key every run".
 info "Packaging"
-"${PY}" - "$(win_path "${BUILD}")" <<'PYEOF'
-import sys, zipfile, pathlib
-build = pathlib.Path(sys.argv[1])
-names = sorted(["handler.py", "drift.py", "alarm-spec.json"])
-with zipfile.ZipFile(build / "package.zip", "w", zipfile.ZIP_DEFLATED) as z:
-    for name in names:
-        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-        info.compress_type = zipfile.ZIP_DEFLATED
-        info.external_attr = 0o644 << 16
-        z.writestr(info, (build / name).read_bytes())
-print(f"  {len(names)} file(s)")
-PYEOF
+zip_deterministic "${BUILD}"
 
-HASH="$("${PY}" -c "
-import hashlib,sys
-print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:16])
-" "$(win_path "${BUILD}/package.zip")")"
+HASH="$(package_hash "${BUILD}/package.zip")"
 KEY="instrumentation/handler-${HASH}.zip"
 SIZE="$(wc -c < "${BUILD}/package.zip" | tr -d ' ')"
 
