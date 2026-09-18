@@ -103,6 +103,67 @@ schema_version: 1
 # So `recent_changes` is in the default set for every runbook rather than being
 # something each one opts into. A gather step nobody remembered to add is a
 # dossier that omits the answer most likely to be the answer.
+# ---------------------------------------------------------------------------
+# Failure handling — "the fix didn't fix"
+# ---------------------------------------------------------------------------
+# Jamie, 2026-09-18: "if extending something didn't fix it, even if it's
+# reversible, we should still escalate to a human ... tried this 3x, still
+# having problems, page out."
+#
+# Three conditions, deliberately kept apart, because collapsing them loses the
+# signal that distinguishes them:
+#
+#   escalate_on_failure     A remediation ran, the settle period passed, the
+#                           alarm is STILL breaching. Escalate to the next
+#                           stage. Do NOT retry the same action — clearing logs
+#                           that did not drop disk usage will not drop it on a
+#                           second attempt, and retrying is how automation
+#                           spends ten minutes failing at something a human
+#                           would have diagnosed.
+#
+#   failed_attempt_limit    The same action has failed on the same resource
+#                           this many times in the window. Stop attempting it
+#                           at all and page. A SHORTER fuse than the circuit
+#                           breaker, because every failed attempt is time
+#                           during which nobody is looking at a real incident.
+#
+#   circuit breaker         06a's rail: the same remediation fired three times
+#                           in an hour REGARDLESS OF OUTCOME. Note it counts
+#                           successes too, and doc 07 says why — "repeated
+#                           automated repair is masking a real fault". Three
+#                           successful log clears in an hour means something is
+#                           writing logs pathologically and the fix is hiding
+#                           it.
+#
+# Failure gets the shorter fuse. Success three times is a fault being masked;
+# failure twice is automation flailing.
+failure_policy:
+  escalate_on_failure: true
+  failed_attempt_limit: 2      # same action, same resource, within the window
+  window_seconds: 3600
+
+# ---------------------------------------------------------------------------
+# Settle periods
+# ---------------------------------------------------------------------------
+# How long to wait after an action before revalidating the alarm.
+#
+# Without this the failure logic fires spuriously on exactly the remediations
+# that work slowly. Scaling out does not take effect the moment the API returns
+# — capacity has to start, pass health checks and begin absorbing load — so
+# revalidating immediately would report "did not fix" on something that is
+# working, escalate unnecessarily, and eventually trip a breaker on an action
+# that was never failing.
+#
+# Values are the time for the EFFECT to become visible in the metric, not the
+# time for the API call to return. A CloudWatch metric on a 300-second period
+# cannot show a change faster than its own period, which is the floor here.
+settle_seconds:
+  clear_log_files: 120     # disk metrics refresh quickly once space is freed
+  scale_out: 600           # start, health-check, then absorb load
+  restart_service: 180     # process up, plus a metric period to show it
+  cycle_ecs_task: 300      # task placement, health check, drain of the old
+  default: 300
+
 default_gather:
   - metrics_window          # the alarm's metric either side of the trigger
   - recent_changes          # CloudTrail writes in the last 30 minutes
