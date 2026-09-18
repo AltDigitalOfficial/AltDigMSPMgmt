@@ -286,6 +286,21 @@ Resources:
                   - 'events:ListTargetsByRule'
                   - 'events:TagResource'
                 Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/platform-event-*'
+              # Handing a role to a service needs explicit PassRole, and
+              # without it PutRule succeeds while PutTargets fails — leaving
+              # rules that show ENABLED, match events, and deliver nowhere.
+              # A rule with no target is worse than no rule: it looks like
+              # coverage in the console.
+              #
+              # Scoped to the one role and to EventBridge. An unscoped
+              # iam:PassRole is an escalation primitive: it lets the holder
+              # hand ANY role to a service and inherit its permissions.
+              - Effect: Allow
+                Action: 'iam:PassRole'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformEventBridgeDelivery'
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService': 'events.amazonaws.com'
               - Effect: Allow
                 Action:
                   - 'logs:CreateLogStream'
@@ -452,6 +467,54 @@ Resources:
         - { Key: platform-managed, Value: 'true' }
 
   # -------------------------------------------------------------------------
+  # EventBridge delivery role
+  # -------------------------------------------------------------------------
+  # A CloudWatch alarm publishes to the cross-account alerting topic as the
+  # service principal cloudwatch.amazonaws.com, which the topic policy admits
+  # by aws:SourceOrgID. An EventBridge RULE cannot do that: targeting a topic
+  # in another account requires a RoleArn, and PutTargets fails outright
+  # without one —
+  #
+  #   ValidationException: RoleArn is required for target
+  #   arn:aws:sns:us-east-2:...:platform-alerts-low
+  #
+  # So the account-level event rules publish as this role instead. It exists
+  # only to relay events to the two alerting topics and can do nothing else.
+  #
+  # The name is load-bearing. The topic policy admits publishers by
+  # aws:PrincipalArn matching */role/PlatformEventBridgeDelivery, which is far
+  # tighter than admitting every principal in the Organization — that would let
+  # any compromised workload in any member account flood the channel every page
+  # travels through.
+  EventDeliveryRole:
+    Type: AWS::IAM::Role
+    Condition: HasAlerting
+    Properties:
+      RoleName: PlatformEventBridgeDelivery
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: PublishToAlerting
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'sns:Publish'
+                Resource: !If
+                  - MetaAlarmsLowUrgency
+                  - [!Ref AlertTopicArn, !Ref LowUrgencyTopicArn]
+                  - [!Ref AlertTopicArn]
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  # -------------------------------------------------------------------------
   # Drift detection
   # -------------------------------------------------------------------------
   # Prompt 4.2. Everything the instrumentation Lambda creates can be removed by
@@ -546,6 +609,10 @@ Resources:
           LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
           ALARM_PREFIX: platform-auto
           EVENT_RULE_PREFIX: platform-event
+          EVENT_DELIVERY_ROLE_ARN: !If
+            - HasAlerting
+            - !GetAtt EventDeliveryRole.Arn
+            - ''
       Tags:
         - { Key: platform-managed, Value: 'true' }
 

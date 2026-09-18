@@ -70,6 +70,12 @@ ALERT_TOPIC_ARN = os.environ.get("ALERT_TOPIC_ARN", "")
 LOW_URGENCY_TOPIC_ARN = os.environ.get("LOW_URGENCY_TOPIC_ARN", "")
 EVENT_RULE_PREFIX = os.environ.get("EVENT_RULE_PREFIX", "platform-event")
 
+# EventBridge cannot publish to a CROSS-ACCOUNT SNS topic as a service
+# principal the way a CloudWatch alarm can. PutTargets fails with
+# "RoleArn is required for target arn:aws:sns:...". This role exists solely to
+# relay events to the alerting topics.
+EVENT_DELIVERY_ROLE_ARN = os.environ.get("EVENT_DELIVERY_ROLE_ARN", "")
+
 # Fields that decide whether an alarm fires, and therefore the fields whose
 # modification is drift.
 #
@@ -342,7 +348,10 @@ def reconcile_event_rules():
                 Tags=[{"Key": "platform-managed", "Value": "true"},
                       {"Key": "platform-alarm-id", "Value": aid}],
             )
-            events.put_targets(Rule=name, Targets=[{"Id": "alert", "Arn": topic}])
+            target = {"Id": "alert", "Arn": topic}
+            if EVENT_DELIVERY_ROLE_ARN:
+                target["RoleArn"] = EVENT_DELIVERY_ROLE_ARN
+            events.put_targets(Rule=name, Targets=[target])
         except Exception as exc:
             problems.append({"alarm": aid, "reason": str(exc)})
             continue

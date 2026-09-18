@@ -436,6 +436,37 @@ and before that it is an edit.
 
 ---
 
+## B-028 · SES is in the sandbox, so digests reach nobody
+
+**Observed** — 2026-09-18, creating the SES identity for `altdigital.ai`.
+
+A new SES account starts sandboxed: it may send only **to verified addresses**,
+at low volume. **Verifying the sending domain does not lift this** — the two
+are separate, and conflating them is the usual reason a first send fails after
+DNS was done correctly.
+
+So once the DNS records in [dns-requirements.md](dns-requirements.md) are in
+place, the digest will authenticate and still not reach a client's technical
+contact, because that address is not verified in our account — and verifying a
+customer's mailbox is not something we can or should do.
+
+**What it needs** — a production access request to AWS Support describing the
+use case. Approved on the description, which here is straightforward:
+transactional monitoring digests to named technical contacts at customer
+organisations, low volume, every recipient under contract, bounce and complaint
+handling already wired to an SES configuration set.
+
+**Submit early.** It is not instant, and it is the last gate between a built
+digest and the evidence trail design doc 06 depends on — *"if something later
+fails unmonitored, the trail shows we asked."* Until it clears, we cannot show
+we asked.
+
+**Related** — the bounce path is already built (configuration set to SNS on
+BOUNCE, COMPLAINT, REJECT, RENDERING_FAILURE), which is part of what the
+request will be judged on.
+
+---
+
 ## B-016 · Terraform state for PagerDuty is local and unlocked
 
 **Observed** — 2026-09-17, building `pagerduty/`.

@@ -188,6 +188,25 @@ Resources:
             Condition:
               StringEquals:
                 'aws:SourceOrgID': !Ref OrganizationId
+          # EventBridge RULES, unlike CloudWatch alarms, publish cross-account
+          # as an assumed ROLE rather than as a service principal — so the
+          # statement above cannot admit them and PutTargets fails with
+          # "RoleArn is required for target".
+          #
+          # Admitted by role NAME rather than by organization membership alone.
+          # aws:PrincipalOrgID on its own would let any principal in any member
+          # account publish to the channel every page travels through, which is
+          # a poor trade for four event rules.
+          - Sid: AllowPlatformEventDeliveryRole
+            Effect: Allow
+            Principal: { AWS: '*' }
+            Action: 'sns:Publish'
+            Resource: !Ref AlertsTopic
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+              ArnLike:
+                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformEventBridgeDelivery'
 
           # Subscribing is a separate and much more dangerous permission than
           # publishing: a subscriber reads every alarm in the platform,
@@ -327,6 +346,25 @@ Resources:
             Condition:
               StringEquals:
                 'aws:SourceOrgID': !Ref OrganizationId
+          # EventBridge RULES, unlike CloudWatch alarms, publish cross-account
+          # as an assumed ROLE rather than as a service principal — so the
+          # statement above cannot admit them and PutTargets fails with
+          # "RoleArn is required for target".
+          #
+          # Admitted by role NAME rather than by organization membership alone.
+          # aws:PrincipalOrgID on its own would let any principal in any member
+          # account publish to the channel every page travels through, which is
+          # a poor trade for four event rules.
+          - Sid: AllowPlatformEventDeliveryRole
+            Effect: Allow
+            Principal: { AWS: '*' }
+            Action: 'sns:Publish'
+            Resource: !Ref LowUrgencyTopic
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+              ArnLike:
+                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformEventBridgeDelivery'
           - Sid: DenySubscribeFromOutsideThisAccount
             Effect: Deny
             Principal: { AWS: '*' }
