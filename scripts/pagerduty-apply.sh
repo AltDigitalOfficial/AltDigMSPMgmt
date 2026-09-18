@@ -63,7 +63,20 @@ if [[ -z "${PAGERDUTY_TOKEN:-}" ]]; then
     TCREDS="$(aws sts assume-role       --role-arn "arn:aws:iam::${TOOLING}:role/OrganizationAccountAccessRole"       --role-session-name platform-pd-read       --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'       --output text 2>/dev/null | no_cr)" || true
     if [[ -n "${TCREDS}" ]]; then
       read -r TAK TSK TST <<<"${TCREDS}"
-      FETCHED="$(AWS_PROFILE='' AWS_ACCESS_KEY_ID="${TAK}" AWS_SECRET_ACCESS_KEY="${TSK}"         AWS_SESSION_TOKEN="${TST}" MSYS_NO_PATHCONV=1         aws secretsmanager get-secret-value           --secret-id platform/pagerduty/api-token           --query SecretString --output text 2>/dev/null | no_cr)" || true
+      # A SUBSHELL with `unset`, not an inline AWS_PROFILE='' prefix.
+      #
+      # An empty AWS_PROFILE is not an absent one: the CLI reads it as a
+      # profile literally named "" and fails with "The config profile () could
+      # not be found". Inline prefixes cannot unset a variable, only set it —
+      # so the only way to remove it for one command is a subshell.
+      #
+      # This exact trap is documented in scripts/test-alert-path.sh, and this
+      # script walked into it anyway. The symptom was the worst kind: the
+      # retrieval failed, 2>/dev/null swallowed the reason, and the script
+      # reported "No PagerDuty API token available" — pointing at a secret that
+      # existed and was perfectly readable.
+      FETCHED="$( (unset AWS_PROFILE
+        AWS_ACCESS_KEY_ID="${TAK}" AWS_SECRET_ACCESS_KEY="${TSK}"         AWS_SESSION_TOKEN="${TST}" MSYS_NO_PATHCONV=1         aws secretsmanager get-secret-value           --secret-id platform/pagerduty/api-token           --query SecretString --output text 2>/dev/null) | no_cr)" || true
       if [[ -n "${FETCHED}" ]]; then
         PAGERDUTY_TOKEN="$(printf '%s' "${FETCHED}"           | "$(command -v python || command -v python3)" -c             'import json,sys; print(json.load(sys.stdin)["api_token"])')"
         export PAGERDUTY_TOKEN
