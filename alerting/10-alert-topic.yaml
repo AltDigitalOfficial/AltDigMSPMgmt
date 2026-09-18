@@ -144,6 +144,37 @@ Resources:
             Condition:
               StringEquals:
                 'aws:SourceOrgID': !Ref OrganizationId
+
+          # Publishing to an ENCRYPTED topic needs the key as well as the
+          # topic, and the two are separate grants that fail at different
+          # layers. Admitting a principal to the topic policy alone produces
+          # KMSAccessDenied on publish — an error that names KMS while the
+          # thing you just edited was SNS.
+          #
+          # Both roles publish as IAM principals rather than as service
+          # principals, so aws:PrincipalArn is the right condition here where
+          # aws:SourceOrgID is right above. Getting that backwards is the
+          # mistake that cost a day on the CloudTrail key.
+          #
+          # NOTE: PlatformEventBridgeDelivery was added at the same time as
+          # PlatformResponseAutomation, having been missed when the event rules
+          # were built. The rules had targets attached and had never delivered
+          # an event, so the gap was invisible — wiring that looks complete and
+          # fails on first use.
+          - Sid: AllowPlatformRolesToEncrypt
+            Effect: Allow
+            Principal: { AWS: '*' }
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+              ArnLike:
+                'aws:PrincipalArn':
+                  - !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformEventBridgeDelivery'
+                  - !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformResponseAutomation'
       Tags:
         - { Key: platform-managed, Value: 'true' }
 
@@ -206,7 +237,23 @@ Resources:
               StringEquals:
                 'aws:PrincipalOrgID': !Ref OrganizationId
               ArnLike:
-                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformEventBridgeDelivery'
+                # Two roles publish here as IAM principals rather than as
+                # service principals, and both had to be added the hard way
+                # after a deploy failed:
+                #
+                #   PlatformEventBridgeDelivery   event rules, which cannot
+                #                                 target a cross-account topic
+                #                                 as a service principal
+                #   PlatformResponseAutomation    the response engine's stage 4,
+                #                                 publishing the incident dossier
+                #
+                # Named individually rather than matched as Platform*. A
+                # wildcard would admit every future platform role in every
+                # member account to the channel every page travels through, and
+                # the next role added would gain publish rights silently.
+                'aws:PrincipalArn':
+                  - !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformEventBridgeDelivery'
+                  - !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformResponseAutomation'
 
           # Subscribing is a separate and much more dangerous permission than
           # publishing: a subscriber reads every alarm in the platform,
@@ -364,7 +411,23 @@ Resources:
               StringEquals:
                 'aws:PrincipalOrgID': !Ref OrganizationId
               ArnLike:
-                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformEventBridgeDelivery'
+                # Two roles publish here as IAM principals rather than as
+                # service principals, and both had to be added the hard way
+                # after a deploy failed:
+                #
+                #   PlatformEventBridgeDelivery   event rules, which cannot
+                #                                 target a cross-account topic
+                #                                 as a service principal
+                #   PlatformResponseAutomation    the response engine's stage 4,
+                #                                 publishing the incident dossier
+                #
+                # Named individually rather than matched as Platform*. A
+                # wildcard would admit every future platform role in every
+                # member account to the channel every page travels through, and
+                # the next role added would gain publish rights silently.
+                'aws:PrincipalArn':
+                  - !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformEventBridgeDelivery'
+                  - !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformResponseAutomation'
           - Sid: DenySubscribeFromOutsideThisAccount
             Effect: Deny
             Principal: { AWS: '*' }

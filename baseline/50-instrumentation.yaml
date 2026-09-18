@@ -511,6 +511,20 @@ Resources:
                   - MetaAlarmsLowUrgency
                   - [!Ref AlertTopicArn, !Ref LowUrgencyTopicArn]
                   - [!Ref AlertTopicArn]
+              # The alerting topics are ENCRYPTED, so publishing needs KMS as
+              # well as SNS — on both sides. This was missing from the moment
+              # the event rules were built and stayed invisible because the
+              # rules had targets attached and had never delivered an event.
+              # Wiring that looks complete and fails on first use.
+              #
+              # Found while debugging the response engine's identical gap, not
+              # by testing the event rules.
+              - Effect: Allow
+                Action: ['kms:GenerateDataKey*', 'kms:Decrypt']
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService': !Sub 'sns.${AWS::Region}.amazonaws.com'
       Tags:
         - { Key: platform-managed, Value: 'true' }
 

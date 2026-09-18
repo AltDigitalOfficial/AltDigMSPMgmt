@@ -204,7 +204,24 @@ def check_rate_limit():
 
 
 def check_circuit_breaker(resource_id, action):
-    attempts = recent_attempts(resource_id, action)
+    """Doc 07: "same remediation firing 3x in an hour".
+
+    FIRING. A blocked attempt never fired — some other rail refused it before
+    the action ran — so it must not count here.
+
+    An earlier version counted every recorded attempt, and the result was a
+    self-locking platform: each invocation against a DISABLED kill switch
+    recorded a blocked attempt, so three of those tripped the breaker, and
+    enabling automation afterwards found it already refusing to act. The
+    account had spent its circuit-breaker budget on actions it never took.
+
+    Found in the canary: nine attempts, all blocked, reported as "has run 8
+    times ... (0 of them successfully)". That parenthetical is what gave it
+    away, which is an argument for putting the counts in the message rather
+    than just the verdict.
+    """
+    attempts = [a for a in recent_attempts(resource_id, action)
+                if a["outcome"] in ("succeeded", "failed")]
     if len(attempts) >= CIRCUIT_BREAKER_COUNT:
         succeeded = sum(1 for a in attempts if a["outcome"] == "succeeded")
         raise Blocked(

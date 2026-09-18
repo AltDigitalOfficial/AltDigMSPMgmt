@@ -243,6 +243,24 @@ Resources:
                     - [!Ref AlertTopicArn, !Ref LowUrgencyTopicArn]
                     - [!Ref AlertTopicArn]
                 - !Ref AWS::NoValue
+              # Publishing to an ENCRYPTED cross-account topic needs KMS on
+              # BOTH sides: the key policy must admit this role, and this role
+              # must be allowed to call KMS. Having only the first produces
+              # KMSAccessDenied with a key policy that visibly contains the
+              # role — which reads as though the policy is wrong when it is
+              # complete.
+              #
+              # Scoped by kms:ViaService rather than by key ARN. The alerting
+              # key lives in another account and its id is not known here, and
+              # ViaService is tighter than a wildcard anyway: it permits KMS
+              # calls made THROUGH SNS and nothing else, so this grant cannot
+              # be used to decrypt anything the role reaches directly.
+              - Effect: Allow
+                Action: ['kms:GenerateDataKey*', 'kms:Decrypt']
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService': !Sub 'sns.${AWS::Region}.amazonaws.com'
 
         - PolicyName: PermittedRemediations
           PolicyDocument:
