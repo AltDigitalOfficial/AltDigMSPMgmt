@@ -217,10 +217,37 @@ trim() { printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$/
 # available here: the group exists, the stack deploys, and nobody has access.
 split_records() { printf '%s\n' "$1" | tr ',' '\n'; }
 
-# configured_emails <spec> -> the third field of each record, one per line
-configured_emails() {
-  split_records "$1" | cut -d'|' -f3 \
-    | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true
+# record_username <record> -> field 4 if present, otherwise field 3
+#
+# The Identity Center userName is the sign-in identifier and is NOT required to
+# be the email address. For staff provisioned by this script it is the email,
+# which is what SCIM will key on after the Entra cutover. The optional fourth
+# field exists for users created before this script — `jamie` was created by
+# hand at bootstrap with a bare username — so their EXISTING record can be
+# referenced rather than a duplicate identity created alongside it.
+#
+# Looking such a user up by email would return nothing and the script would
+# cheerfully create a second user for the same person, which is much worse than
+# failing.
+record_username() {
+  local u e
+  u="$(trim "$(printf '%s' "$1" | cut -d'|' -f4)")"
+  e="$(trim "$(printf '%s' "$1" | cut -d'|' -f3)")"
+  printf '%s' "${u:-${e}}"
+}
+
+# configured_usernames <spec> -> the sign-in name of each record, one per line
+#
+# Must be the userName and not the email: the leaver check below compares this
+# against describe-user's UserName, so comparing emails would report every
+# override-using member as an unconfigured leaver on every run.
+configured_usernames() {
+  local record
+  while read -r record; do
+    record="$(trim "${record}")"
+    [[ -n "${record}" ]] || continue
+    record_username "${record}"; echo
+  done < <(split_records "$1")
 }
 
 reconcile_members() {
@@ -228,7 +255,7 @@ reconcile_members() {
   [[ -n "${spec}" ]] || { skip "no members configured"; return 0; }
   [[ -n "${group_id}" ]] || { skip "membership — no group id in this dry run"; return 0; }
 
-  local record given family email uid
+  local record given family email username uid
   while read -r record; do
     record="$(trim "${record}")"
     [[ -n "${record}" ]] || continue
@@ -236,46 +263,52 @@ reconcile_members() {
     given="$(trim "$(printf '%s' "${record}"  | cut -d'|' -f1)")"
     family="$(trim "$(printf '%s' "${record}" | cut -d'|' -f2)")"
     email="$(trim "$(printf '%s' "${record}"  | cut -d'|' -f3)")"
+    username="$(record_username "${record}")"
 
     [[ -n "${given}" && -n "${family}" && -n "${email}" ]] \
       || die "Malformed member record in config/identity.env.
-      Expected GivenName|FamilyName|email, comma-separated between records."
+      Expected GivenName|FamilyName|email[|userName], comma-separated between
+      records."
     [[ "${email}" == *@*.* ]] \
       || die "Member record does not contain a valid email address."
 
-    uid="$(user_id_by_name "${email}")"
+    # Looked up by userName, which is the identity store's unique attribute.
+    # The email is an attribute OF the user, not the key — for anyone carrying
+    # a fourth-field override the two differ, and searching on the email finds
+    # nothing.
+    uid="$(user_id_by_name "${username}")"
 
     if [[ -z "${uid}" || "${uid}" == "None" ]]; then
       if [[ "${DRY_RUN}" == "1" ]]; then
-        printf '%s DRY%s  create identity store user %s\n' "${C_YELLOW}" "${C_RESET}" "${email}"
+        printf '%s DRY%s  create identity store user %s\n' "${C_YELLOW}" "${C_RESET}" "${username}"
         continue
       fi
-      info "Creating identity store user ${email}"
+      info "Creating identity store user ${username}"
       uid="$(aws identitystore create-user \
         --identity-store-id "${IDENTITY_STORE_ID}" \
-        --user-name "${email}" \
+        --user-name "${username}" \
         --display-name "${given} ${family}" \
         --name "GivenName=${given},FamilyName=${family}" \
         --emails "Value=${email},Type=work,Primary=true" \
         --query UserId --output text | no_cr)"
-      ok "User created ${email}"
+      ok "User created ${username}"
     fi
 
     if is_member "${group_id}" "${uid}"; then
-      ok "${email} already in ${COMMERCIAL_READONLY_GROUP}"
+      ok "${username} already in ${COMMERCIAL_READONLY_GROUP}"
       continue
     fi
 
     if [[ "${DRY_RUN}" == "1" ]]; then
       printf '%s DRY%s  add %s to %s\n' \
-        "${C_YELLOW}" "${C_RESET}" "${email}" "${COMMERCIAL_READONLY_GROUP}"
+        "${C_YELLOW}" "${C_RESET}" "${username}" "${COMMERCIAL_READONLY_GROUP}"
       continue
     fi
     aws identitystore create-group-membership \
       --identity-store-id "${IDENTITY_STORE_ID}" \
       --group-id "${group_id}" --member-id "UserId=${uid}" \
       --query MembershipId --output text >/dev/null
-    ok "${email} added to ${COMMERCIAL_READONLY_GROUP}"
+    ok "${username} added to ${COMMERCIAL_READONLY_GROUP}"
   done < <(split_records "${spec}")
 }
 
@@ -285,13 +318,13 @@ reconcile_members "${GROUP_ID}" "${COMMERCIAL_READONLY_MEMBERS}"
 # Report anyone in the group who is not in the config file. Not removed — see
 # the header. A leaver should be handled deliberately, with a record.
 if [[ -n "${GROUP_ID}" && "${DRY_RUN}" != "1" ]]; then
-  CONFIGURED="$(configured_emails "${COMMERCIAL_READONLY_MEMBERS}")"
-  while read -r member_email; do
-    [[ -n "${member_email}" ]] || continue
+  CONFIGURED="$(configured_usernames "${COMMERCIAL_READONLY_MEMBERS}")"
+  while read -r member_username; do
+    [[ -n "${member_username}" ]] || continue
     # -F -x: the whole line, literally. A substring or regex match would treat
     # jamie@altdigital.ai as covering notjamie@altdigital.ai.
-    if ! printf '%s\n' "${CONFIGURED}" | grep -Fxq -- "${member_email}"; then
-      warn "In the group but not in config/identity.env: ${member_email}"
+    if ! printf '%s\n' "${CONFIGURED}" | grep -Fxq -- "${member_username}"; then
+      warn "In the group but not in config/identity.env: ${member_username}"
       warn "  Not removed. Remove deliberately if this is a leaver."
     fi
   done < <(
