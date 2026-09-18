@@ -63,14 +63,31 @@ Parameters:
       key leaves every member account running the old code while the stack
       reports itself current.
 
-  MonitoringTier:
+  EnvironmentTier:
     Type: String
-    Default: reduced
-    AllowedValues: [full, production-equivalent, reduced]
+    Default: dev
+    AllowedValues: [dev, test, uat, prod]
     Description: >-
-      Which alarms in each set apply. Derived per environment by
-      scripts/derive-vesting.py from vesting/derivation-rules.yaml, so this is
-      passed in by the vesting pipeline rather than chosen here.
+      Environment tier, which is what design/06a keys thresholds on.
+
+      An earlier version of this parameter used an invented
+      full/production-equivalent/reduced axis, chosen while design doc 14 was
+      missing. 06a keys threshold_by_tier on the environment name directly,
+      which is both simpler and the authoritative form: the same alarm carries
+      a different threshold in dev and in prod, rather than existing in one and
+      not the other. Omitting a tier from threshold_by_tier is how the spec
+      suppresses an alarm somewhere.
+
+  AcceptableResponseMs:
+    Type: String
+    Default: ''
+    Description: >-
+      Questionnaire 7.4, the acceptable response time in milliseconds. Passed
+      in by the vesting pipeline, which holds the onboarding record.
+
+      Deliberately NOT read from the registry by this Lambda. That would mean
+      granting every member account read access to the registry describing
+      every other tenant, to fetch one number.
 
   AlertTopicArn:
     Type: String
@@ -243,7 +260,8 @@ Resources:
       Environment:
         Variables:
           EXCEPTION_LOG_GROUP: !Ref ExceptionLogGroup
-          MONITORING_TIER: !Ref MonitoringTier
+          ENVIRONMENT_TIER: !Ref EnvironmentTier
+          ACCEPTABLE_RESPONSE_MS: !Ref AcceptableResponseMs
           ALERT_TOPIC_ARN: !Ref AlertTopicArn
           ALARM_PREFIX: platform-auto
       Tags:
@@ -359,6 +377,6 @@ Outputs:
     Description: Fires when a resource comes up uninstrumented
     Value: !Ref ExceptionAlarm
 
-  MonitoringTierApplied:
-    Description: Tier this account's alarm sets were filtered to
-    Value: !Ref MonitoringTier
+  EnvironmentTierApplied:
+    Description: Tier the alarm thresholds were resolved at
+    Value: !Ref EnvironmentTier

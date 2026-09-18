@@ -255,6 +255,70 @@ integration will encode whichever answer is assumed.
 
 ---
 
+## B-024 · Three threshold modes in 06a cannot be resolved
+
+**Observed** — 2026-09-17, implementing prompt 4.1 against
+`design/06a-alarm-specification.yaml`.
+
+Four of six relative `threshold_mode` values resolve cleanly against the live
+resource. Three do not, and the handler raises an exception for each rather
+than substituting a number — because the prompt's own reasoning is that "a
+fixed number is wrong across instance classes", and a wrong threshold is worse
+than a recorded absence.
+
+| Mode | Alarm | Why not |
+|---|---|---|
+| `percent_of_max_connections` | `rds-connections-high` | RDS exposes no API for the instance class's memory, and `max_connections` defaults to the parameter-group **formula** `{DBInstanceClassMemory/12582880}` — so reading the parameter group returns the formula, not a number. |
+| `percent_of_instance_memory` | `rds-freeable-memory-low` | Same root cause. |
+| `reference_metric` | `asg-in-service-below-desired` | Needs a metric-math alarm (`Metrics=[...]`), a different `put_metric_alarm` shape entirely. Not built. |
+
+**The option not taken** was a hand-maintained `db.*.*` class-to-memory table.
+It would work today and be silently wrong the first time AWS ships a class
+nobody has added — and "silently wrong threshold" is the failure this whole
+layer is designed against.
+
+**Fixes, in order of effort:**
+
+1. Set an explicit numeric `max_connections` in the DB parameter group at
+   vesting time. The two RDS modes then resolve from the parameter group and
+   the problem disappears rather than being worked around.
+2. Build metric-math alarm support for `reference_metric`. Self-contained.
+
+**Close before** — the first tenant runs RDS or an Auto Scaling group, since
+until then these three raise no exceptions because no such resource exists.
+
+---
+
+## B-026 · Event-based alarms in 06a have nowhere to be created
+
+**Observed** — 2026-09-17. `design/06a` defines six alarms with `metric: event`
+— `rds-failover-event`, `rds-auto-restart-detected`, `s3-public-access-change`,
+`asg-failed-scaling` and siblings. The spec is explicit: *"EventBridge rule,
+not a metric alarm."*
+
+**They are also not per-resource**, which is the part that decides where they
+belong. A CloudTrail rule matching `PutBucketAcl` is one rule for the account,
+not one per bucket; creating it per resource would produce N identical rules
+all firing together on the same event.
+
+So the instrumentation Lambda classifies them (`account_level_event_rules` in
+its result) and creates nothing. **Nothing else creates them either** — that is
+the gap. They are deliberately NOT raised as exceptions, because an exception
+per resource for something correctly handled elsewhere is exactly the noise
+that buries real ones.
+
+**What it needs** — an account-level section in
+`baseline/50-instrumentation.yaml` generating EventBridge rules from the
+`metric: event` entries, with three source shapes to handle:
+`rds_event_category` (RDS event subscriptions), `cloudtrail` (event names), and
+`autoscaling_event` (event types).
+
+**Note the severity** — `s3-public-access-change` pages in uat and prod. It
+watches `PutBucketPolicy`, `DeletePublicAccessBlock` and siblings, which is a
+bucket being opened to the internet. That is currently undetected.
+
+---
+
 ## B-016 · Terraform state for PagerDuty is local and unlocked
 
 **Observed** — 2026-09-17, building `pagerduty/`.

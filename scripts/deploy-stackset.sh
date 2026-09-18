@@ -183,7 +183,13 @@ fi
 # StackSet.OrganizationalUnitIds is the authoritative target list.
 # list-stack-instances is not: it shows OUs that HAVE ACCOUNTS, so a correctly
 # targeted but currently empty OU is indistinguishable from one never targeted.
-TARGETED_OUS="$(aws cloudformation describe-stack-set --stack-set-name "${NAME}"   --query 'StackSet.OrganizationalUnitIds' --output text 2>/dev/null | no_cr || true)"
+# tr, because --output text separates a list with TABS. The containment test
+# below pads with spaces, so without this it matches only the FIRST OU in the
+# list — a stack set already targeting sandbox and members would report members
+# as untargeted and try to create instances again, colliding with the update
+# that is still running.
+TARGETED_OUS="$(aws cloudformation describe-stack-set --stack-set-name "${NAME}"   --query 'StackSet.OrganizationalUnitIds' --output text 2>/dev/null   | no_cr | tr '	
+' '  ' || true)"
 
 if [[ " ${TARGETED_OUS} " == *" ${TARGET_OU} "* && -n "${EXISTS}" ]]; then
   skip "${TARGET_OU} is already a target; the stack set update redeploys to it"
