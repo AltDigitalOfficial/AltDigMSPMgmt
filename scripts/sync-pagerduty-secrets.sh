@@ -71,6 +71,23 @@ KEY="$(cd "${TFDIR}" && "${TF}" output -raw cloudwatch_integration_key 2>/dev/nu
 # is simply not wired, which is a supported state.
 LOW_KEY="$(cd "${TFDIR}" && "${TF}" output -raw cloudwatch_low_integration_key 2>/dev/null)" || true
 
+# Events API v2 routing keys, added alongside the CloudWatch ones rather than
+# replacing them. Two integrations on the same service:
+#
+#   cloudwatch    the SNS subscription. Parses an SNS-wrapped CloudWatch alarm
+#                 and nothing else. Kept as the fallback that still works when
+#                 the router is broken.
+#   events_v2     the router. Takes arbitrary JSON in custom_details, which is
+#                 how the page carries the full dossier, and a dedup_key, which
+#                 is how the raw alarm and the dossier that follows become one
+#                 incident instead of two.
+#
+# Empty is tolerated: a tenant that has not applied the Terraform change yet has
+# no v2 integration, and the router refuses to page rather than pretending it
+# did. Failing here instead would break the CloudWatch key sync as well.
+V2_KEY="$(cd "${TFDIR}" && "${TF}" output -raw events_v2_routing_key 2>/dev/null)" || true
+V2_KEY_LOW="$(cd "${TFDIR}" && "${TF}" output -raw events_v2_routing_key_low 2>/dev/null)" || true
+
 # Length check only. The value is never echoed, and a routing key is a 32
 # character hex-ish token — a wildly different length means the wrong output
 # was read, which is worth catching before it becomes a subscription that
@@ -81,6 +98,7 @@ hr
 log "PagerDuty routing key -> Secrets Manager"
 log "  account : ${ACCOUNT_KEY} (${TARGET})"
 log "  secret  : ${SECRET_NAME}"
+log "  keys    : cloudwatch $([[ -n "${KEY}" ]] && echo present || echo MISSING), events_v2 $([[ -n "${V2_KEY}" ]] && echo present || echo 'MISSING — run terraform apply; the router cannot page without it')"
 log "  region  : ${AWS_DEFAULT_REGION}"
 log "  key     : ${#KEY} characters (not printed)"
 hr
@@ -100,7 +118,7 @@ read -r AK SK ST <<<"${CREDS}"
 unset AWS_PROFILE
 export AWS_ACCESS_KEY_ID="${AK}" AWS_SECRET_ACCESS_KEY="${SK}" AWS_SESSION_TOKEN="${ST}"
 
-PAYLOAD="$(printf '{"integration_key":"%s"}' "${KEY}")"
+PAYLOAD="$(printf '{"integration_key":"%s","events_v2_routing_key":"%s"}'   "${KEY}" "${V2_KEY}")"
 
 if MSYS_NO_PATHCONV=1 aws secretsmanager describe-secret \
      --secret-id "${SECRET_NAME}" >/dev/null 2>&1; then
@@ -129,7 +147,7 @@ fi
 if [[ -n "${LOW_KEY}" ]]; then
   [[ ${#LOW_KEY} -ge 20 ]] || die "Low-urgency routing key looks wrong (${#LOW_KEY} characters)."
   LOW_SECRET="${SECRET_NAME}-low"
-  LOW_PAYLOAD="$(printf '{"integration_key":"%s"}' "${LOW_KEY}")"
+  LOW_PAYLOAD="$(printf '{"integration_key":"%s","events_v2_routing_key":"%s"}'     "${LOW_KEY}" "${V2_KEY_LOW}")"
   if MSYS_NO_PATHCONV=1 aws secretsmanager describe-secret        --secret-id "${LOW_SECRET}" >/dev/null 2>&1; then
     MSYS_NO_PATHCONV=1 aws secretsmanager put-secret-value       --secret-id "${LOW_SECRET}" --secret-string "${LOW_PAYLOAD}"       --query 'VersionId' --output text >/dev/null
     ok "rotated ${LOW_SECRET} (${#LOW_KEY} characters, not printed)"

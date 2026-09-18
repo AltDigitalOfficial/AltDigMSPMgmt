@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — forwards everything that wants attention to the
+  central routing bus in the Audit account. Part of the member baseline
+  StackSet.
+
+# ---------------------------------------------------------------------------
+# What this replaces
+# ---------------------------------------------------------------------------
+# Until now an alarm's destination was decided when the alarm was CREATED: the
+# instrumentation Lambda put the paging ones on the alerts topic and everything
+# else on the low-urgency topic, and recorded `pending_destination` for the
+# three routing classes that had nowhere to go — jira_and_commercial,
+# digest_and_jira and review_queue.
+#
+# Those alarms were real, evaluating, and heard by a topic that does not page
+# and has no consumer. This is the other half: the events reach a router that
+# knows what each class means.
+#
+# The alarm ACTIONS are unchanged and stay in place. The SNS path is the
+# fallback for a broken router, and it is the reason a routing outage degrades
+# the alert rather than silencing it.
+#
+# ---------------------------------------------------------------------------
+# Forwarding a rule's own events back to itself
+# ---------------------------------------------------------------------------
+# A rule that forwards to another bus can, if its pattern is wide enough, match
+# the events it generates. None of the patterns below are wide — each names its
+# detail-type — but the failure is worth stating because it is a loop that
+# bills by the event and looks like a traffic spike rather than a bug.
+
+Parameters:
+
+  CentralBusArn:
+    Type: String
+    Description: >-
+      The platform-alerts bus in the Audit account. An empty value disables
+      forwarding entirely, which is the correct behaviour before the routing
+      layer is deployed — see the Condition below.
+    Default: ''
+
+# No EnvironmentTier parameter, deliberately. Forwarding is tier-independent:
+# every account sends everything, and the ROUTER decides what each tier does
+# with it, reading the tier off the alarm's own platform-tier tag. Filtering
+# here as well would put the same decision in two places — one of them in a
+# template deployed per account, free to drift — and the failure mode of that
+# is an account quietly forwarding nothing.
+
+Conditions:
+  # No bus, no rules. The alternative is rules that exist, show ENABLED and
+  # deliver nothing, which is the state that taught us to write this Condition
+  # — see the EventBridge notes in CLAUDE.md.
+  HasBus: !Not [!Equals [!Ref CentralBusArn, '']]
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Delivery role
+  # -------------------------------------------------------------------------
+  # EventBridge cannot put events on another account's bus as a service
+  # principal — it needs a role, and it needs iam:PassRole to use it.
+  # Omitting the role does not fail at PutRule; it fails at PutTargets, leaving
+  # a rule that shows ENABLED with no targets attached. That has already cost
+  # an afternoon on this platform once.
+  ForwardingRole:
+    Type: AWS::IAM::Role
+    Condition: HasBus
+    Properties:
+      RoleName: PlatformEventForwarding
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ForwardToCentralBus
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'events:PutEvents'
+                # Exactly one bus. A wildcard here would let anything that can
+                # assume this role raise an incident on any bus in the
+                # organization.
+                Resource: !Ref CentralBusArn
+
+  # -------------------------------------------------------------------------
+  # Sources
+  # -------------------------------------------------------------------------
+  # design/06's diagram, one rule each. Separate rather than combined so that a
+  # source producing nothing is visibly a rule with no invocations, rather than
+  # a share of one rule's traffic that nobody can pick apart.
+
+  AlarmForwarding:
+    Type: AWS::Events::Rule
+    Condition: HasBus
+    Properties:
+      Name: platform-forward-alarms
+      Description: >-
+        Platform-managed alarms changing state. The router reads the routing
+        class off the alarm's own tags, so it needs no filtering here beyond
+        excluding alarms the platform did not create.
+      EventPattern:
+        source: ['aws.cloudwatch']
+        detail-type: ['CloudWatch Alarm State Change']
+        detail:
+          state:
+            # OK as well as ALARM. Without it PagerDuty incidents raised by the
+            # router never auto-resolve, and an on-call engineer closes by hand
+            # every incident the platform recovered from on its own — which is
+            # how people stop trusting auto-resolution and start closing
+            # incidents without reading them.
+            value: ['ALARM', 'OK']
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+
+  SecurityHubForwarding:
+    Type: AWS::Events::Rule
+    Condition: HasBus
+    Properties:
+      Name: platform-forward-securityhub
+      EventPattern:
+        source: ['aws.securityhub']
+        detail-type: ['Security Hub Findings - Imported']
+        detail:
+          findings:
+            Severity:
+              # INFORMATIONAL and LOW are excluded at source rather than at the
+              # router. They are the overwhelming majority of Security Hub
+              # volume and they route to review in every tier, so forwarding
+              # them buys a cross-account PutEvents charge per finding and a
+              # review queue nobody can read.
+              Label: ['CRITICAL', 'HIGH', 'MEDIUM']
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+
+  GuardDutyForwarding:
+    Type: AWS::Events::Rule
+    Condition: HasBus
+    Properties:
+      Name: platform-forward-guardduty
+      EventPattern:
+        source: ['aws.guardduty']
+        detail-type: ['GuardDuty Finding']
+        detail:
+          severity:
+            # Numeric, and a RANGE rather than a list: GuardDuty severities are
+            # decimals (4.0, 5.3, 7.8) and a list of integers matches almost
+            # nothing. Getting this wrong produces a rule that matches zero
+            # events and looks exactly like an account with no findings.
+            - numeric: ['>=', 4]
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+
+  ConfigForwarding:
+    Type: AWS::Events::Rule
+    Condition: HasBus
+    Properties:
+      Name: platform-forward-config
+      EventPattern:
+        source: ['aws.config']
+        detail-type: ['Config Rules Compliance Change']
+        detail:
+          messageType: ['ComplianceChangeNotification']
+          newEvaluationResult:
+            complianceType: ['NON_COMPLIANT']
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+
+  # The response engine's dossier. Not an AWS source — the engine puts this on
+  # the member account's default bus itself, and this forwards it on.
+  #
+  # It is the reason prompt 5.3 says the payload must carry "the full dossier,
+  # not just the alarm name": the raw alarm above pages immediately with
+  # nothing, and this arrives minutes later with everything the engine learned.
+  # The router gives both the same dedup key, so the second updates the first
+  # rather than paging again.
+  DossierForwarding:
+    Type: AWS::Events::Rule
+    Condition: HasBus
+    Properties:
+      Name: platform-forward-dossiers
+      EventPattern:
+        source: ['platform.response']
+        detail-type: ['Platform Incident Dossier']
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+
+Outputs:
+  ForwardingState:
+    Value: !If [HasBus, 'forwarding', 'disabled-no-bus-configured']
+  ForwardingRoleArn:
+    Condition: HasBus
+    Value: !GetAtt ForwardingRole.Arn

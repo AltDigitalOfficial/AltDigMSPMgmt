@@ -189,6 +189,24 @@ resource "pagerduty_service_integration" "cloudwatch" {
   vendor  = data.pagerduty_vendor.cloudwatch.id
 }
 
+# Events API v2, alongside the CloudWatch integration rather than replacing it.
+#
+# The CloudWatch integration exists to parse an SNS-wrapped CloudWatch alarm,
+# and that is all it can do. Prompt 5.3 requires the page to carry "the full
+# dossier, not just the alarm name", which means an arbitrary JSON body in
+# custom_details — and a dedup_key, so that the raw alarm and the dossier that
+# follows it minutes later become ONE incident rather than two pages about the
+# same outage.
+#
+# Both integrations point at the same service and the same escalation policy.
+# Keeping the CloudWatch one is deliberate: it is the path that still works if
+# the router is broken, which is exactly when a page matters most.
+resource "pagerduty_service_integration" "events_v2" {
+  name    = "Platform Router (Events API v2)"
+  service = pagerduty_service.platform.id
+  type    = "events_api_v2_inbound_integration"
+}
+
 # ---------------------------------------------------------------------------
 # Low-urgency service — dev and test
 # ---------------------------------------------------------------------------
@@ -234,6 +252,12 @@ resource "pagerduty_service_integration" "cloudwatch_low" {
   name    = "AWS CloudWatch (low urgency)"
   service = pagerduty_service.platform_low.id
   vendor  = data.pagerduty_vendor.cloudwatch.id
+}
+
+resource "pagerduty_service_integration" "events_v2_low" {
+  name    = "Platform Router (Events API v2)"
+  service = pagerduty_service.platform_low.id
+  type    = "events_api_v2_inbound_integration"
 }
 
 # Priority is set by an Event Orchestration catch-all, not by the service.

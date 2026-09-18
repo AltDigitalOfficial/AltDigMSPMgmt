@@ -47,6 +47,21 @@ Parameters:
     Default: dev
     AllowedValues: [dev, test, uat, prod]
 
+  EscalationViaBus:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >-
+      When true the engine puts its dossier on the account's default event bus
+      and baseline/70-event-forwarding.yaml carries it to the router, which
+      pages with the dossier attached under the same dedup key as the raw
+      alarm. When false it publishes to SNS as before.
+
+      Either/or, never both: the two paths reach PagerDuty through different
+      integrations, so doing both raises two unrelated incidents for one
+      outage. Set to true only in accounts where 70-event-forwarding is
+      deployed with a bus.
+
   AlertTopicArn:
     Type: String
     Default: ''
@@ -300,6 +315,14 @@ Resources:
                 Action: 'ssm:GetParameter'
                 Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/response/*'
               - Effect: Allow
+                # The account's own default bus, and only that. The engine
+                # publishes the dossier there; the forwarding rule carries it
+                # cross-account, which is a permission held by the forwarding
+                # role rather than by this one. The engine cannot reach another
+                # account's bus even if the code asked it to.
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default'
+              - Effect: Allow
                 Action: ['logs:CreateLogStream', 'logs:PutLogEvents']
                 Resource:
                   - !Sub '${ChangeRecordLogGroup.Arn}'
@@ -454,6 +477,7 @@ Resources:
           # one incident is how a notification rule gets written that then
           # swallows the real pages too.
           LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
+          ESCALATION_VIA_BUS: !Ref EscalationViaBus
           MAX_INLINE_SETTLE: '120'
           REVALIDATION_ATTEMPTS: '3'
       Tags:

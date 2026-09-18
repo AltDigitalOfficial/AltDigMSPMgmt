@@ -47,3 +47,24 @@ output "cloudwatch_low_integration_key" {
   value       = pagerduty_service_integration.cloudwatch_low.integration_key
   sensitive   = true
 }
+
+output "events_v2_routing_key" {
+  description = <<-EOT
+    Events API v2 routing key for the high-urgency service. The router POSTs to
+    https://events.pagerduty.com/v2/enqueue with this as routing_key, which is
+    what allows a full dossier in custom_details and a dedup_key that merges the
+    raw alarm with the dossier that follows it.
+
+    A credential. Synced to Secrets Manager by
+    scripts/sync-pagerduty-secrets.sh and read from there, never a stack
+    parameter.
+  EOT
+  value       = pagerduty_service_integration.events_v2.integration_key
+  sensitive   = true
+}
+
+output "events_v2_routing_key_low" {
+  description = "Events API v2 routing key for the dev/test low-urgency service."
+  value       = pagerduty_service_integration.events_v2_low.integration_key
+  sensitive   = true
+}

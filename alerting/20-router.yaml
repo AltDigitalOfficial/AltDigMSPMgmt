@@ -1,0 +1,474 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the routing layer. A central event bus every
+  member account forwards to, a router that decides by severity and
+  environment, and the four destinations design/06 names. Deploys to the Audit
+  account alongside the alert topics.
+
+# ---------------------------------------------------------------------------
+# Why one central bus rather than routing in each member account
+# ---------------------------------------------------------------------------
+# Member accounts already deliver cross-account to the Audit SNS topics, so a
+# per-account router would have been less new machinery. It is the wrong shape
+# for three reasons:
+#
+#   The PagerDuty routing key would have to exist in every member account. It
+#   is a credential that can raise an incident on the platform's service, and
+#   the accounts that would hold it are the ones a tenant's workload runs in.
+#
+#   Routing policy would be deployed N times and drift N ways. "Why was I not
+#   paged" is already hard to answer; it becomes unanswerable when the answer
+#   depends on which account the alarm was in.
+#
+#   Correlation would be impossible. The dossier that merges with a raw alarm
+#   arrives from the same account, but a future cross-account correlation — one
+#   incident spanning a tenant's dev and prod, or a partner's whole book — has
+#   nowhere to happen if each account routes alone.
+#
+# The cost is a single point of failure for alerting. That is why the
+# CloudWatch SNS subscription in 10-alert-topic.yaml is retained rather than
+# replaced: if this bus or this Lambda is broken, alarms still reach PagerDuty
+# by the old path, unenriched but delivered. Degraded beats silent.
+#
+# ---------------------------------------------------------------------------
+# Jira does not exist yet
+# ---------------------------------------------------------------------------
+# Prompt 12.3 provisions it. Until then the Jira destination is a durable queue
+# of ticket intents rather than a Jira integration, and this template does not
+# pretend otherwise: the queue has a 14-day retention so the backlog that
+# accumulates before 12.3 is drainable rather than lost, and an alarm fires if
+# it grows past the point where draining by hand is realistic.
+#
+# The alternative — dropping non-paging events until Jira exists — would mean
+# every `digest_and_jira` alarm in dev and test going nowhere, which is the
+# state 5.3 exists to end.
+
+Parameters:
+
+  OrganizationId:
+    Type: String
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+    Description: >-
+      Only accounts in this organization may put events on the bus. An event
+      bus without this is an open door to raising incidents on our own pager.
+
+  PagerDutySecretName:
+    Type: String
+    Default: platform/pagerduty
+    Description: >-
+      Holds events_v2_routing_key. Written by
+      scripts/sync-pagerduty-secrets.sh from the Terraform output; never a
+      stack parameter, so it never appears in a changeset.
+
+  PagerDutySecretNameLow:
+    Type: String
+    Default: platform/pagerduty-low
+    Description: 'Routing key for the dev/test service.'
+
+  AlertsKeyArn:
+    Type: String
+    Description: 'KMS key from 10-alert-topic.yaml, reused for the queues.'
+
+  AlertsTopicArn:
+    Type: String
+    Description: >-
+      Where the router's OWN failures go. Passed rather than imported: an
+      Export cannot be changed while anything imports it, which would freeze
+      10-alert-topic.yaml against a stack it does not know about.
+
+  LowUrgencyTopicArn:
+    Type: String
+    Default: ''
+    Description: 'Backlog warnings that are not incidents.'
+
+  RouterCodeBucket:
+    Type: String
+
+  RouterCodeKey:
+    Type: String
+
+Conditions:
+  HasLowUrgency: !Not [!Equals [!Ref LowUrgencyTopicArn, '']]
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # The bus
+  # -------------------------------------------------------------------------
+  PlatformBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: platform-alerts
+
+  PlatformBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties:
+      EventBusName: !Ref PlatformBus
+      StatementId: AllowOrganizationPutEvents
+      Statement:
+        Effect: Allow
+        # Any principal, narrowed by the org condition — the documented pattern
+        # for an organization bus, because the member-side forwarding roles are
+        # created per account and cannot be enumerated here.
+        Principal: '*'
+        Action: 'events:PutEvents'
+        Resource: !GetAtt PlatformBus.Arn
+        Condition:
+          StringEquals:
+            'aws:PrincipalOrgID': !Ref OrganizationId
+
+  # Events the router could not process. Retained rather than discarded: a
+  # routing failure means something asked for attention and did not get it, and
+  # the event is the only record of what it was.
+  RouterDlq:
+    Type: AWS::SQS::Queue
+    # The one queue worth retaining. Everything the router DOES process is in
+    # the routing log group for a year; what lands here is what it never got to
+    # process, so this is the sole record of it.
+    #
+    # The cost is the trap canaries/00-canary-artifacts.yaml documents: a
+    # retained resource makes a failed stack unretryable, because the recreate
+    # collides with what was kept. Accepted here and nowhere else in this file,
+    # because the queue's attributes rarely change and losing undelivered
+    # alerts is the failure this whole template exists to prevent.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: platform-router-dlq
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: !Ref AlertsKeyArn
+      SqsManagedSseEnabled: false
+
+  # -------------------------------------------------------------------------
+  # Destinations
+  # -------------------------------------------------------------------------
+  JiraQueue:
+    Type: AWS::SQS::Queue
+    # Delete, not Retain. Every message here was written after a routing
+    # decision that is itself recorded in the routing log group with a year's
+    # retention, so the contents are reconstructible — and Retain would make a
+    # failed stack unretryable for no gain.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: platform-jira-intents
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 300
+      KmsMasterKeyId: !Ref AlertsKeyArn
+      SqsManagedSseEnabled: false
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DestinationDlq.Arn
+        maxReceiveCount: 5
+
+  ReviewQueue:
+    Type: AWS::SQS::Queue
+    # Delete, not Retain. Every message here was written after a routing
+    # decision that is itself recorded in the routing log group with a year's
+    # retention, so the contents are reconstructible — and Retain would make a
+    # failed stack unretryable for no gain.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: platform-review-queue
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 300
+      KmsMasterKeyId: !Ref AlertsKeyArn
+      SqsManagedSseEnabled: false
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DestinationDlq.Arn
+        maxReceiveCount: 5
+
+  # design/12's destination: "defined by who needs to have a conversation, not
+  # by severity". 06a routes uat that way by default, so this is not
+  # speculative — it is load-bearing for every UAT alarm today.
+  CommercialQueue:
+    Type: AWS::SQS::Queue
+    # Delete, not Retain. Every message here was written after a routing
+    # decision that is itself recorded in the routing log group with a year's
+    # retention, so the contents are reconstructible — and Retain would make a
+    # failed stack unretryable for no gain.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: platform-commercial-events
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 300
+      KmsMasterKeyId: !Ref AlertsKeyArn
+      SqsManagedSseEnabled: false
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DestinationDlq.Arn
+        maxReceiveCount: 5
+
+  DestinationDlq:
+    Type: AWS::SQS::Queue
+    # Delete, not Retain. Every message here was written after a routing
+    # decision that is itself recorded in the routing log group with a year's
+    # retention, so the contents are reconstructible — and Retain would make a
+    # failed stack unretryable for no gain.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: platform-destination-dlq
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: !Ref AlertsKeyArn
+      SqsManagedSseEnabled: false
+
+  # -------------------------------------------------------------------------
+  # The router
+  # -------------------------------------------------------------------------
+  RouterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: Route
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'sqs:SendMessage'
+                Resource:
+                  - !GetAtt JiraQueue.Arn
+                  - !GetAtt ReviewQueue.Arn
+                  - !GetAtt CommercialQueue.Arn
+              - Effect: Allow
+                Action: 'secretsmanager:GetSecretValue'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PagerDutySecretName}-*'
+                  - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PagerDutySecretNameLow}-*'
+              - Effect: Allow
+                Action: ['kms:GenerateDataKey', 'kms:Decrypt']
+                Resource: !Ref AlertsKeyArn
+              - Effect: Allow
+                # Cross-account, to read platform-routing and platform-tier off
+                # the alarm that fired. Read-only and organization-scoped: the
+                # router decides where an alarm goes and must never be able to
+                # change what an alarm is.
+                Action: ['cloudwatch:ListTagsForResource', 'cloudwatch:DescribeAlarms']
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceOrgID': !Ref OrganizationId
+
+  RouterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: platform-router
+      Runtime: python3.12
+      Handler: router.handler
+      Role: !GetAtt RouterRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      ReservedConcurrentExecutions: 20
+      Code:
+        S3Bucket: !Ref RouterCodeBucket
+        S3Key: !Ref RouterCodeKey
+      DeadLetterConfig:
+        TargetArn: !GetAtt RouterDlq.Arn
+      Environment:
+        Variables:
+          PAGERDUTY_SECRET_NAME: !Ref PagerDutySecretName
+          PAGERDUTY_SECRET_NAME_LOW: !Ref PagerDutySecretNameLow
+          JIRA_QUEUE_URL: !Ref JiraQueue
+          REVIEW_QUEUE_URL: !Ref ReviewQueue
+          COMMERCIAL_QUEUE_URL: !Ref CommercialQueue
+
+  RouterLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/platform-router
+      # A year. These records answer "why was I not paged about this", which is
+      # asked long after the fact and is the question an auditor asks too.
+      RetentionInDays: 365
+      KmsKeyId: !Ref AlertsKeyArn
+
+  # -------------------------------------------------------------------------
+  # What reaches the router
+  # -------------------------------------------------------------------------
+  # One rule per source rather than one catch-all, so an unexpected event type
+  # on the bus is visibly unrouted rather than quietly matched. The router has
+  # its own else for shapes it does not recognise; this is the layer before it.
+  AlarmRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-route-alarms
+      EventBusName: !Ref PlatformBus
+      EventPattern:
+        detail-type: ['CloudWatch Alarm State Change']
+      State: ENABLED
+      Targets:
+        - Id: router
+          Arn: !GetAtt RouterFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt RouterDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 4
+            MaximumEventAgeInSeconds: 3600
+
+  FindingsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-route-findings
+      EventBusName: !Ref PlatformBus
+      EventPattern:
+        detail-type:
+          - 'Security Hub Findings - Imported'
+          - 'GuardDuty Finding'
+          - 'Config Rules Compliance Change'
+      State: ENABLED
+      Targets:
+        - Id: router
+          Arn: !GetAtt RouterFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt RouterDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 4
+            MaximumEventAgeInSeconds: 3600
+
+  DossierRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-route-dossiers
+      EventBusName: !Ref PlatformBus
+      EventPattern:
+        source: ['platform.response']
+        detail-type: ['Platform Incident Dossier']
+      State: ENABLED
+      Targets:
+        - Id: router
+          Arn: !GetAtt RouterFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt RouterDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 4
+            MaximumEventAgeInSeconds: 3600
+
+  # Everything else on the bus. Not a no-op: it is how an event nobody planned
+  # for becomes visible instead of vanishing, which is the same else rule the
+  # response engine follows.
+  UnmatchedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-route-unmatched
+      EventBusName: !Ref PlatformBus
+      EventPattern:
+        detail-type:
+          - anything-but:
+              - 'CloudWatch Alarm State Change'
+              - 'Security Hub Findings - Imported'
+              - 'GuardDuty Finding'
+              - 'Config Rules Compliance Change'
+              - 'Platform Incident Dossier'
+      State: ENABLED
+      Targets:
+        - Id: router
+          Arn: !GetAtt RouterFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt RouterDlq.Arn
+
+  RouterInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RouterFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # -------------------------------------------------------------------------
+  # Alarming on the alerting
+  # -------------------------------------------------------------------------
+  # These cannot page through the path they monitor, so they go to the SNS
+  # topic directly — the old CloudWatch integration, which is exactly the
+  # fallback this template kept for the purpose.
+  RouterErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-router-errors
+      AlarmDescription: >-
+        The routing layer is failing. Events are landing in
+        platform-router-dlq and nothing is being paged, ticketed or queued
+        through the router. Alarms still reach PagerDuty by the direct SNS
+        subscription, unenriched.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RouterFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopicArn
+
+  RouterDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-router-dlq-not-empty
+      AlarmDescription: >-
+        An event asked for attention and the router could not deliver it. The
+        message body in platform-router-dlq is the only record of what it was.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt RouterDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopicArn
+
+  # The Jira backlog, which by design has no consumer until prompt 12.3. This
+  # alarm is not about Jira being down — it is the point at which "we will
+  # drain it when Jira exists" stops being true.
+  JiraBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-jira-intents-backlog
+      AlarmDescription: >-
+        Ticket intents are accumulating faster than expected and Jira does not
+        exist yet (prompt 12.3). Retention is 14 days; past that the backlog is
+        silently discarded. Either 12.3 is now urgent or something is routing
+        far more to Jira than intended.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt JiraQueue.QueueName
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 500
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !If [HasLowUrgency, !Ref LowUrgencyTopicArn, !Ref AlertsTopicArn]
+
+Outputs:
+  BusArn:
+    Description: 'Member accounts forward here.'
+    Value: !GetAtt PlatformBus.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BusArn'
+  JiraQueueUrl:
+    Value: !Ref JiraQueue
+  ReviewQueueUrl:
+    Value: !Ref ReviewQueue
+  CommercialQueueUrl:
+    Value: !Ref CommercialQueue

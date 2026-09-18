@@ -67,6 +67,15 @@ ALERT_TOPIC_ARN = os.environ.get("ALERT_TOPIC_ARN", "")
 # incident their pager is already holding. Falls back to the high-urgency topic
 # if unset, because losing the message entirely is the worse failure.
 LOW_URGENCY_TOPIC_ARN = os.environ.get("LOW_URGENCY_TOPIC_ARN", "")
+
+# When forwarding is configured the dossier goes to EventBridge and the router
+# pages with it; otherwise it goes to SNS as before.
+#
+# Deliberately either/or rather than both. The two paths reach PagerDuty through
+# different integrations, so sending both raises two incidents about one outage
+# with no relationship between them — the exact duplication the router's dedup
+# key exists to prevent, reintroduced one layer up.
+ESCALATION_VIA_BUS = os.environ.get("ESCALATION_VIA_BUS", "") == "true"
 ENVIRONMENT_TIER = os.environ.get("ENVIRONMENT_TIER", "dev")
 ACCOUNT_ID = os.environ.get("ACCOUNT_ID", "")
 
@@ -87,6 +96,7 @@ RETRY_SETTLE_SECONDS = int(os.environ.get("RETRY_SETTLE_SECONDS", "120"))
 cloudwatch = boto3.client("cloudwatch")
 logs = boto3.client("logs")
 sns = boto3.client("sns")
+events = boto3.client("events")
 
 with open(CATALOG_PATH, encoding="utf-8") as fh:
     CATALOG = json.load(fh)
@@ -474,7 +484,7 @@ def escalate(ctx, dossier, state="unresolved"):
     low = state in LOW_URGENCY_STATES
     topic = (LOW_URGENCY_TOPIC_ARN or ALERT_TOPIC_ARN) if low else ALERT_TOPIC_ARN
     urgency = "low" if low else "high"
-    if not topic:
+    if not topic and not ESCALATION_VIA_BUS:
         # Reported, not swallowed. A page that could not be sent is the one
         # failure that must never look like a page that was.
         print(json.dumps({"ESCALATION_UNDELIVERABLE": {
@@ -488,6 +498,23 @@ def escalate(ctx, dossier, state="unresolved"):
     # after we changed something" call for different first moves.
     what = SUBJECTS.get(state, f"unrecognised engine state '{state}'")
     subject = f"[{ENVIRONMENT_TIER}] {ctx.get('alarm_name') or 'response-engine'} — {what}"
+    if ESCALATION_VIA_BUS:
+        # To the account's DEFAULT bus. baseline/70-event-forwarding.yaml
+        # carries it to the central bus, and the router pages with the whole
+        # dossier attached under the same dedup key as the raw alarm — so the
+        # page that went out when the alarm fired is updated in place rather
+        # than a second incident being raised about the same outage.
+        events.put_events(Entries=[{
+            "Source": "platform.response",
+            "DetailType": "Platform Incident Dossier",
+            "Detail": json.dumps(dossier, default=str),
+            # The alarm name, so a console reader can get from the event to the
+            # thing it is about without parsing the detail.
+            "Resources": [a for a in [ctx.get("alarm_name")] if a],
+        }])
+        return {"paged": True, "via": "eventbridge", "subject": subject[:100],
+                "urgency_requested": urgency}
+
     sns.publish(
         TopicArn=topic,
         Subject=subject[:100],
@@ -498,7 +525,8 @@ def escalate(ctx, dossier, state="unresolved"):
     # that asked for high urgency still lands on the low topic. Calling the
     # request an urgency made a live dev dossier read `urgency: high` while the
     # message went to platform-alerts-low.
-    return {"paged": True, "topic": topic, "urgency_requested": urgency}
+    return {"paged": True, "via": "sns", "topic": topic,
+            "urgency_requested": urgency}
 
 
 # Keys worth seeing when an event is rejected. Everything else is reported by

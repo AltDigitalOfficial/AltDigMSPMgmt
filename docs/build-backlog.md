@@ -1190,3 +1190,65 @@ Specifically unverified: whether the ECS Task State Change event carries
 
 **Revisit when** — the first tenant with an existing suite, or sooner with a
 throwaway image that exits 0 and 1 on alternate runs.
+
+---
+
+## B-038 · Routing layer is built and unit-tested; nothing is deployed
+
+**Open** — 2026-09-18, prompt 5.3.
+
+The routing layer is complete in code and verified against stubs across all
+five 06a routing classes, all four sources, the unrecognised-shape fallback,
+and the dedup merge that makes a raw alarm and the dossier that follows it one
+PagerDuty incident.
+
+Nothing is deployed, and it cannot be until a step that is Jamie's:
+
+1. `scripts/pagerduty-apply.sh --apply` — adds two Events API v2 integrations
+   to the existing services. Additive and reversible; the CloudWatch
+   integrations are untouched and remain the fallback path.
+2. `scripts/sync-pagerduty-secrets.sh` — writes `events_v2_routing_key` into
+   the existing secrets. Until this runs the router refuses to page rather
+   than failing silently.
+3. `alerting/20-router.yaml` into the Audit account.
+4. `baseline/70-event-forwarding.yaml` into the sandbox OU with the bus ARN.
+
+Nothing regresses while this sits undeployed. Alarm actions still publish to
+the SNS topics exactly as they did, and `ESCALATION_VIA_BUS` defaults to
+`false`, so the response engine keeps escalating by SNS.
+
+**Specifically unverified** — the Events API v2 payload shape against a real
+PagerDuty tenant, whether `aws:ResourceOrgID` is honoured on
+`cloudwatch:ListTagsForResource` (if not, the router cannot read alarm tags
+cross-account and every alarm routes to review), and the organization event bus
+policy accepting cross-account `PutEvents`.
+
+---
+
+## B-039 · Three routing classes still have no real consumer
+
+**Open** — 2026-09-18.
+
+5.3 gives every 06a routing class a destination, which ends the state where
+`digest_and_jira`, `jira_and_commercial` and `review_queue` alarms went to a
+topic that does not page and has no reader. What they now have is a durable
+queue, not an answer:
+
+| Class | Destination | Consumer |
+|---|---|---|
+| `digest_and_jira` | `platform-jira-intents` | none until prompt 12.3 |
+| `jira_and_commercial` | + `platform-commercial-events` | none until design 12 is built |
+| `review_queue` | `platform-review-queue` | none |
+| `digest` | recorded only | prompt 4.4 reads the routing log |
+
+Queues retain 14 days. `platform-jira-intents-backlog` alarms at 500 messages,
+which is the point at which "we will drain it when Jira exists" stops being
+true.
+
+The review queue is the one with no planned consumer at all. It is where an
+untagged alarm goes, and an untagged alarm means instrumentation did not create
+it — so the queue is a gap detector, and nothing yet looks at it.
+
+**Revisit when** — prompt 12.3 (Jira) and Phase 11 (commercial). The review
+queue needs a decision of its own: a weekly digest is probably right, but that
+is 4.4's shape and 4.4 is already built.

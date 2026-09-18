@@ -653,6 +653,13 @@ def plan_alarms(resource_type, resource_id):
                 {"Key": "platform-auto-instrumented", "Value": "true"},
                 {"Key": "platform-alarm-id", "Value": aid},
                 {"Key": "platform-routing", "Value": routing},
+                # The router (alerting/src/router.py) reads both of these off
+                # the alarm rather than re-deriving them. It runs in the Audit
+                # account, where the resource type, the tier and 06a are all
+                # absent — and a second implementation of the routing decision
+                # would be free to disagree with this one.
+                {"Key": "platform-tier", "Value": ENVIRONMENT_TIER},
+                {"Key": "platform-resource-id", "Value": resource_id[:255]},
             ],
         }
         # A metric alarm and a metric-math alarm are different SHAPES, not the
