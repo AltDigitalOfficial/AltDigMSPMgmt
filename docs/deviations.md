@@ -111,6 +111,55 @@ years, so masking at the source is the only control that actually works.
 
 ---
 
+## D-012 · Four StackSets remain in the management account
+
+**Design position** — [02-platform-architecture.md](../starter_docs/02-platform-architecture.md):
+*"The Organization management account holds nothing but the Organization
+itself. No workloads, no pipelines."* A StackSet administrator is a pipeline.
+
+**Actual** — `platform-config`, `platform-kms-secrets`,
+`platform-log-data-protection` and `platform-network` were created from the
+management account, before `altdig-infra-tooling` existed. Delegation is now in
+place (B-003), so new StackSets can be created from Platform Tooling. These
+four cannot be moved there.
+
+**Why not** — a StackSet is owned by the account that created it and there is
+no transfer operation. Moving one means deleting it and recreating it
+elsewhere, and deleting a StackSet deletes its stack instances, which removes
+the baseline from every account it covers.
+
+**And the retained resources make it worse than a brief gap.** Several baseline
+resources carry `DeletionPolicy: Retain` precisely so that a stack deletion
+cannot destroy them — KMS keys, aliases, log destinations. Delete the stack
+instance and those survive, orphaned; recreate it and the new stack tries to
+create an alias that already exists. The recreate fails partway, in an account
+that currently has no baseline. The property that protects the resources is
+exactly what makes the migration hazardous.
+
+**The tempting argument, and why it does not hold.** Only the canary account
+carries these stack instances today, so the cost of migrating rises with every
+account vested — which reads as "do it now while it is cheap". But cheap is not
+the same as safe: the orphaned-resource collision exists at one account just as
+it does at forty. What changes with scale is the blast radius, not the
+mechanism.
+
+**Risk while open** — the management account runs four pipelines it should not,
+so a compromise there reaches the baseline of every member account. That is
+already true of the account by nature: it holds the Organization, and no SCP
+constrains it. The StackSets widen an exposure rather than creating a new one.
+
+**Close when** — one of:
+- a migration is written that imports the retained resources into the new
+  stacks rather than recreating them (`--resources-to-import`), and is
+  exercised against the canary before anything else, or
+- the four are retired and replaced by Platform-Tooling-owned StackSets during
+  a baseline version bump that was going to reapply everything anyway.
+
+The second is the cheaper path and should be taken at the next major baseline
+change, rather than as a migration in its own right.
+
+---
+
 ## D-011 · Platform services are single-region — CLOSED
 
 **Design position** — [02-platform-architecture.md](../starter_docs/02-platform-architecture.md):

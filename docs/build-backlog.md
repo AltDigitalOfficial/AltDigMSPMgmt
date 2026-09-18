@@ -744,7 +744,7 @@ granting `kms:*` is worth a deliberate look even when it is correct.
 
 ---
 
-## B-003 · StackSets delegated administration is unassigned
+## B-003 · StackSets delegated administration is unassigned — CLOSED
 
 **Observed** — 2026-09-16, during delegated admin registration.
 
@@ -754,8 +754,18 @@ is Platform Tooling in the Infrastructure OU, which does not exist yet, and
 delegating it to Audit would put the deployment pipeline inside the account
 that audits it.
 
-**Blocked on** — creating `altdig-infra-tooling`. Needed before Phase 2.4's
-staged rollout pipeline.
+**Status** — Closed 2026-09-17. `altdig-infra-tooling` (751479507989) is
+registered for `member.org.stacksets.cloudformation.amazonaws.com`, and
+`cloudformation describe-organizations-access` reports `ENABLED`.
+
+**Two calls, and the second is the one that gets missed.**
+`register-delegated-administrator` names the account;
+`activate-organizations-access` is what lets it target OUs. Without the second,
+the delegated account can create a service-managed StackSet and every OU target
+fails with an error that does not mention organizations access.
+
+**What this does NOT do** — move the four StackSets already in the management
+account. See D-012.
 
 ---
 

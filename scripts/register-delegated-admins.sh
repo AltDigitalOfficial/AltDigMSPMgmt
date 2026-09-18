@@ -143,11 +143,54 @@ if [[ ${REGIONAL_FAILED} -eq 1 ]]; then
   warn "administrator can be delegated there. Re-run after enabling them."
 fi
 
+# --- CloudFormation StackSets -> Platform Tooling --------------------------
+#
+# Deliberately NOT delegated to Audit. Audit's job is to observe the platform;
+# the StackSet administrator deploys it. Putting the deployment pipeline inside
+# the account that audits the deployment removes the separation that makes the
+# audit worth anything.
+#
+# This needs TWO calls, and the second is easy to miss:
+#
+#   register-delegated-administrator  names the account
+#   activate-organizations-access     lets it actually target OUs
+#
+# Without the second, the delegated account can create a service-managed
+# StackSet and every OU target fails. The error does not mention organizations
+# access.
+TOOLING_ACCOUNT="$(get_param /org/account/altdig-infra-tooling)"
+
+if [[ -z "${TOOLING_ACCOUNT}" || "${TOOLING_ACCOUNT}" == "None" ]]; then
+  warn "Platform Tooling account not found — StackSets delegation skipped."
+  warn "  scripts/create-platform-account.sh --ou infra --role tooling"
+else
+  info "CloudFormation StackSets delegation"
+  SS_SP="member.org.stacksets.cloudformation.amazonaws.com"
+  SS_CURRENT="$(aws organizations list-delegated-services-for-account     --account-id "${TOOLING_ACCOUNT}" --query 'DelegatedServices[].ServicePrincipal'     --output text 2>/dev/null | no_cr | tr '	
+' '  ' || true)"
+
+  if [[ " ${SS_CURRENT} " == *" ${SS_SP} "* ]]; then
+    skip "${SS_SP}"
+  else
+    run "delegate ${SS_SP} to ${TOOLING_ACCOUNT}"       aws organizations register-delegated-administrator         --account-id "${TOOLING_ACCOUNT}" --service-principal "${SS_SP}"
+  fi
+
+  # Idempotent and safe to repeat; it is an organization-wide switch rather
+  # than a per-account grant.
+  run "activate organizations access for StackSets"     aws cloudformation activate-organizations-access
+  hr
+fi
+
 ok "Delegation pass complete."
 log ""
+log "StackSets delegation does NOT move the four StackSets that already exist"
+log "in the management account. A StackSet is owned by the account that created"
+log "it and cannot be transferred — moving one means deleting it, which deletes"
+log "its stack instances and removes the baseline from every account it covers."
+log "Several baseline resources are DeletionPolicy: Retain, so a delete-and-"
+log "recreate would orphan KMS keys and aliases that then collide on the way"
+log "back in. See D-012."
+log ""
 log "NOT delegated here, deliberately:"
-log "  * CloudFormation StackSets  -> belongs to Platform Tooling (infra OU),"
-log "    which does not exist yet. Delegating it to Audit would put the"
-log "    deployment pipeline in the account that audits it."
 log "  * IAM Identity Center       -> stays in the management account; moving"
 log "    it is disruptive and buys little while the directory holds one user."
