@@ -94,6 +94,40 @@ resource_types_in_scope:
 # Types explicitly known and deliberately NOT instrumented. These do not raise an
 # exception; they are recorded as "known, no alarms applicable".
 resource_types_no_alarms:
+  # --- platform's own infrastructure -----------------------------------------
+  # Added 2026-09-17 while building prompt 4.1, after these caused a feedback
+  # loop in the canary account.
+  #
+  # The instrumentation Lambda creates a CloudWatch alarm; AWS Config discovers
+  # that alarm as a resource; EventBridge fires; the Lambda does not recognise
+  # AWS::CloudWatch::Alarm and raises an exception. Every alarm it created
+  # produced an exception ABOUT ITSELF — eight within the hour — which pinned
+  # platform-instrumentation-exception permanently in ALARM and destroyed the
+  # one signal that says a real resource came up unmonitored.
+  #
+  # These belong here rather than in a list inside the handler, because
+  # resource_types_no_alarms is exactly the mechanism this file defines for
+  # "known, and deliberately not instrumented". A second list in code would be
+  # the same two-copies problem that deleting instrumentation/alarm-sets.yaml
+  # removed.
+  #
+  # Note none of these is ever a tenant WORKLOAD resource. A tenant Lambda
+  # function is in scope and stays in scope; an alarm is not a thing you alarm
+  # on.
+  - AWS::CloudWatch::Alarm
+  - AWS::Events::Rule
+  - AWS::Logs::LogGroup
+  - AWS::Logs::MetricFilter
+  - AWS::SSM::Association
+
+  # AWS Config's own pseudo-resources. Not resources at all — they are Config's
+  # records OF resources, emitted once per rule evaluation, so they arrive at
+  # the rate Config evaluates rather than the rate infrastructure changes.
+  - AWS::Config::ResourceCompliance
+  - AWS::Config::ConformancePackCompliance
+  - AWS::SSM::ManagedInstanceInventory
+
+  # --- genuinely not worth a metric alarm ------------------------------------
   - AWS::IAM::Role
   - AWS::IAM::Policy
   - AWS::EC2::SecurityGroup

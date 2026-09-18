@@ -95,17 +95,13 @@ ALARM_SETS = SPEC.get("alarm_sets", {})
 IN_SCOPE = set(SPEC.get("resource_types_in_scope", []))
 NO_ALARMS = set(SPEC.get("resource_types_no_alarms", []))
 
-# Config's own pseudo-resources. Not in the spec's lists because they are not
-# resources at all — they are Config's records OF resources, and one is emitted
-# per rule evaluation. Found by testing: the first canary deployment produced
-# exceptions for AWS::Config::ResourceCompliance within a minute, which would
-# have filled the exception log and pinned the exception alarm permanently in
-# ALARM, destroying the one signal that says a real resource is unmonitored.
-CONFIG_PSEUDO_TYPES = {
-    "AWS::Config::ResourceCompliance",
-    "AWS::Config::ConformancePackCompliance",
-    "AWS::SSM::ManagedInstanceInventory",
-}
+# There is deliberately no hardcoded ignore list here.
+#
+# An earlier version carried CONFIG_PSEUDO_TYPES in code. Those types now live
+# in 06a's resource_types_no_alarms, which is the mechanism the specification
+# defines for "known, and deliberately not instrumented" — and keeping a second
+# list in code would recreate the two-copies problem that deleting
+# instrumentation/alarm-sets.yaml removed.
 
 
 def _now():
@@ -332,9 +328,6 @@ def handler(event, context):
                        "would create alarms on the wrong dimension.",
             "event": event})
         return {"status": "exception", "reason": "unparseable-event"}
-
-    if resource_type in CONFIG_PSEUDO_TYPES:
-        return {"status": "ignored-pseudo-type", "resource_type": resource_type}
 
     if resource_type in NO_ALARMS:
         # The spec's own words: "known, no alarms applicable". Recorded in the
