@@ -97,3 +97,50 @@ variable "alert_grouping_type" {
     error_message = "alert_grouping_type must be intelligent, content_based, time, or none."
   }
 }
+
+variable "low_urgency_service_name" {
+  type    = string
+  default = "AltDigital Platform — Low Urgency"
+
+  description = <<-EOT
+    Service carrying dev and test alarms.
+
+    A SECOND service, not a second routing rule on the first, because urgency
+    in PagerDuty is a property of the service (incident_urgency_rule), not of
+    the individual alert. One service cannot raise some incidents at high
+    urgency and others at low unless it derives urgency from an alert severity
+    field — which the CloudWatch vendor integration does not populate.
+
+    Two services, two integration keys, two SNS topics. It also means dev noise
+    can be muted, snoozed or re-escalated independently of production without
+    touching production's configuration.
+  EOT
+}
+
+variable "low_urgency_priority" {
+  type    = string
+  default = "P5"
+
+  description = <<-EOT
+    Incident priority applied to everything on the low-urgency service, or ""
+    to set none.
+
+    PRIORITY AND URGENCY ARE DIFFERENT THINGS, and conflating them is the usual
+    confusion:
+
+      urgency   high | low. Decides whether PagerDuty NOTIFIES you, and how.
+                Low urgency respects your low-urgency notification rules, which
+                by default means it appears in the UI and does not ring a phone.
+      priority  P1..P5. A label used for triage, filtering and reporting. It
+                changes nothing about notification on its own.
+
+    So "low urgency, P5" means: does not wake you, and is labelled as the
+    lowest triage tier.
+
+    PLAN-TIER DEPENDENT. Priorities and Event Orchestration are Business /
+    AIOps features, and this account already returned 403 on Intelligent Alert
+    Grouping. If apply fails on pagerduty_event_orchestration_service or on the
+    pagerduty_priority lookup, set this to "" — the low-urgency service still
+    works, it just carries no priority label.
+  EOT
+}

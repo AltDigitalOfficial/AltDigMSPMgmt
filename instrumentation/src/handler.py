@@ -69,6 +69,22 @@ EXCEPTION_LOG_GROUP = os.environ.get(
 # tiers an earlier version of this invented while design doc 14 was missing.
 ENVIRONMENT_TIER = os.environ.get("ENVIRONMENT_TIER", "dev")
 ALERT_TOPIC_ARN = os.environ.get("ALERT_TOPIC_ARN", "")
+
+# Where alarms whose 06a routing does NOT page are sent.
+#
+# 06a routes dev to `digest` and test to `digest_and_jira`. Neither destination
+# exists yet (phases 4.4 and 8), so those alarms were previously created with
+# no actions — real, evaluating, heard by nobody.
+#
+# They now go to a low-urgency PagerDuty service instead. That is a different
+# thing from pointing them at the paging topic: a low-urgency incident does not
+# ring a phone, it lands in the UI under the responder's low-urgency
+# notification rules. So the distinction 06a draws between paging and
+# not-paging is preserved, and the alarms stop being silent.
+#
+# INTERIM. When the digest exists, dev and test move there and this becomes the
+# fallback for anything with no destination.
+LOW_URGENCY_TOPIC_ARN = os.environ.get("LOW_URGENCY_TOPIC_ARN", "")
 ALARM_PREFIX = os.environ.get("ALARM_PREFIX", "platform-auto")
 
 # questionnaire 7.4, passed in by the vesting pipeline rather than read from the
@@ -440,14 +456,21 @@ def handler(event, context):
 
         routing = routing_for(spec)
         pages = (ROUTING.get(routing) or {}).get("pages", False)
-        actions = [ALERT_TOPIC_ARN] if (pages and ALERT_TOPIC_ARN) else []
-        if not pages:
-            # The destination exists in the spec and not yet in the platform.
-            # Creating the alarm with no action is correct for now — it
-            # evaluates and is visible — but it is NOT alerting, and routing it
-            # to PagerDuty instead would page someone for a dev box at 95% CPU,
-            # which is precisely what the spec's routing table prevents.
-            pending_destination.append({"alarm": aid, "routing": routing})
+
+        if pages:
+            actions = [ALERT_TOPIC_ARN] if ALERT_TOPIC_ARN else []
+        elif LOW_URGENCY_TOPIC_ARN:
+            actions = [LOW_URGENCY_TOPIC_ARN]
+            pending_destination.append(
+                {"alarm": aid, "routing": routing, "sent_to": "low-urgency"})
+        else:
+            # No destination at all. The alarm is still created — it evaluates
+            # and is visible in the console — but nothing is notified, and that
+            # is recorded rather than left to be inferred from an empty
+            # AlarmActions list.
+            actions = []
+            pending_destination.append(
+                {"alarm": aid, "routing": routing, "sent_to": "nowhere"})
 
         name = f"{ALARM_PREFIX}-{resource_id}-{aid}".replace("/", "-")[:255]
         params = {

@@ -188,3 +188,81 @@ resource "pagerduty_service_integration" "cloudwatch" {
   service = pagerduty_service.platform.id
   vendor  = data.pagerduty_vendor.cloudwatch.id
 }
+
+# ---------------------------------------------------------------------------
+# Low-urgency service — dev and test
+# ---------------------------------------------------------------------------
+# 06a routes dev to `digest` and test to `digest_and_jira`, neither of which
+# pages and neither of which has a destination built yet (phases 4.4 and 8).
+# Until they exist those alarms were being created with no actions at all:
+# real, evaluating, and heard by nobody.
+#
+# Sending them here instead is strictly better than silence and strictly better
+# than sending them to the high-urgency service. A low-urgency PagerDuty
+# incident does not ring a phone — it lands in the UI and follows the
+# responder's low-urgency notification rules — so dev noise becomes something
+# you can look at when you choose to, rather than something that wakes you or
+# something that vanishes.
+#
+# INTERIM. When the digest (4.4) and Jira routing (8) exist, dev and test
+# should move there and this service becomes the fallback for anything with no
+# destination rather than the destination itself.
+
+resource "pagerduty_service" "platform_low" {
+  name                    = var.low_urgency_service_name
+  description             = "Dev and test alarms from the AltDigital Managed Platform. Low urgency by design: these do not page."
+  escalation_policy       = pagerduty_escalation_policy.platform.id
+  alert_creation          = "create_alerts_and_incidents"
+  acknowledgement_timeout = "null"
+
+  # Auto-resolve IS enabled here, unlike the production service.
+  #
+  # On the production service auto-resolve is off because an untouched incident
+  # is still a true incident. Dev is the opposite case: a build machine at 95%
+  # CPU that nobody looked at for four hours is not an outstanding problem, and
+  # leaving hundreds of stale dev incidents open is how the low-urgency queue
+  # becomes unreadable and therefore ignored.
+  auto_resolve_timeout = "14400" # 4 hours
+
+  incident_urgency_rule {
+    type    = "constant"
+    urgency = "low"
+  }
+}
+
+resource "pagerduty_service_integration" "cloudwatch_low" {
+  name    = "AWS CloudWatch (low urgency)"
+  service = pagerduty_service.platform_low.id
+  vendor  = data.pagerduty_vendor.cloudwatch.id
+}
+
+# Priority is set by an Event Orchestration catch-all, not by the service.
+# There is no "default priority" field on a PagerDuty service — priority is an
+# incident property applied by a rule, which is why this needs a whole extra
+# resource to express one label.
+data "pagerduty_priority" "low" {
+  count = var.low_urgency_priority == "" ? 0 : 1
+  name  = var.low_urgency_priority
+}
+
+resource "pagerduty_event_orchestration_service" "platform_low" {
+  count = var.low_urgency_priority == "" ? 0 : 1
+
+  service                                = pagerduty_service.platform_low.id
+  enable_event_orchestration_for_service = true
+
+  # An orchestration must declare at least one rule set even when every event
+  # is meant to fall through to the catch-all. "start" is the entry point by
+  # convention; leaving it ruleless means nothing is matched specially and
+  # everything reaches catch_all, which is exactly the intent here — one
+  # priority on everything, no conditions.
+  set {
+    id = "start"
+  }
+
+  catch_all {
+    actions {
+      priority = data.pagerduty_priority.low[0].id
+    }
+  }
+}

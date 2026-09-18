@@ -65,6 +65,12 @@ TARGET="$(get_param "/org/account/${ACCOUNT_KEY}")"
 KEY="$(cd "${TFDIR}" && "${TF}" output -raw cloudwatch_integration_key 2>/dev/null)" || true
 [[ -n "${KEY}" ]] || die "Could not read cloudwatch_integration_key from Terraform output."
 
+# The low-urgency key is optional: the low-urgency service may not have been
+# applied, and on a plan tier without Event Orchestration its priority half
+# fails while the service itself still exists. Absent means the dev/test path
+# is simply not wired, which is a supported state.
+LOW_KEY="$(cd "${TFDIR}" && "${TF}" output -raw cloudwatch_low_integration_key 2>/dev/null)" || true
+
 # Length check only. The value is never echoed, and a routing key is a 32
 # character hex-ish token — a wildly different length means the wrong output
 # was read, which is worth catching before it becomes a subscription that
@@ -119,9 +125,28 @@ else
   ok "created ${SECRET_NAME}"
 fi
 
+# --- low-urgency key ------------------------------------------------------
+if [[ -n "${LOW_KEY}" ]]; then
+  [[ ${#LOW_KEY} -ge 20 ]] || die "Low-urgency routing key looks wrong (${#LOW_KEY} characters)."
+  LOW_SECRET="${SECRET_NAME}-low"
+  LOW_PAYLOAD="$(printf '{"integration_key":"%s"}' "${LOW_KEY}")"
+  if MSYS_NO_PATHCONV=1 aws secretsmanager describe-secret        --secret-id "${LOW_SECRET}" >/dev/null 2>&1; then
+    MSYS_NO_PATHCONV=1 aws secretsmanager put-secret-value       --secret-id "${LOW_SECRET}" --secret-string "${LOW_PAYLOAD}"       --query 'VersionId' --output text >/dev/null
+    ok "rotated ${LOW_SECRET} (${#LOW_KEY} characters, not printed)"
+  else
+    MSYS_NO_PATHCONV=1 aws secretsmanager create-secret       --name "${LOW_SECRET}"       --description "PagerDuty routing key for the LOW-URGENCY platform service (dev and test)"       --secret-string "${LOW_PAYLOAD}"       --tags Key=platform-managed,Value=true       --query 'ARN' --output text >/dev/null
+    ok "created ${LOW_SECRET} (${#LOW_KEY} characters, not printed)"
+  fi
+else
+  warn "No low-urgency integration key in the Terraform output. Dev and test
+      alarms will be created with no actions. Apply the low-urgency service
+      first if that is not intended."
+fi
+
 hr
 info "Next: redeploy the alerting stack so it creates the subscription"
 log "  scripts/deploy-to-account.sh --account ${ACCOUNT_KEY} \\"
 log "    --template alerting/10-alert-topic.yaml --stack platform-alerting \\"
-log "    OrganizationId=<o-...> PagerDutySecretName=${SECRET_NAME}"
+log "    OrganizationId=<o-...> PagerDutySecretName=${SECRET_NAME} \\"
+log "    LowUrgencySecretName=${SECRET_NAME}-low"
 hr

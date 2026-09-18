@@ -59,8 +59,24 @@ Parameters:
       publishes is a known-good half; a subscribed topic that silently drops
       them is not distinguishable from a working one.
 
+  LowUrgencySecretName:
+    Type: String
+    Default: ''
+    Description: >-
+      Secrets Manager secret holding the routing key for the LOW-URGENCY
+      PagerDuty service, under the key `integration_key`.
+
+      A second service and a second topic, because urgency in PagerDuty is a
+      property of the service rather than of the individual alert, and the
+      CloudWatch vendor integration does not populate an alert severity field
+      that a single service could derive urgency from.
+
+      Empty leaves dev and test alarms actionless, which was their state before
+      this existed.
+
 Conditions:
   HasPagerDuty: !Not [!Equals [!Ref PagerDutySecretName, '']]
+  HasLowUrgency: !Not [!Equals [!Ref LowUrgencySecretName, '']]
 
 Resources:
 
@@ -269,7 +285,97 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
+  # -------------------------------------------------------------------------
+  # Low-urgency path
+  # -------------------------------------------------------------------------
+  # Same key policy and topic policy shape as the main topic — it reuses
+  # AlertsKey and grants the same org-scoped publish — because the difference
+  # between these two paths is entirely about what PagerDuty does on receipt,
+  # not about who may publish.
+  #
+  # A separate TOPIC rather than a second subscription on the first, because an
+  # SNS topic fans out to every subscriber: one topic with both integrations
+  # attached would deliver every alarm to both services, and every dev alarm
+  # would page after all.
+  LowUrgencyTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasLowUrgency
+    Properties:
+      TopicName: platform-alerts-low
+      DisplayName: AltDigital Platform Alerts (low urgency)
+      KmsMasterKeyId: !Ref AlertsKey
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+
+  LowUrgencyTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: HasLowUrgency
+    Properties:
+      Topics:
+        - !Ref LowUrgencyTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowOrganizationAlarmsToPublish
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudwatch.amazonaws.com
+                - events.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref LowUrgencyTopic
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
+          - Sid: DenySubscribeFromOutsideThisAccount
+            Effect: Deny
+            Principal: { AWS: '*' }
+            Action: 'sns:Subscribe'
+            Resource: !Ref LowUrgencyTopic
+            Condition:
+              StringNotEquals:
+                'aws:PrincipalAccount': !Ref AWS::AccountId
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: { AWS: '*' }
+            Action: 'sns:Publish'
+            Resource: !Ref LowUrgencyTopic
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  LowUrgencySubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasLowUrgency
+    Properties:
+      TopicArn: !Ref LowUrgencyTopic
+      Protocol: https
+      Endpoint: !Sub
+        - 'https://events.pagerduty.com/integration/${Key}/enqueue'
+        - Key: !Sub '{{resolve:secretsmanager:${LowUrgencySecretName}:SecretString:integration_key}}'
+      DeliveryPolicy:
+        healthyRetryPolicy:
+          numRetries: 10
+          minDelayTarget: 10
+          maxDelayTarget: 300
+          numMinDelayRetries: 3
+          numMaxDelayRetries: 3
+          backoffFunction: exponential
+
+  # Deliberately NO delivery-failure alarm on this topic.
+  #
+  # The production topic has one because losing it means losing every page. If
+  # the low-urgency path breaks, dev and test alarms stop arriving in a queue
+  # nobody watches urgently — which is worth knowing and is not worth its own
+  # alarm, since the alarm would itself be low urgency and land in the same
+  # queue that is not being delivered.
+
 Outputs:
+
+  LowUrgencyTopicArn:
+    Condition: HasLowUrgency
+    Description: Dev and test alarms publish here. Low urgency; does not page.
+    Value: !Ref LowUrgencyTopic
 
   AlertsTopicArn:
     Description: Publish platform alarms here. Referenced cross-account by alarm stacks.

@@ -115,6 +115,19 @@ Parameters:
       create. Both are in the member baseline and the numeric prefix is the
       deployment order.
 
+  LowUrgencyTopicArn:
+    Type: String
+    Default: ''
+    Description: >-
+      SNS topic in the Audit account for alarms whose 06a routing does not
+      page — dev's `digest` and test's `digest_and_jira`.
+
+      Feeds a separate low-urgency PagerDuty service. A low-urgency incident
+      does not ring a phone; it lands in the UI. So the paging/not-paging
+      distinction 06a draws is preserved while those alarms stop being silent.
+
+      Empty leaves them actionless, which was the state before this existed.
+
   ExceptionRetentionDays:
     Type: Number
     Default: 365
@@ -262,6 +275,7 @@ Resources:
           EXCEPTION_LOG_GROUP: !Ref ExceptionLogGroup
           ENVIRONMENT_TIER: !Ref EnvironmentTier
           ACCEPTABLE_RESPONSE_MS: !Ref AcceptableResponseMs
+          LOW_URGENCY_TOPIC_ARN: !Ref LowUrgencyTopicArn
           ALERT_TOPIC_ARN: !Ref AlertTopicArn
           ALARM_PREFIX: platform-auto
       Tags:

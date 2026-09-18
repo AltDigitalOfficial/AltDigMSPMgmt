@@ -32,3 +32,18 @@ output "cloudwatch_integration_url" {
   value       = "https://events.pagerduty.com/integration/${pagerduty_service_integration.cloudwatch.integration_key}/enqueue"
   sensitive   = true
 }
+
+output "low_urgency_service_id" {
+  description = "PagerDuty service carrying dev and test alarms at low urgency"
+  value       = pagerduty_service.platform_low.id
+}
+
+output "cloudwatch_low_integration_key" {
+  description = <<-EOT
+    Routing key for the low-urgency CloudWatch integration. A credential, same
+    as the production one — written to Secrets Manager by
+    scripts/sync-pagerduty-secrets.sh under a separate secret.
+  EOT
+  value       = pagerduty_service_integration.cloudwatch_low.integration_key
+  sensitive   = true
+}
