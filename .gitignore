@@ -12,6 +12,16 @@ config/contacts.env*
 config/identity.env*
 !config/identity.env.example
 
+# Jira account identifiers for the people who may authorise a quorum action.
+# An Atlassian accountId identifies an individual, and the file also carries
+# the names needed to read it, so it is personal data on both counts and gets
+# the same treatment. Copy config/quorum.env.example and fill in locally.
+#
+# The platform reads these from SSM, never from this file directly --
+# scripts/sync-quorum-approvers.sh publishes them.
+config/quorum.env*
+!config/quorum.env.example
+
 # Local AWS and tooling state
 .aws-sam/
 *.tfstate
