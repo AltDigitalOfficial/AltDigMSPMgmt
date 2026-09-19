@@ -382,6 +382,38 @@ def approvals(issue_key):
     return data.get("values") or []
 
 
+def issue_state(issue_key):
+    """Status, reporter and timing for one issue. Read-only.
+
+    The quorum verifier needs all three and none of them are the approval:
+    the REPORTER is condition 2's requester, `created` is condition 3's
+    request time, and the status says whether the issue has even reached the
+    stage where an approval could exist.
+
+    That last one matters more than it sounds. An approval record is created
+    when the workflow enters its approval status, so a request sitting in the
+    status before it has zero approvals -- identical, from the API, to a
+    request whose approvers have all declined to act. Without the status,
+    "count: 0" cannot be told apart from "refused".
+    """
+    data = _get(f"/rest/api/3/issue/{urllib.parse.quote(issue_key)}",
+                {"fields": "status,reporter,created,updated,summary"})
+    f = data.get("fields") or {}
+    status = f.get("status") or {}
+    return {
+        "key": data.get("key"),
+        "summary": f.get("summary"),
+        "status": status.get("name"),
+        "status_category": ((status.get("statusCategory") or {})
+                            .get("name")),
+        # accountId, not a name or an address. It is the identifier the
+        # approval records use, and it is what condition 2 compares.
+        "reporter_account_id": ((f.get("reporter") or {}).get("accountId")),
+        "created": f.get("created"),
+        "updated": f.get("updated"),
+    }
+
+
 def issue_with_changelog(issue_key):
     """One issue plus its full history.
 

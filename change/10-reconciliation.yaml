@@ -89,6 +89,16 @@ Parameters:
       issues, and an engine that trusted that would report every deployment as
       unapproved. open-items.md B9 settles the correct value.
 
+  JiraApproverGroups:
+    Type: String
+    Default: ''
+    Description: >-
+      Comma-separated Jira group name(s) written to a change record's Approver
+      groups field. The change workflow's Authorize stage needs one approval
+      from each; a record filed without any group cannot be approved at all,
+      and an unapproved record does not cover a deployment. Empty is allowed
+      so a project with no approval stage still files records.
+
   JiraOpsProject:
     Type: String
     Default: ''
@@ -378,6 +388,7 @@ Resources:
           JIRA_SECRET_NAME: !Ref JiraSecretName
           JIRA_OPS_PROJECT: !Ref JiraOpsProject
           JIRA_CHANGE_ISSUETYPE: !Ref JiraChangeIssueType
+          JIRA_APPROVER_GROUPS: !Ref JiraApproverGroups
 
   # -------------------------------------------------------------------------
   # Capture

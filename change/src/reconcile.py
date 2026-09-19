@@ -955,12 +955,27 @@ def request_form(event=None, context=None):
     return {"error": f"no request type named '{want_name}' in {project}"}
 
 
+def issue_state(event=None, context=None):
+    """Status plus approvals for one issue, which is how to read 'count: 0'."""
+    key = (event or {}).get("issue")
+    if not key:
+        return {"error": "pass an issue key"}
+    out = jira.issue_state(key)
+    try:
+        out["approvals"] = jira.approvals(key)
+    except jira.JiraUnavailable as exc:
+        out["approvals_error"] = str(exc)
+    print(json.dumps(out, default=str))
+    return out
+
+
 HANDLERS = {"capture": capture, "reconcile": reconcile,
             "customer_caused": customer_caused, "health": health,
             "change_fields": change_fields, "find_field": find_field,
             "approval_shape": approval_shape,
             "request_type_map": request_type_map,
-            "request_form": request_form}
+            "request_form": request_form,
+            "issue_state": issue_state}
 
 
 def handler(event, context):

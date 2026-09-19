@@ -83,6 +83,24 @@ CHANGE_REQUEST_TYPE = os.environ.get("JIRA_CHANGE_REQUEST_TYPE",
                                      "Request a change")
 TIMEOUT = int(os.environ.get("JIRA_TIMEOUT_SECONDS", "30"))
 
+# Groups whose members authorise a change.
+#
+# The Authorize stage of the change workflow requires one approval from each
+# group named in the record's "Approver groups" field. A record filed without
+# any group is therefore UNAPPROVABLE -- and an unapproved record does not
+# cover a deployment, so the platform's own build work would be reported as
+# unapproved change by the control the build work is creating.
+#
+# Worth being exact about what this does and does not achieve: one group
+# containing one person satisfies Jira's rule and does NOT satisfy design 03,
+# which requires two approvals from distinct people with the requester
+# excluded. Nothing here enforces that. The quorum verifier counts distinct
+# approver identities itself, which is design 08's instruction to validate
+# rather than trust the ticket.
+APPROVER_GROUPS = [g.strip() for g in
+                   os.environ.get("JIRA_APPROVER_GROUPS", "").split(",")
+                   if g.strip()]
+
 # Defaults for build-phase records, decided with Jamie 2026-09-19.
 #
 # Standard, and the label is not decoration. "Standard" in ITIL means
@@ -260,6 +278,12 @@ def file_change(event, context=None):
         "Business Test Plan": event.get("business_test_plan"),
         "Description": event.get("description") or event.get("reason_text"),
     }
+    # A multigrouppicker takes [{"name": ...}]. Omitted entirely when no group
+    # is configured, rather than sent empty: an empty value would overwrite a
+    # default the project might set for itself.
+    groups = event.get("approver_groups") or APPROVER_GROUPS
+    if groups:
+        desired["Approver groups"] = [{"name": g} for g in groups]
     # `extra` reaches a field this code has never heard of, by name:
     # {"Business Test Plan": "..."}. Tenant projects will not all look like
     # AMI, and a field added to a screen should not need a code change.
@@ -275,7 +299,7 @@ def file_change(event, context=None):
 
     form = _request_form(project)
     if form:
-        result = _raise_request(form, summary, desired, labels)
+        result = _raise_request(project, form, summary, desired, labels)
     else:
         result = _create_issue(project, summary, desired, labels)
 
@@ -325,7 +349,7 @@ def _create_issue(project, summary, desired, labels):
                 "JSM request and cannot carry an approval.")}
 
 
-def _raise_request(form, summary, desired, labels):
+def _raise_request(project, form, summary, desired, labels):
     """JSM request API. Approvable, but the form takes a narrower field set.
 
     Two differences from the issue API, both learned from the live form rather
@@ -333,20 +357,25 @@ def _raise_request(form, summary, desired, labels):
 
     - Rich text goes as a PLAIN STRING. The request API renders it; sending ADF
       here is the mirror image of B-075.
-    - Labels are not on the request form at all, so they are set immediately
-      afterwards by an edit. That edit happens before any approval exists, so
-      it cannot disturb design 08 condition 4, "not edited since approval".
+    - The form is NARROWER than the issue. Labels and Approver groups are both
+      absent from it, and both are load-bearing. So anything the form cannot
+      take but the issue can is applied immediately afterwards in one edit.
+
+    That edit happens before any approval can exist -- the record is created in
+    the stage preceding Authorize -- so it cannot disturb design 08 condition
+    4, "the issue has not been reopened or edited since approval".
     """
     by_name = {f.get("name"): f for f in form["fields"] if f.get("name")}
 
     values = {"summary": summary[:250]}
-    unavailable = []
+    deferred = {}
     for name, value in desired.items():
         if value is None:
             continue
         f = by_name.get(name)
         if f is None:
-            unavailable.append(name)
+            # Not rejected -- postponed. The issue may still accept it.
+            deferred[name] = value
             continue
         values[f["id"]] = value
 
@@ -357,35 +386,84 @@ def _raise_request(form, summary, desired, labels):
     })
     key = created.get("issueKey") or created.get("issueId")
 
-    # Labels, in a second call, because the request form has no labels field.
-    #
-    # Fatal on failure, deliberately. A change record with no `account-<id>`
-    # label matches no deployment, so reconciliation would report every
-    # deployment in that account as unapproved -- a false accusation caused by
-    # a silent half-success here. Better a loud failure naming the key, so the
-    # record can be completed by hand, than a record that looks fine and
-    # quietly breaks the control that reads it.
-    labelled = False
-    if labels and key:
-        try:
-            _request(f"/rest/api/3/issue/{urllib.parse.quote(key)}",
-                     {"update": {"labels": [{"add": l} for l in labels]}},
-                     method="PUT")
-            labelled = True
-        except jira.JiraUnavailable as exc:
-            raise jira.JiraUnavailable(
-                f"{key} was raised but its labels could not be set: {exc}\n"
-                f"      Add these to {key} by hand: {', '.join(labels)}\n"
-                "      Until they are there, reconciliation cannot match this "
-                "record to the deployments it authorises, and those "
-                "deployments will be reported as unapproved.") from exc
-
+    applied, unavailable = _apply_deferred(project, key, deferred, labels)
     return {"key": key,
             "created_via": "jsm-request",
             "request_type": form.get("request_type_name"),
-            "labels_set": labelled,
             "fields_set": sorted(k for k in values if k != "summary"),
+            "fields_deferred_to_edit": sorted(applied),
             "fields_unavailable": sorted(unavailable)}
+
+
+def _apply_deferred(project, key, deferred, labels):
+    """Set what the request form could not, in one edit on the issue.
+
+    Returns (applied field names, names nothing can carry).
+
+    FATAL on failure, deliberately, and the two fields that drive that are the
+    reason this function is not best-effort:
+
+      labels          reconciliation reads `account-<id>` to decide which
+                      deployments a record covers. A record that lost them
+                      matches nothing, so every deployment in that account is
+                      reported as unapproved -- a false accusation produced by
+                      a half-successful filing.
+
+      Approver groups the Authorize stage needs one approval per named group.
+                      A record with none cannot be approved at all, and an
+                      unapproved record does not cover a deployment either.
+
+    Both failure modes are silent and both surface later as findings about
+    somebody else. A loud failure naming the key and what to add by hand is
+    strictly better than a record that looks complete and quietly breaks the
+    control that reads it.
+    """
+    if not key or (not deferred and not labels):
+        return [], []
+
+    available = _field_ids(project, CHANGE_ISSUETYPE)
+    fields = {}
+    applied = []
+    unavailable = []
+    for name, value in deferred.items():
+        f = available.get(name)
+        if f is None:
+            # On neither the form nor the issue. Genuinely not configured.
+            unavailable.append(name)
+            continue
+        # The issue API's shapes, not the request API's -- this is the same
+        # value rendered for a different endpoint. B-075 in the other
+        # direction.
+        if _is_rich_text(f) and isinstance(value, str):
+            value = _adf(value)
+        fields[f["id"]] = value
+        applied.append(name)
+
+    payload = {}
+    if fields:
+        payload["fields"] = fields
+    if labels:
+        # `update` rather than `fields`, so this adds to whatever the project
+        # may already have set rather than replacing it.
+        payload["update"] = {"labels": [{"add": l} for l in labels]}
+        applied.append("Labels")
+    if not payload:
+        return applied, unavailable
+
+    try:
+        _request(f"/rest/api/3/issue/{urllib.parse.quote(key)}",
+                 payload, method="PUT")
+    except jira.JiraUnavailable as exc:
+        wanted = ", ".join(sorted(applied))
+        raise jira.JiraUnavailable(
+            f"{key} was raised, but these could not be set on it: {wanted}\n"
+            f"      {exc}\n"
+            f"      Fix {key} by hand before relying on it. Without labels "
+            "reconciliation cannot match this record to the deployments it "
+            "authorises, and without an approver group it cannot be approved "
+            "at all -- either way the deployments it covers will be reported "
+            "as unapproved.") from exc
+    return applied, unavailable
 
 
 def complete_change(event, context=None):

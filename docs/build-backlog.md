@@ -2616,7 +2616,12 @@ than fail loudly.
 
 ## B-076 · Business Test Plan exists but cannot be set when the record is created
 
-**Open** — needs a Jira screen configuration change. Not blocking.
+**Fixed** — 2026-09-19 by Jamie adding the field to the change screens. No code
+change was needed, which was the point: the filer sets whatever the metadata
+says the record can carry. AMI-4 populated it on the first filing after the
+screen change, and `fields_unavailable` went to empty.
+
+Original finding follows.
 
 Jamie added "Business Test Plan" to the change record. It does not appear in
 the create metadata, so the platform cannot populate it when it files a record.
@@ -2705,9 +2710,97 @@ above. It now matches the forbidden ACTS — approval and transition endpoints �
 not the address space. Fourth instance this session of a guard matching a word
 rather than a construct.
 
-## B-078 · Nothing can be approved: the change workflow has no approval step
+## B-078 · An approval exists only once the issue reaches the approval status
 
-**Open** — needs a Jira configuration change. **Blocks quorum verification.**
+**Fixed** — 2026-09-19. The first diagnosis was wrong and is kept below,
+because the way it was wrong is the finding.
+
+**What this actually is.** The `Request a change` workflow DOES have an
+approval step. It sits on the **Authorize** status, with the rule *one person
+from each group named in the record's Approver groups field must approve*.
+Jamie configured the group `AWS Core Infra Approvers`.
+
+A newly raised request is created in **Review**, which is the status before
+Authorize. JSM creates the approval record when the workflow ENTERS the
+approval status, so a request sitting in Review has no approval record at all:
+
+    AMI-3   status=Review   approvals=0
+    AMI-4   status=Review   approvals=0
+
+Identical, from the API, to a request whose approvers have all refused to act.
+
+**Two things were needed, and only one was a code change.**
+
+*Approver groups on the record.* The field is on the issue screens but NOT on
+the request type's form, so `/rest/servicedeskapi/request` cannot set it at
+creation. Those are two separate configurations in JSM, and it is easy to check
+the first and conclude the second is fine — which is exactly what happened, and
+the screen config was correct. The filer now applies the field in the
+post-create edit, alongside labels. A record filed without a group cannot be
+approved at all, and an unapproved record does not cover a deployment, so this
+would have surfaced as our own build work being reported as unapproved change.
+
+*The transition into Authorize is a human act, deliberately.* The platform
+files the record and stops. It does not move its own change into the approval
+stage, and `scripts/publish-change.sh` refuses to package a filer that names a
+transition endpoint. The reason is narrow: if the workflow anywhere permits
+Review to reach an approved status directly, a component that can transition
+can approve itself, and the record it files proves nothing. Submitting for
+approval is cheap for a human, and is the point at which somebody affirms the
+change is real.
+
+**Why `issue_state` was added.** Status is what makes `count: 0` readable.
+Three different situations produce it —
+
+    status is before the approval step  -> approval is not yet POSSIBLE
+    status is the approval step, empty  -> approval is PENDING
+    no approval step in the workflow    -> approval is IMPOSSIBLE here
+
+— and reporting any of them as "not approved" is the fourth repetition of
+B-042/B-054: an unavailable answer reported as a negative one. The third case
+is a finding about the platform's own configuration rather than a denial, and
+the verifier must say which it is.
+
+**What is still true and still open:** one group with one member satisfies
+Jira's rule and does not satisfy design 03, which requires two approvals from
+distinct people with the requester excluded. The quorum verifier enforces that
+itself rather than trusting the workflow, so quorum actions will correctly
+refuse until Wayne and Art are in the group. Tracked as B-079.
+
+### Original diagnosis, kept because it was wrong in an instructive way
+
+The first reading of `{"readable": true, "count": 0}` was "the workflow has no
+approval step". That was concluded from an empty list without asking what status
+the issue was in — the same mistake the verifier is being built to avoid, made
+while building it. An empty result has more than one cause, and the API does not
+volunteer which one applies.
+
+## B-079 · One approver is not two-party control
+
+**Open** — needs people, not configuration. **Blocks quorum execution,
+correctly.**
+
+`AWS Core Infra Approvers` has one member. The Authorize rule is one approval
+per group, so a single approval from Jamie satisfies Jira.
+
+design 03 requires **two approvals from {Jamie, Wayne, Art}, with requester and
+approvers being distinct people**, for `kms:ScheduleKeyDeletion`, backup vault
+deletion or lock modification, removal of a member account from the
+Organization, and disabling CloudTrail or the Config recorder.
+
+Jira's rule and AltDigital's rule are not the same rule, and today Jira's is the
+weaker of the two. This is precisely the case design 08 anticipates when it says
+the pipeline **validates rather than trusting the ticket's status field** — Jira
+permissions are easy to get subtly wrong, and a workflow satisfied by one person
+is exactly that.
+
+So the verifier counts distinct approver accountIds against an authorised list
+held in SSM, and enforces requester-exclusion itself. Until Wayne and Art are
+added, quorum actions refuse to execute. That is correct behaviour rather than a
+defect: the alternative is a two-party control that one person can satisfy.
+
+Ordinary changes are unaffected — they need one approval and have one approver.
+
 
 With B-077 fixed, approvals are readable. AMI-3, raised as a proper request:
 
