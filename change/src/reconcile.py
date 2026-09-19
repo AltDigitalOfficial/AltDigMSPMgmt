@@ -745,6 +745,37 @@ def health(event=None, context=None):
                     "deployments as unapproved -- see open-items.md B9.")
         except jira.JiraUnavailable as exc:
             out["project_error"] = str(exc)
+
+        # JSM request types, resolved to the issue type behind each one.
+        #
+        # The portal shows a request type -- "Request a change" -- and the
+        # issue underneath carries an issue type like "[System] Change".
+        # Reconciliation searches by ISSUE TYPE in JQL, so that is what the
+        # configuration needs, and finding it in the Jira UI is unreasonably
+        # hard. Asking the API is not.
+        try:
+            id_to_name = jira.project_issue_type_map(DEFAULT_CHANGE_PROJECT)
+            desks = jira.service_desks()
+            for desk in desks:
+                if desk.get("project_key") != DEFAULT_CHANGE_PROJECT:
+                    continue
+                out["request_types"] = [
+                    {"request_type": rt["name"],
+                     "backed_by_issue_type": id_to_name.get(rt["issue_type_id"],
+                                                            "unknown")}
+                    for rt in jira.request_types(desk["id"])
+                ]
+                # The one the operator is looking for, named outright.
+                changeish = [r for r in out["request_types"]
+                             if "change" in (r["request_type"] or "").lower()
+                             or "change" in (r["backed_by_issue_type"] or "").lower()]
+                if changeish:
+                    out["change_candidates"] = changeish
+                    out["suggested_issue_type"] = changeish[0][
+                        "backed_by_issue_type"]
+        except jira.JiraUnavailable as exc:
+            out["request_type_error"] = str(exc)
+
     print(json.dumps(out, default=str))
     return out
 

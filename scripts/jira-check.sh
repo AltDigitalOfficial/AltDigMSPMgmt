@@ -83,6 +83,23 @@ if "project_issue_types" in d:
     print(f"  issue types     : {', '.join(d['project_issue_types'])}")
     mark = "ok" if d.get("issue_type_present") else "MISSING"
     print(f"  '{d.get('expected_issue_type')}' issue type : {mark}")
+if d.get("request_types"):
+    print("")
+    print("  JSM request types in this project:")
+    for rt in d["request_types"]:
+        print(f"    {rt['request_type']:<38} -> issue type: {rt['backed_by_issue_type']}")
+if d.get("suggested_issue_type"):
+    print("")
+    print("  LOOKS LIKE YOUR CHANGE TYPE:")
+    for c in d.get("change_candidates", []):
+        print(f"    request type '{c['request_type']}'"
+              f" is backed by issue type '{c['backed_by_issue_type']}'")
+    print("")
+    print("  Set in config/platform.env:")
+    print(f"    PLATFORM_JIRA_CHANGE_ISSUETYPE={d['suggested_issue_type']}")
+if d.get("request_type_error"):
+    print("")
+    print("  REQUEST TYPE LOOKUP FAILED: " + d["request_type_error"][:300])
 if d.get("warning"):
     print("")
     print("  WARNING: " + d["warning"])

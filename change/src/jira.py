@@ -196,6 +196,43 @@ def project_issue_types(project_key):
     return [t.get("name") for t in (data.get("issueTypes") or [])]
 
 
+def service_desks():
+    """JSM service desks on the site, with their project keys.
+
+    A request type is a JSM concept layered on top of an issue type: the
+    portal shows "Request a change", the issue underneath has issue type
+    "[System] Change". Reconciliation searches by ISSUE TYPE in JQL, so the
+    issue type is what the configuration needs -- but the request type is what
+    somebody sees in the Jira UI, and being unable to map between them is how
+    an hour goes missing.
+    """
+    data = _get("/rest/servicedeskapi/servicedesk", {"limit": 100})
+    return [{"id": d.get("id"), "project_key": d.get("projectKey"),
+             "project_name": d.get("projectName")}
+            for d in (data.get("values") or [])]
+
+
+def request_types(service_desk_id):
+    """Request types in a service desk, each with the issue type behind it."""
+    data = _get(
+        f"/rest/servicedeskapi/servicedesk/{urllib.parse.quote(str(service_desk_id))}"
+        "/requesttype", {"limit": 100})
+    # groupIds is a list of STRING ids, not objects. Treating it as objects
+    # threw "'str' object has no attribute 'get'" on the first live call --
+    # a reminder that this client is written against documentation and every
+    # new endpoint needs one real response before it is trusted. B-068.
+    return [{"id": r.get("id"), "name": r.get("name"),
+             "issue_type_id": r.get("issueTypeId"),
+             "group_ids": [str(g) for g in (r.get("groupIds") or [])]}
+            for r in (data.get("values") or [])]
+
+
+def project_issue_type_map(project_key):
+    """Issue type id -> name, so a request type can be resolved to one."""
+    data = _get(f"/rest/api/3/project/{urllib.parse.quote(project_key)}")
+    return {t.get("id"): t.get("name") for t in (data.get("issueTypes") or [])}
+
+
 def search(jql, fields=None, max_results=100):
     """JQL search. Returns the raw issue list.
 
