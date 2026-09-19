@@ -1,0 +1,884 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the unified restore workflow (prompt 6.1). ONE
+  Step Functions state machine with a mode parameter. Test mode and recovery
+  mode differ in exactly two places: which network the restore targets, and
+  whether teardown runs. Part of the member baseline.
+
+# ---------------------------------------------------------------------------
+# P4, and how this template enforces it
+# ---------------------------------------------------------------------------
+# design/01-design-principles.md lines 50-59:
+#
+#   P4 — The test path and the real path are the same code. Any recovery,
+#   restore or containment procedure is a single artifact with a mode
+#   parameter. Test mode and production mode differ in target and teardown,
+#   never in sequence or logic.
+#
+#   Why: a recovery procedure exercised only during an incident is a procedure
+#   that has never been tested.
+#
+# Prompt 6.1: "Do not build two workflows. Do not build a 'test harness' that
+# wraps a separate production procedure. If you find yourself writing
+# mode-specific logic beyond target selection and teardown, stop and flag it."
+#
+# Taken literally. In the whole state machine below there is exactly ONE state
+# that reads the mode — TeardownOrStop — and exactly one function in
+# recovery/src/worker.py that does, select_target(). Every other state runs the
+# same code on the same sequence regardless of why it was started. A grep for
+# `mode` across this file and that one should stay short enough to read in one
+# sitting; if it grows, that is the flag prompt 6.1 asks for.
+#
+# ---------------------------------------------------------------------------
+# design/05-resilience.md is NOT in the design package
+# ---------------------------------------------------------------------------
+# Prompt 6.1 opens by citing 05's "The unified restore path" section. The file
+# does not exist, and CLAUDE.md forbids inventing the contents of a missing
+# design document. So the MECHANISM here is built from P4 and the prompt, and
+# every place 05 would have supplied CONTENT is marked rather than guessed:
+#
+#   * what "isolated" means for a restore test VPC (open-items.md V4)
+#     -> recovery/src/worker.py assert_target() checks a documented floor
+#   * backup plan contents, retention, vault lock (open-items.md V2)
+#     -> nothing is built; see recovery/00-restore-fixture.yaml and B-043
+#   * the in-guest validation executor and its credentials
+#     -> not built; see recovery/src/worker.py VALIDATIONS and B-044
+#   * restore duration thresholds (open-items.md B3)
+#     -> parameters, defaulted to placeholders, marked as such in every record
+#
+# Precedent: baseline/50-instrumentation.yaml was built the same way against a
+# missing design 06, and the swap was a data edit when 06 arrived.
+#
+# ---------------------------------------------------------------------------
+# There is no backup infrastructure
+# ---------------------------------------------------------------------------
+# No AWS::Backup::BackupPlan or BackupSelection exists anywhere in this
+# repository, and no prompt in phases 0-5 creates one. This workflow therefore
+# does NOT assume a recovery point exists. "No recovery point" is a first-class
+# outcome that reports the true state of the account and routes as dated work,
+# not an error that lights an alarm every month until somebody mutes it — which
+# is the B-042 failure this platform has already had once. B-043.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+    Description: Artifact bucket in Platform Tooling holding the recovery package.
+
+  ArtifactKey:
+    Type: String
+    Description: Content-addressed package key.
+
+  EnvironmentTier:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, uat, prod]
+    Description: >-
+      Travels into every record and dossier. The ROUTER reads it to decide who
+      hears about a failure; nothing here re-derives that decision.
+
+      Note that design/14-environment-tiers.md line 85 restricts restore testing
+      to uat and prod. Deploying this to a dev or test account is not prevented
+      — the stack is harmless without a source resource — but the schedule in
+      20-restore-schedule.yaml should not be.
+
+  # -------------------------------------------------------------------------
+  # What to restore
+  # -------------------------------------------------------------------------
+
+  BackupVaultName:
+    Type: String
+    Default: ''
+    Description: >-
+      Vault holding the recovery points. EMPTY IS THE NORMAL STATE TODAY: the
+      platform has no backup plans and no vaults outside the sandbox fixture
+      (B-043). With it empty the workflow runs, finds nothing, and records
+      "no recovery point" — which is the accurate state of the account.
+
+  SourceResourceArn:
+    Type: String
+    Default: ''
+    Description: >-
+      The resource whose latest completed recovery point is restored. Empty
+      behaves as above.
+
+      One resource, not a selection. design 05 would say how a tenant's
+      restore-test subject is chosen — the largest database, a rotating sample,
+      everything — and it is absent, so this takes the narrow, explicit option
+      rather than inventing a selection rule.
+
+  # -------------------------------------------------------------------------
+  # Targets — the first of P4's two permitted differences
+  # -------------------------------------------------------------------------
+
+  TestVpcId:
+    Type: String
+    Default: ''
+    Description: >-
+      Recorded on every run so the target is named in the evidence. The
+      ISOLATION ASSERTION is made against TestSubnetIds, not against this —
+      reachability is a property of the route table a subnet uses, not of what
+      is attached to the VPC. baseline/40-network.yaml attaches an internet
+      gateway to every VPC it builds including the `isolated` profile, so a
+      VPC-level check calls a correctly isolated network unsafe. B-047.
+
+  TestSubnetIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >-
+      Where a TEST restore lands, and what the isolation assertion is made
+      against. Before anything is created the workflow resolves each subnet's
+      route table — explicit association, or the VPC main table where there is
+      none — and refuses to restore if any route leads to an internet gateway,
+      NAT gateway, transit gateway, peering connection or gateway endpoint.
+      open-items.md V4.
+
+  TestSecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: ''
+
+  TestDbSubnetGroup:
+    Type: String
+    Default: ''
+
+  RecoveryVpcId:
+    Type: String
+    Default: ''
+    Description: >-
+      Production networking. A RECOVERY restore lands here, is validated and
+      recorded, and the workflow STOPS — no teardown, ever.
+
+  RecoverySubnetIds:
+    Type: CommaDelimitedList
+    Default: ''
+
+  RecoverySecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: ''
+
+  RecoveryDbSubnetGroup:
+    Type: String
+    Default: ''
+
+  # -------------------------------------------------------------------------
+  # RTO and the thresholds prompt 6.2 wants
+  # -------------------------------------------------------------------------
+
+  RtoSeconds:
+    Type: Number
+    Default: 14400
+    MinValue: 60
+    Description: >-
+      Questionnaire 4.1: "RTO | Default 4 hours; drives restore test
+      thresholds". 14400 is that default. Per tenant at vesting.
+
+  WarningPercentOfRto:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    MaxValue: 100
+    Description: >-
+      PLACEHOLDER — NOT A DECIDED VALUE. open-items.md B3: "Restore duration
+      warning/breach thresholds | Jamie | Principle agreed (two tiers,
+      differentiated routing); values not set".
+
+      Proposed reasoning, offered for B3 rather than assumed: half the RTO
+      budget spent is the last point at which there is still room to act before
+      the commitment is at risk.
+
+      A run crossing this raises a dated Jira ticket and appears in the digest.
+      It does not page.
+
+  BreachPercentOfRto:
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 100
+    Description: >-
+      PLACEHOLDER — NOT A DECIDED VALUE. See B3 and the note above.
+
+      Proposed reasoning: 80 rather than 100, because crossing 100% means the
+      RTO has already been missed and an alert that fires at the moment of
+      failure has no value as an early warning.
+
+      A run crossing this declares no routing class of its own, so the router
+      applies the account's tier default from design/06a — which pages in prod.
+      That is prompt 6.2's "breach tier: PagerDuty page", reached through the
+      one routing layer rather than by this stack deciding to page.
+
+  ThresholdsArePlaceholders:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Stamped into every record, ticket and page produced by a threshold
+      evaluation. Set to false only when B3 is closed and the two percentages
+      above are real commitments.
+
+      This exists because prompt 6.2 asks that the unset state be OBVIOUS, and a
+      comment in a template is not obvious to somebody reading a Jira ticket at
+      the other end of the pipeline.
+
+  TrendWarningMonths:
+    Type: Number
+    Default: 6
+    MinValue: 1
+    Description: >-
+      PLACEHOLDER, on the same footing as the two percentages above —
+      open-items.md B3 covers the duration tiers and says nothing about the
+      trend.
+
+      Prompt 6.2 asks that creep toward the RTO be "visible months before it
+      breaches". The workflow fits a least-squares line to the last 400 days of
+      durations; when the projection says a run will cross the RTO sooner than
+      this many months, the run raises its own routing from `digest` to
+      `digest_and_jira` — a dated ticket and a digest line, never a page.
+      Nothing is wrong yet, which is exactly why it must not page.
+
+      Six months is proposed on the grounds that it is long enough to schedule
+      remediation into a quarter rather than react to it.
+
+      This is NOT a CloudWatch alarm, and could not be. CloudWatch requires
+      EvaluationPeriods x Period <= 604800 for any alarm with a period of an
+      hour or more, so the longest window an alarm can watch is one week, and
+      this metric is written once a month. B-050.
+
+  RestoreTimeoutSeconds:
+    Type: Number
+    Default: 10800
+    MinValue: 300
+    Description: >-
+      How long the workflow waits before recording TIMED_OUT. The restore job
+      is NOT cancelled — cancelling is a destructive act against something that
+      may still succeed, and this platform's automation does not do that. The
+      job runs on; the workflow stops waiting so that a record exists.
+
+  TeardownResourceTypes:
+    Type: String
+    Default: EBS
+    Description: >-
+      Which resource types teardown is ARMED to delete. Defaults to EBS alone —
+      the only type exercised end to end against the sandbox fixture. An
+      unarmed type is reported as an orphan for a human instead. B-045, and the
+      reasoning is in recovery/src/teardown.py.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Empty falls back to alias/platform-logs, created by
+      baseline/20-log-data-protection.yaml.
+
+  MetricNamespace:
+    Type: String
+    Default: AltDigital/Recovery
+
+Conditions:
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # The role AWS Backup assumes to perform the restore
+  # -------------------------------------------------------------------------
+  # Separate from everything else and assumable only by the Backup service.
+  # This is the principal that actually creates the restored resource, so it is
+  # the one with creation rights — the worker Lambda has none.
+  RestoreExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformRestoreExecution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: backup.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      ManagedPolicyArns:
+        # AWS's own restore policy. Written by hand it would be a long list of
+        # per-service create actions that AWS extends whenever Backup gains a
+        # resource type, and a restore failing because the policy is a version
+        # behind is a failure discovered during a recovery.
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores'
+
+  # -------------------------------------------------------------------------
+  # The worker — resolve, start, poll, claim, validate, record
+  # -------------------------------------------------------------------------
+  # Five of the six steps in one function deliberately: they share the state
+  # shape and the 05-shaped gaps, and splitting them would mean five roles and
+  # five log groups to keep in step.
+  #
+  # Teardown is the exception and is split out below, because it is the one
+  # that can delete. This role has NO delete action of any kind, so a bug here
+  # cannot remove anything no matter what it is asked to do.
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformRestoreWorker
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: Restore
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                # Read the recovery points and drive the restore. No
+                # DeleteRecoveryPoint, no DeleteBackupVault, no
+                # StopBackupJob — this platform's automation never removes a
+                # backup, and the role says so rather than relying on the code
+                # not to call it.
+                Action:
+                  - 'backup:DescribeRecoveryPoint'
+                  - 'backup:DescribeRestoreJob'
+                  - 'backup:GetRecoveryPointRestoreMetadata'
+                  - 'backup:ListRecoveryPointsByResource'
+                  - 'backup:ListRecoveryPointsByBackupVault'
+                  - 'backup:StartRestoreJob'
+                Resource: '*'
+              - Effect: Allow
+                # AWS Backup performs the restore as RestoreExecutionRole, and
+                # StartRestoreJob will not accept a role the caller cannot
+                # pass. Scoped to that one role: a wildcard here would let the
+                # worker restore as anything it could name.
+                Action: 'iam:PassRole'
+                Resource: !GetAtt RestoreExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService': backup.amazonaws.com
+              - Effect: Allow
+                # Reads for target selection, the V4 isolation assertion, and
+                # reading a restored resource back. Describe* only.
+                #
+                # B-042 is why these are enumerated carefully: the
+                # instrumentation role was missing two describe calls, both
+                # were swallowed into "cannot tell", and two alarms were never
+                # created in any account as a result. A missing read here would
+                # surface as a failed validation rather than a silent gap —
+                # worker.py raises the API's own error — but the cheaper fix is
+                # to not miss it.
+                Action:
+                  - 'ec2:DescribeRouteTables'
+                  - 'ec2:DescribeSubnets'
+                  - 'ec2:DescribeVolumes'
+                  - 'ec2:DescribeVpcPeeringConnections'
+                  - 'ec2:DescribeVpcs'
+                  - 'rds:DescribeDBInstances'
+                  - 'rds:ListTagsForResource'
+                Resource: '*'
+              - Effect: Allow
+                # The claim step. CreateTags is not a delete, but it is the
+                # thing teardown's whole safety argument rests on, so it is
+                # narrowed by the tag keys it may write.
+                Action: 'ec2:CreateTags'
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*'
+                Condition:
+                  'ForAllValues:StringEquals':
+                    'aws:TagKeys':
+                      - platform-restore-execution
+                      - platform-restore-mode
+                      - platform-managed
+                      - platform-purpose
+              - Effect: Allow
+                Action: 'rds:AddTagsToResource'
+                Resource: !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:*'
+                Condition:
+                  'ForAllValues:StringEquals':
+                    'aws:TagKeys':
+                      - platform-restore-execution
+                      - platform-restore-mode
+                      - platform-managed
+                      - platform-purpose
+              - Effect: Allow
+                # Duration metrics and the trend read-back.
+                Action:
+                  - 'cloudwatch:PutMetricData'
+                  - 'cloudwatch:GetMetricStatistics'
+                Resource: '*'
+              - Effect: Allow
+                # The dossier, onto this account's DEFAULT bus.
+                # baseline/70-event-forwarding.yaml carries it to the router in
+                # Audit. Scoped to the default bus so this cannot put events on
+                # any other bus it can name.
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default'
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    # Delete, not Retain. The evidence of a restore test is the dossier and the
+    # metric, both of which leave the account; this log group holds the
+    # function's own output. Retaining it would make a rolled-back stack
+    # unretryable — the trap documented in canaries/00-canary-artifacts.yaml —
+    # in exchange for keeping a copy of something already kept elsewhere.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/platform-restore-worker
+      RetentionInDays: 365
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  WorkerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: WorkerLogGroup
+    Properties:
+      FunctionName: platform-restore-worker
+      Runtime: python3.12
+      Handler: worker.handler
+      Role: !GetAtt WorkerRole.Arn
+      # Every step is a single API call plus arithmetic. The WAITING is the
+      # state machine's job — see poll() on why a Lambda must never sleep
+      # through a restore.
+      Timeout: 120
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          ENVIRONMENT_TIER: !Ref EnvironmentTier
+          BACKUP_VAULT_NAME: !Ref BackupVaultName
+          SOURCE_RESOURCE_ARN: !Ref SourceResourceArn
+          RESTORE_ROLE_ARN: !GetAtt RestoreExecutionRole.Arn
+          METRIC_NAMESPACE: !Ref MetricNamespace
+          RESTORE_TIMEOUT_SECONDS: !Ref RestoreTimeoutSeconds
+          RTO_SECONDS: !Ref RtoSeconds
+          WARNING_PERCENT_OF_RTO: !Ref WarningPercentOfRto
+          BREACH_PERCENT_OF_RTO: !Ref BreachPercentOfRto
+          THRESHOLDS_ARE_PLACEHOLDERS: !Ref ThresholdsArePlaceholders
+          TREND_WARN_MONTHS: !Ref TrendWarningMonths
+          TEST_VPC_ID: !Ref TestVpcId
+          TEST_SUBNET_IDS: !Join [',', !Ref TestSubnetIds]
+          TEST_SECURITY_GROUP_IDS: !Join [',', !Ref TestSecurityGroupIds]
+          TEST_DB_SUBNET_GROUP: !Ref TestDbSubnetGroup
+          RECOVERY_VPC_ID: !Ref RecoveryVpcId
+          RECOVERY_SUBNET_IDS: !Join [',', !Ref RecoverySubnetIds]
+          RECOVERY_SECURITY_GROUP_IDS: !Join [',', !Ref RecoverySecurityGroupIds]
+          RECOVERY_DB_SUBNET_GROUP: !Ref RecoveryDbSubnetGroup
+
+  # -------------------------------------------------------------------------
+  # Teardown — split out precisely because it can delete
+  # -------------------------------------------------------------------------
+  # CLAUDE.md's hard rule says automation never terminates, deletes,
+  # deregisters, rolls back or purges. Teardown deletes, and the argument that
+  # this is bookkeeping rather than remediation is written out in full at the
+  # top of recovery/src/teardown.py. What matters HERE is that the argument is
+  # not left to the code to honour:
+  #
+  #   * the policy below reaches ONLY resources tagged with the execution tag
+  #     this workflow applies, so an untagged or foreign resource is outside
+  #     the role's reach entirely;
+  #   * it can delete a volume and a database instance, and nothing else;
+  #   * it has no backup:* action at all, so it cannot touch a recovery point
+  #     by any path;
+  #   * the state machine never routes to it in recovery mode, and the function
+  #     re-checks the mode itself in case somebody rewires the state machine.
+  TeardownRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformRestoreTeardown
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: TeardownOwnArtifacts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                # Reads, so provenance can be established before anything is
+                # removed. Unconditioned, because a resource must be readable
+                # BEFORE its tags are known — conditioning the read on the tag
+                # would make an untagged resource unreadable and therefore
+                # indistinguishable from one that does not exist.
+                Action:
+                  - 'ec2:DescribeVolumes'
+                  - 'rds:DescribeDBInstances'
+                  - 'rds:ListTagsForResource'
+                Resource: '*'
+              - Effect: Allow
+                # The deletes. The condition is the control: without
+                # platform-restore-mode=test ON THE RESOURCE, these calls are
+                # denied by IAM before the function's own provenance check is
+                # even reached.
+                Action:
+                  - 'ec2:DeleteVolume'
+                  - 'rds:DeleteDBInstance'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/platform-restore-mode': test
+                  StringLike:
+                    'aws:ResourceTag/platform-restore-execution': '*'
+              - Effect: Allow
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default'
+
+  TeardownLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/platform-restore-teardown
+      # Longer than the worker's. This is the record of what the platform
+      # DELETED, which is the question an auditor asks and the one an operator
+      # asks after a surprise. Seven years, matching the change records in
+      # baseline/60-response.yaml.
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  TeardownFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TeardownLogGroup
+    Properties:
+      FunctionName: platform-restore-teardown
+      Runtime: python3.12
+      Handler: teardown.handler
+      Role: !GetAtt TeardownRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          ENVIRONMENT_TIER: !Ref EnvironmentTier
+          TEARDOWN_RESOURCE_TYPES: !Ref TeardownResourceTypes
+
+  # -------------------------------------------------------------------------
+  # The state machine
+  # -------------------------------------------------------------------------
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/vendedlogs/states/platform-restore
+      RetentionInDays: 365
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformRestoreStateMachine
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeSteps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'lambda:InvokeFunction'
+                Resource:
+                  - !GetAtt WorkerFunction.Arn
+                  - !GetAtt TeardownFunction.Arn
+              - Effect: Allow
+                # The delivery permissions for a vended log group. These are
+                # resource-'*' by AWS's requirement — CloudWatch Logs validates
+                # the destination itself and rejects a scoped ARN with
+                # "The state machine IAM Role must have permissions", which
+                # names neither the action nor the resource.
+                Action:
+                  - 'logs:CreateLogDelivery'
+                  - 'logs:GetLogDelivery'
+                  - 'logs:UpdateLogDelivery'
+                  - 'logs:DeleteLogDelivery'
+                  - 'logs:ListLogDeliveries'
+                  - 'logs:PutResourcePolicy'
+                  - 'logs:DescribeResourcePolicies'
+                  - 'logs:DescribeLogGroups'
+                Resource: '*'
+
+  RestoreStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: platform-restore
+      RoleArn: !GetAtt StateMachineRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      DefinitionSubstitutions:
+        WorkerArn: !GetAtt WorkerFunction.Arn
+        TeardownArn: !GetAtt TeardownFunction.Arn
+      # Written out rather than assembled, because this sequence IS the
+      # procedure an auditor and an on-call engineer both read. Every Task
+      # carries the same Catch to RecordOutcome: a step that dies must still
+      # produce a record, because P5 says automation that cannot complete an
+      # action produces an exception record, never silence.
+      DefinitionString: |
+        {
+          "Comment": "Prompt 6.1. ONE workflow, mode parameter. test and recovery differ ONLY in target (ResolveTarget) and teardown (TeardownOrStop).",
+          "StartAt": "ResolveTarget",
+          "States": {
+
+            "ResolveTarget": {
+              "Type": "Task",
+              "Comment": "Selects the target network for the mode and finds a recovery point. The ONLY state whose behaviour depends on the mode. Asserts test-target isolation before anything is created (open-items.md V4).",
+              "Resource": "${WorkerArn}",
+              "Parameters": {
+                "step": "resolve",
+                "execution_id.$": "$$.Execution.Name",
+                "started_at.$": "$$.Execution.StartTime",
+                "state.$": "$"
+              },
+              "ResultPath": "$.resolved",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordOutcome" }
+              ],
+              "Next": "HaveRecoveryPoint"
+            },
+
+            "HaveRecoveryPoint": {
+              "Type": "Choice",
+              "Comment": "No recovery point is an OUTCOME, not an error. The platform has no backup plans (B-043), so today this is the expected answer in every account but the sandbox.",
+              "Choices": [
+                {
+                  "Variable": "$.resolved.outcome",
+                  "StringEquals": "resolved",
+                  "Next": "StartRestore"
+                }
+              ],
+              "Default": "RecordOutcome"
+            },
+
+            "StartRestore": {
+              "Type": "Task",
+              "Resource": "${WorkerArn}",
+              "Parameters": {
+                "step": "start",
+                "execution_id.$": "$$.Execution.Name",
+                "started_at.$": "$$.Execution.StartTime",
+                "state.$": "$"
+              },
+              "ResultPath": "$.restore",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordOutcome" }
+              ],
+              "Next": "WaitForRestore"
+            },
+
+            "WaitForRestore": {
+              "Type": "Wait",
+              "Comment": "The waiting happens here and not in a Lambda. A Wait state has no fifteen-minute ceiling and costs nothing, which is what lets one workflow cover a 1 GiB test volume and a multi-terabyte production database.",
+              "Seconds": 30,
+              "Next": "PollRestore"
+            },
+
+            "PollRestore": {
+              "Type": "Task",
+              "Resource": "${WorkerArn}",
+              "Parameters": {
+                "step": "poll",
+                "execution_id.$": "$$.Execution.Name",
+                "started_at.$": "$$.Execution.StartTime",
+                "state.$": "$"
+              },
+              "ResultPath": "$.poll",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordOutcome" }
+              ],
+              "Next": "RestoreComplete"
+            },
+
+            "RestoreComplete": {
+              "Type": "Choice",
+              "Choices": [
+                { "Variable": "$.poll.status", "StringEquals": "COMPLETED", "Next": "ClaimRestored" },
+                { "Variable": "$.poll.status", "StringEquals": "FAILED", "Next": "RecordOutcome" },
+                { "Variable": "$.poll.status", "StringEquals": "ABORTED", "Next": "RecordOutcome" },
+                { "Variable": "$.poll.status", "StringEquals": "TIMED_OUT", "Next": "RecordOutcome" }
+              ],
+              "Default": "WaitForRestore"
+            },
+
+            "ClaimRestored": {
+              "Type": "Task",
+              "Comment": "Stamps the restored resource with this execution's id. Runs in BOTH modes: teardown's provenance check depends on it, and an auditor asking what a resource is deserves an answer after a real recovery too.",
+              "Resource": "${WorkerArn}",
+              "Parameters": {
+                "step": "claim",
+                "execution_id.$": "$$.Execution.Name",
+                "started_at.$": "$$.Execution.StartTime",
+                "state.$": "$"
+              },
+              "ResultPath": "$.claim",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordOutcome" }
+              ],
+              "Next": "Validate"
+            },
+
+            "Validate": {
+              "Type": "Task",
+              "Comment": "Prompt 6.1's five checks, all five reported by name. Four are not_implemented and say why — see VALIDATIONS in recovery/src/worker.py and B-044.",
+              "Resource": "${WorkerArn}",
+              "Parameters": {
+                "step": "validate",
+                "execution_id.$": "$$.Execution.Name",
+                "started_at.$": "$$.Execution.StartTime",
+                "state.$": "$"
+              },
+              "ResultPath": "$.validation",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordOutcome" }
+              ],
+              "Next": "RecordOutcome"
+            },
+
+            "RecordOutcome": {
+              "Type": "Task",
+              "Comment": "Elapsed time against the RTO, the two threshold tiers, the duration trend, and the dossier onto the account's default bus. Every path in this machine arrives here, including every Catch.",
+              "Resource": "${WorkerArn}",
+              "Parameters": {
+                "step": "record",
+                "execution_id.$": "$$.Execution.Name",
+                "started_at.$": "$$.Execution.StartTime",
+                "state.$": "$"
+              },
+              "ResultPath": "$.record",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.recordError", "Next": "RecordingFailed" }
+              ],
+              "Next": "TeardownOrStop"
+            },
+
+            "RecordingFailed": {
+              "Type": "Fail",
+              "Comment": "Recording is the last thing that can fail and the only one with nothing behind it. An execution that ends here produced NO dossier and NO metric, which means nothing downstream knows the run happened — that is what platform-restore-not-running in 20-restore-schedule.yaml exists to catch. Teardown is deliberately skipped: a resource nobody has a record of must not be deleted by the thing that failed to record it.",
+              "Error": "RecordingFailed",
+              "Cause": "The restore workflow could not write its own outcome. Any restored resource is left in place and tagged with the execution id."
+            },
+
+            "TeardownOrStop": {
+              "Type": "Choice",
+              "Comment": "P4's second and last permitted difference. Recovery mode STOPS here, per prompt 6.1. The Default is Done rather than Teardown so that a missing or unrecognised mode fails towards not deleting.",
+              "Choices": [
+                {
+                  "And": [
+                    { "Variable": "$.mode", "IsPresent": true },
+                    { "Variable": "$.mode", "StringEquals": "test" }
+                  ],
+                  "Next": "Teardown"
+                }
+              ],
+              "Default": "Done"
+            },
+
+            "Teardown": {
+              "Type": "Task",
+              "Comment": "Removes only what this execution created, proven by a tag this workflow applied and enforced again by the role's condition key. Anything it cannot prove it created is reported as an orphan and left alone.",
+              "Resource": "${TeardownArn}",
+              "Parameters": {
+                "execution_id.$": "$$.Execution.Name",
+                "state.$": "$"
+              },
+              "ResultPath": "$.teardown",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.teardownError", "Next": "TeardownFailed" }
+              ],
+              "Next": "Done"
+            },
+
+            "TeardownFailed": {
+              "Type": "Fail",
+              "Comment": "teardown.py handles its own expected failures and returns an orphan report, so reaching here means something unhandled. A restored copy of tenant data may still be running; that needs a human, and a failed execution is how it becomes visible in the console alongside the record.",
+              "Error": "TeardownFailed",
+              "Cause": "Test-mode teardown failed unexpectedly. A restored resource may still exist; it carries platform-restore-execution with this execution's id."
+            },
+
+            "Done": {
+              "Type": "Succeed",
+              "Comment": "The RECORD carries the verdict, not the execution status. A restore that failed still succeeded at reporting that it failed, and the dossier is what routes to a human. Marking the execution failed as well would raise a second, unrelated signal about one event - the shape of B-041."
+            }
+          }
+        }
+
+Outputs:
+  StateMachineArn:
+    Description: 'Pass to recovery/20-restore-schedule.yaml.'
+    Value: !Ref RestoreStateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineArn'
+  RestoreExecutionRoleArn:
+    Value: !GetAtt RestoreExecutionRole.Arn
+  HasSource:
+    Description: >-
+      Whether this account has anything to restore. "none" is expected until
+      backup plans exist — B-043.
+    Value: !Ref SourceResourceArn

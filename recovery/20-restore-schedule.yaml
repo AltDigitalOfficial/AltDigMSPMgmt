@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — monthly restore test scheduling (prompt 6.2).
+  Starts recovery/10-restore-workflow.yaml's state machine in TEST mode once a
+  month. The duration thresholds and the trend warning are evaluated by the
+  workflow itself and live with it; see the notes below.
+
+# ---------------------------------------------------------------------------
+# Where the two threshold tiers actually live
+# ---------------------------------------------------------------------------
+# Prompt 6.2 asks for "two-tier threshold alerting on restore duration —
+# warning: Jira ticket with owner and due date, email, no page; breach:
+# PagerDuty page."
+#
+# Those thresholds are NOT in this template. They are parameters of
+# 10-restore-workflow.yaml, because the thing that evaluates them is the record
+# step inside the workflow, and a threshold configured in one stack and consumed
+# by a Lambda in another is a value that drifts silently the first time only one
+# of the two is updated.
+#
+# What evaluates them, and how they reach a human:
+#
+#   warning  ->  the run declares routing class `digest_and_jira`, so the
+#                router raises a ticket intent and includes the run in the
+#                digest email. No page. That IS 6.2's warning tier.
+#   breach   ->  the run declares NOTHING, so the router applies the account's
+#                tier default from design/06a — which pages in prod. That is
+#                6.2's breach tier, reached through the one routing layer.
+#
+# Prompt 6.2 says "DO NOT build a second routing path", and this template
+# builds none. There is no SNS topic here, no PagerDuty client, no Jira client
+# and — after the rewrite described below — no CloudWatch alarm either. This
+# template schedules; the workflow decides and reports.
+#
+# ---------------------------------------------------------------------------
+# Why the duration TREND is not a CloudWatch alarm
+# ---------------------------------------------------------------------------
+# It was, and CloudWatch refused it. An alarm whose period is an hour or more
+# must satisfy EvaluationPeriods x Period <= 604800 seconds, so the longest
+# window any such alarm can examine is ONE WEEK. The restore test runs MONTHLY,
+# so every alarm over its metrics would look at an empty window three weeks in
+# four — permanently breaching or permanently blind depending on
+# TreatMissingData, and both of those are worse than not having the alarm.
+#
+# Found by deploying. The stack rolled back with "Metrics cannot be checked
+# across more than a week (EvaluationPeriods * Period must be <= 604800)",
+# which names the constraint but not the reason it bites here. B-050.
+#
+# So the trend warning is raised by the workflow itself, at the moment it
+# records, where the projection is already in hand: a run that is trending at
+# the RTO declares `digest_and_jira` instead of `digest`, and the router turns
+# that into a dated ticket and a digest line. The threshold lives with its
+# consumer in 10-restore-workflow.yaml as TrendWarningMonths, for the same
+# reason the duration percentages do.
+#
+# ---------------------------------------------------------------------------
+# Why breach does not simply say "pagerduty"
+# ---------------------------------------------------------------------------
+# It would be one word and it would be wrong. B-041: two places reduced 06a's
+# five routing classes to a boolean, picked the wrong half, and produced five
+# false pages that took a day to trace. The lesson recorded there is that a
+# component deciding for itself whether something pages is a component that can
+# be quietly wrong about it.
+#
+# So the workflow may DOWNGRADE (declare a non-paging class, with its reason
+# recorded) and may never ESCALATE. Escalation stays with the tier table in
+# design/06a, in the router, where it is decided once. alerting/src/router.py
+# enforces this — a declared paging class is refused and logged.
+#
+# The visible consequence, stated plainly: in a UAT account the tier default is
+# not PagerDuty, so a duration BREACH in UAT tickets rather than pages.
+# design/14-environment-tiers.md line 84 is explicit that UAT has "no page
+# routing", and where 6.2 and 14 disagree the tier wins. Recorded as a
+# deviation in docs/deviations.md.
+
+Parameters:
+
+  StateMachineArn:
+    Type: String
+    Description: >-
+      From 10-restore-workflow.yaml's StateMachineArn output. Passed rather
+      than imported: an Export cannot be changed while anything imports it,
+      which would freeze the workflow template against this one.
+
+  EnvironmentTier:
+    Type: String
+    Default: uat
+    AllowedValues: [dev, test, uat, prod]
+    Description: >-
+      design/14-environment-tiers.md line 85: restore testing is Yes for uat
+      and prod, No for dev and test. This template should not be deployed to a
+      dev or test account — there is nothing wrong with the workflow being
+      there, but a schedule there tests nothing and bills for it.
+
+      The default is uat rather than dev, unlike every other template in this
+      repository, because uat is the lowest tier where this belongs at all.
+
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(0 15 ? * 2#2 *)'
+    Description: >-
+      Monthly. Default is the second Tuesday at 15:00 UTC — 10:00 US Central.
+
+      The time of day is the interesting part. design/14-environment-tiers.md
+      line 211 requires restore testing to fall INSIDE the HOOP: "Must not
+      collide with a turndown window; schedule inside the HOOP". A restore test
+      scheduled at 03:00 into a UAT account whose HOOP is business hours runs
+      against a turned-down environment, and the obvious out-of-hours default
+      would have walked straight into that.
+
+      15:00 UTC is inside a weekday business-hours HOOP for a US tenant. It is
+      NOT validated against the tenant's actual HOOP, because HOOPs do not
+      exist yet — they are phase 13 (prompt 13.x), and open-items.md V11 tracks
+      the validation. Until then this is a sensible default, not a checked one.
+      B-046.
+
+      Second Tuesday rather than the 1st: month-end and month-start are when
+      finance and reporting jobs run, and a restore test competing with them
+      measures the contention rather than the restore.
+
+  FlexibleWindowMinutes:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    MaxValue: 1440
+    Description: >-
+      Jitter. Every account restoring at the same instant contends on the same
+      regional Backup and EBS APIs, and the resulting slowdown shows up as
+      every account's restore getting slower at once — which is
+      indistinguishable from the creep this phase exists to detect, and would
+      be read as real.
+
+  ScheduleEnabled:
+    Type: String
+    Default: 'ENABLED'
+    AllowedValues: ['ENABLED', 'DISABLED']
+    Description: >-
+      A restore test creates a resource and costs money. This is the switch that
+      stops it per account without a stack delete.
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # The schedule
+  # -------------------------------------------------------------------------
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformRestoreScheduler
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                # Without this, any EventBridge Scheduler in any AWS account
+                # that can name this role's ARN can assume it — the confused
+                # deputy the service-principal trust policy invites.
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: StartRestoreTest
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'states:StartExecution'
+                # Exactly one state machine. This role can start a restore
+                # test and can do nothing else at all.
+                Resource: !Ref StateMachineArn
+
+  MonthlyRestoreTest:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: platform-restore-test-monthly
+      Description: !Sub >-
+        Prompt 6.2 — monthly restore test in TEST mode, ${EnvironmentTier} tier.
+        Starts the same state machine a real recovery uses (P4). Duration
+        thresholds and the trend warning are evaluated by the workflow, not
+        here.
+      State: !Ref ScheduleEnabled
+      ScheduleExpression: !Ref ScheduleExpression
+      # The account's own clock, not UTC, so that a HOOP expressed in local
+      # business hours and a schedule expressed against it do not drift apart
+      # twice a year when daylight saving moves one and not the other.
+      ScheduleExpressionTimezone: America/Chicago
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: !Ref FlexibleWindowMinutes
+      Target:
+        Arn: !Ref StateMachineArn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        # mode is the whole of P4's parameterisation. A real recovery starts
+        # the SAME state machine with mode: recovery, by hand, from the runbook.
+        Input: '{"mode": "test"}'
+        RetryPolicy:
+          # One retry. A restore test that could not be STARTED is worth trying
+          # again; one that started and failed must not be started a second
+          # time, because the second run would restore from the same recovery
+          # point into the same target while the first attempt's resource may
+          # still exist.
+          MaximumRetryAttempts: 1
+          MaximumEventAgeInSeconds: 3600
+
+Outputs:
+  ScheduleName:
+    Value: !Ref MonthlyRestoreTest
+  ScheduleState:
+    Value: !Ref ScheduleEnabled
+  ThresholdNote:
+    Description: >-
+      Read this before quoting a restore duration result to anyone.
+    Value: >-
+      Duration warning/breach percentages are PLACEHOLDERS - open-items.md B3.
+      Every record emitted says so in thresholds_are_placeholders.

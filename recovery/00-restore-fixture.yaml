@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — TEST SCAFFOLD for the restore workflow. A
+  backup vault and a small EBS volume that exist only so the restore workflow
+  has a real recovery point to restore in the sandbox. This is NOT the platform
+  backup baseline.
+
+# ---------------------------------------------------------------------------
+# Read this before treating anything here as a backup policy
+# ---------------------------------------------------------------------------
+# THE PLATFORM HAS NO BACKUP INFRASTRUCTURE. There is no AWS::Backup::BackupPlan
+# and no AWS::Backup::BackupSelection anywhere in this repository, and no prompt
+# in phases 0-5 creates one. Prompt 6.1 builds a restore workflow against
+# backups that do not exist.
+#
+# That gap is not filled here, deliberately. The document that would specify
+# backup plan contents — design/05-resilience.md — is absent from the design
+# package. What the supplied documents give is POSTURE, not values:
+#
+#   design 02 line 62 / design 14 line 84   Reduced | Reduced | Full policy,
+#                                           reduced frequency | Full policy
+#   questionnaire 4.2                       RPO default 2h, "drives backup
+#                                           frequency and PITR"
+#   questionnaire 4.4                       retention override per tenant
+#   org/00-org-structure.yaml:69            a Backup OU is reserved for
+#                                           Vault Lock
+#   open-items.md V2                        "member account cannot delete or
+#                                           alter its own backups", tested on a
+#                                           schedule "per 05"
+#
+# Absent everywhere: schedule expressions, retention day counts, Vault Lock mode
+# and duration, cross-account copy targets, and the tag scheme a selection would
+# match on. Inventing those would be inventing 05, which CLAUDE.md forbids, and
+# Vault Lock in particular is a ONE-WAY DOOR — compliance mode cannot be
+# shortened, cancelled or deleted for the duration chosen. Guessing its duration
+# is not a reversible mistake.
+#
+# So this template creates the smallest real recovery point the restore workflow
+# can be proven against, and nothing that looks like policy:
+#
+#   * one vault, UNLOCKED, holding throwaway scaffolding backups
+#   * one 1 GiB EBS volume with no filesystem and no data
+#   * no plan, no selection, no schedule, no retention rule, no copy action
+#
+# It is the same move canaries/00-canary-artifacts.yaml makes: build the
+# fixture the mechanism needs, keep it visibly a fixture.
+#
+# ---------------------------------------------------------------------------
+# Deleting this stack
+# ---------------------------------------------------------------------------
+# A backup vault containing recovery points REFUSES to delete, and the stack
+# delete fails on it rather than on anything that names the cause. Empty it
+# first:
+#
+#   aws backup list-recovery-points-by-backup-vault \
+#     --backup-vault-name platform-restore-fixture \
+#     --query 'RecoveryPoints[].RecoveryPointArn' --output text
+#   aws backup delete-recovery-point \
+#     --backup-vault-name platform-restore-fixture --recovery-point-arn <arn>
+#
+# That command deletes a backup. It is safe HERE, and only here, because these
+# recovery points are snapshots of an empty scaffolding volume. Nothing in the
+# platform's automation ever deletes a recovery point — see the hard rule in
+# CLAUDE.md — and this is a documented manual step, not code.
+
+Parameters:
+
+  VolumeSizeGiB:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 4
+    Description: >-
+      Deliberately tiny. The workflow is being proven, not the storage. A
+      restore of 1 GiB completes in a couple of minutes, which is what makes a
+      monthly live exercise cheap enough to actually run.
+
+Resources:
+
+  # Unlocked, and that is the difference between this and a real vault.
+  #
+  # design 05 would specify Vault Lock: mode, min/max retention, and the
+  # changeable window. V2 ("a member account cannot delete or alter its own
+  # backups") is what a locked vault plus an SCP would satisfy, and neither is
+  # built. Recorded as B-043.
+  FixtureVault:
+    Type: AWS::Backup::BackupVault
+    # Delete, not Retain — and this is the one case where that is right for a
+    # vault. Retain exists to protect accumulated value, and the accumulated
+    # value here is snapshots of an empty volume. The canary artifacts template
+    # documents the trap Retain causes on a rolled-back stack; a vault that
+    # survives a failed create and then collides with the retry on name is the
+    # same trap with a worse error message.
+    #
+    # A REAL platform vault is the opposite case and must be Retain plus Vault
+    # Lock. Do not copy this line into one.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: platform-restore-fixture
+      BackupVaultTags:
+        platform-managed: 'true'
+        platform-purpose: restore-test-scaffold
+
+  # No filesystem, no data, and so nothing for a checksum or a row count to
+  # examine. That is honest rather than lazy: the in-guest validation classes
+  # prompt 6.1 lists cannot run from the control plane at all, with or without
+  # data on this volume. See recovery/src/worker.py, VALIDATIONS.
+  FixtureVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: !Ref VolumeSizeGiB
+      VolumeType: gp3
+      # aws/ebs, not a platform key. A customer-managed key here would be a KMS
+      # key created for scaffolding, and every KMS key on this platform carries
+      # a 30-day deletion window it cannot escape.
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: platform-restore-fixture
+        - Key: platform-managed
+          Value: 'true'
+        - Key: platform-purpose
+          Value: restore-test-scaffold
+
+Outputs:
+  VaultName:
+    Description: 'Pass to the restore workflow as BackupVaultName.'
+    Value: !Ref FixtureVault
+  VolumeArn:
+    Description: 'Pass to the restore workflow as SourceResourceArn.'
+    Value: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/${FixtureVolume}'
+  SeedCommand:
+    Description: 'Take the first recovery point.'
+    Value: 'scripts/seed-restore-fixture.sh --account sandbox'

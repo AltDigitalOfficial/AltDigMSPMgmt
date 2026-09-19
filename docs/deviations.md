@@ -786,3 +786,47 @@ are. They are instead keyed on the questionnaire: 7.4 for latency, and pass/fail
 for availability. That is arguably more correct for a canary — a synthetic check
 either reproduces the user's experience or it does not — but it is a second
 convention, and a reader looking only at 06a will not find canary alarms.
+
+---
+
+## D-013 · A restore duration BREACH does not page in UAT
+
+**Design position** — prompt 6.2 asks for two-tier threshold alerting on
+restore duration: *"Warning tier: Jira ticket with owner and due date, email,
+no page. Breach tier: PagerDuty page."* Read literally, a breach pages
+wherever it happens.
+
+**Actual** — a breach pages where the account's tier pages. In prod it does. In
+UAT it raises a ticket and a commercial event instead.
+
+**Reason — design 14 is explicit and more specific.**
+[14-environment-tiers.md](../design/14-environment-tiers.md) line 84 gives UAT
+alarm routing as *"Jira + commercial"*, and the section on non-production
+resilience for UAT states *"No page routing — alarms route to Jira and the
+digest, not PagerDuty"*. Restore testing is enabled for UAT (line 85) precisely
+because its data is real, but its resilience posture is explicitly
+non-production. A restore duration breach in an environment with no SLA
+commitment is real, dated work; it is not a reason to wake somebody.
+
+Where 6.2's general statement and 14's per-tier table disagree, the tier table
+wins. It is the more specific document, it is the one design/06a implements,
+and it is the single place the question "who gets woken up" is answered.
+
+**How it is enforced, rather than merely intended** — the workflow never
+declares a paging routing class. On a breach it declares nothing at all and the
+router applies the tier default from 06a. `alerting/src/router.py` now accepts
+a routing class declared by an emitter **only as a downgrade**, and refuses a
+declared class that pages when the tier would not, logging the refusal.
+
+That asymmetry is deliberate and is written against B-041, where two components
+reduced 06a's five routing classes to a boolean, picked the wrong half, and
+produced five false PagerDuty incidents. An emitter knows things about its own
+event that the tier cannot — a restore test that merely ran slow is not an
+outage — so downgrading is information only it has. Escalation is a statement
+about who gets woken up, and that belongs in one place.
+
+**Close when** — Jamie decides otherwise, which is a one-line change: the
+workflow would declare `pagerduty` on breach, and the router's downgrade-only
+rule would have to be relaxed with it. Worth deciding alongside
+open-items.md B3, since the threshold values and what crossing them means are
+the same conversation.

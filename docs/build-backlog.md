@@ -1333,3 +1333,303 @@ code so an AccessDenied says so and says that it is a platform fault.
 **Still open** — `threshold_mode: reference_metric` and the RDS memory-based
 modes were never reachable either, for the same reason. Now that the reads
 work they should be re-tested; nobody has seen them succeed. B-025.
+
+---
+
+## B-043 · There is no backup infrastructure, and phase 6 restores from it
+
+**Open** — 2026-09-18, found starting prompt 6.1.
+
+No `AWS::Backup::BackupPlan`, `BackupVault` or `BackupSelection` exists anywhere
+in this repository outside `recovery/00-restore-fixture.yaml`, and no prompt in
+phases 0–5 creates one. Prompt 6.1 builds a restore workflow; there was nothing
+for it to restore from.
+
+This is a gap in the prompt sequence, not an oversight in the build. The
+document that would specify backup plan contents — `design/05-resilience.md` —
+**is not in the design package**. What the supplied documents give is posture,
+not values:
+
+| Source | What it gives |
+|---|---|
+| design 02 line 62, design 14 line 84 | Reduced / Reduced / Full policy reduced frequency / Full policy |
+| questionnaire 4.2 | RPO default 2h, "drives backup frequency and PITR" |
+| questionnaire 4.4 | retention override per tenant |
+| `org/00-org-structure.yaml:69` | a Backup OU reserved for Vault Lock |
+| open-items.md V2 | "member account cannot delete or alter its own backups" |
+
+Absent everywhere: schedule expressions, retention day counts, Vault Lock mode
+and duration, cross-account copy targets, the selection tag scheme.
+
+**Decided with Jamie before building** — do not invent them. The workflow is
+parameterised on a vault and a source resource, discovers its own recovery
+point, and treats "none found" as a first-class OUTCOME rather than an error.
+That matters more than it sounds: 6.2 schedules this monthly per account, so an
+error would light an alarm every month in every account until somebody muted
+it, which is B-042's failure mode from a different cause. Instead each run
+reports the true state — this account has no backups — as dated work.
+
+A minimal sandbox FIXTURE was built so the mechanism could be proven live. It
+is explicitly scaffolding: one unlocked vault, one 1 GiB empty volume, no plan,
+no schedule, no retention rule. Vault Lock in particular is a one-way door, and
+guessing its duration is not a reversible mistake.
+
+**Close when** — design 05 arrives, or Jamie sets the backup values directly.
+The workflow needs no change; it needs a vault name and a source resource.
+
+---
+
+## B-044 · Four of prompt 6.1's five validation checks are not implemented
+
+**Open** — 2026-09-18.
+
+Prompt 6.1 names five: *resource health, database connects, row counts
+plausible, volumes mount, checksums match.* All five are reported by name in
+every record. Only `resource_health` runs.
+
+The other four need code running INSIDE the restored guest, or with network
+reachability to it, and the worker Lambda runs in neither target VPC. Attaching
+it to one breaks P4: a Lambda's VPC configuration is static, so it would need
+two functions, one per mode, which is the two-procedures arrangement P4 exists
+to prevent.
+
+The mode-neutral answer is an executor launched INTO the target subnet at run
+time — a Fargate task taking the subnet as a parameter is one state and one
+task definition, and is genuinely P4-clean. It is **not built speculatively**,
+and there is no disabled branch in the state machine, because a mechanism that
+does not exist must not be described as though it does. Choosing its image and
+above all where database credentials come from is design 05's decision.
+
+What compensates, so this is not simply a hole: five control-plane checks DO
+run — existence, health, target placement, encryption preservation, and
+geometry against the recovery point. `target_placement` is the important one.
+It proves a test restore landed in the isolated network rather than production,
+which is the failure the whole arrangement exists to prevent and which would
+otherwise look like a clean pass. `geometry_matches_source` catches the case
+where a healthy, correctly configured, EMPTY resource passes everything else.
+
+Every record carries `coverage: control-plane` and lists the not-implemented
+checks, so no readout can imply more was verified than was. It does **not**
+raise a ticket per run — the gap is this one item, not a monthly reminder that
+the same thing is still true, which is how a real signal gets trained out of a
+rotation.
+
+**Close when** — design 05 specifies the in-VPC executor and the credential
+source.
+
+---
+
+## B-045 · Teardown is armed for EBS only
+
+**Open** — 2026-09-18.
+
+`TEARDOWN_RESOURCE_TYPES` defaults to `EBS`. The RDS path is written and
+reviewable; it is off.
+
+Not because it is unwritten — because CLAUDE.md's hard rule makes an untested
+delete path unacceptable, and EBS is the only type that can be exercised end to
+end against the sandbox fixture today. A `DeleteDBInstance` call that has never
+once run is exactly the code that should not be armed by default.
+
+Same idiom as `ResponseEnabled` in `baseline/60-response.yaml`: the capability
+exists and is turned on per account by somebody who has looked at what it would
+do there. An unarmed type is reported as an orphan — a ticket and a running
+resource, which is the cheap side of this trade.
+
+The RDS path never deletes automated backups (`DeleteAutomatedBackups: False`)
+and says so in its record. This platform's automation does not delete backups
+by any path.
+
+**Close when** — an RDS restore test has been exercised in a sandbox and its
+teardown verified.
+
+---
+
+## B-046 · The restore test schedule is not validated against the HOOP
+
+**Open** — 2026-09-18.
+
+design/14 line 211: restore testing *"must not collide with a turndown window;
+schedule inside the HOOP"*. The default is the second Tuesday at 15:00 in
+`America/Chicago` — inside a weekday business-hours HOOP for a US tenant, and
+chosen deliberately over the obvious out-of-hours slot, which would have run
+against a turned-down environment.
+
+It is a sensible default, not a checked one. HOOPs do not exist yet — phase 13
+— and open-items.md V11 owns the validation.
+
+**Close when** — phase 13 builds HOOPs and validates maintenance and restore
+windows against them at configuration time.
+
+---
+
+## B-047 · `platform-isolated` has an internet gateway, and isolation is a route property
+
+**Fixed** — 2026-09-18, found deploying.
+
+The V4 isolation assertion was first written as "does the target VPC have an
+internet gateway or an active peering connection". Pointed at the sandbox it
+failed, and the VPC it failed was named `platform-isolated`.
+
+`baseline/40-network.yaml` attaches an InternetGateway **unconditionally**, to
+every VPC it builds, including one whose `EgressProfile` is `isolated`. Its own
+comment is accurate about what the profile means: *"'isolated' has no NAT
+gateway, no elastic IP and no default route out of the private subnets. That is
+the entire implementation of the profile."* So the VPC has an IGW and a public
+subnet routed to it, and its private subnets reach nothing.
+
+The check was wrong, not the VPC. Reachability is a property of the route table
+a subnet uses, not of what is attached to the VPC somewhere. The assertion now
+resolves each target subnet's route table — explicit association, or the VPC
+main table where there is none, which is the case that would otherwise be
+missed — and looks for routes via internet gateway, NAT gateway, transit
+gateway, peering connection or egress-only gateway. Blackholed routes do not
+count; they reach nothing by definition.
+
+That is both stricter and more accurate: it catches a transit gateway and a
+peering connection in the same pass, which the gateway-presence check had to
+concede in its own evidence that it did not.
+
+**A second live finding inside the first.** The sandbox's only private subnet
+routes to an S3 **gateway VPC endpoint**. Counting that as an escape would have
+left no subnet in the account able to pass, which would have read as "the
+isolation check works" while actually meaning "nowhere passes". A gateway
+endpoint is not another network — it reaches an AWS service through an endpoint
+policy — so it is reported under `service_endpoints` in the evidence and does
+not fail the assertion. Whether a restore test VPC that can reach S3 counts as
+isolated is a design 05 question, and recording it is how that gets decided on
+evidence rather than discovered later.
+
+**Still open, as a question for `baseline/40-network.yaml`** — a VPC named
+`platform-<profile>` that always has an IGW attached is accurate about its
+private subnets and overstated in its name. Nothing is presently wrong: a
+resource placed in its public subnet would be reachable, and `isolated` is the
+profile where somebody would least expect that to be possible.
+
+---
+
+## B-048 · `ListRecoveryPointsByResource` denied, and the message named nothing
+
+**Fixed** — 2026-09-18, found on the first live run.
+
+The worker role granted every `backup:*` action the workflow uses. The call
+still failed:
+
+    AccessDeniedException ... Insufficient privileges to perform this action
+
+`iam simulate-principal-policy` said `allowed` for the same action and the same
+role. The same call as an admin succeeded. CloudTrail recorded
+`errorCode: AccessDenied` with `errorMessage: "An unknown error occurred"`.
+
+The cause is a parameter default. `ManagedByAWSBackupOnly` defaults to
+**false**, which asks AWS Backup to also enumerate recovery points it does not
+manage — raw EBS snapshots taken by anything else. To do that, Backup queries
+EC2 using the CALLER's credentials, so the call also needs
+`ec2:DescribeSnapshots`. Admin had it; the worker deliberately does not.
+
+Granting `ec2:DescribeSnapshots` would have made the error go away and been the
+wrong fix. A recovery point AWS Backup does not manage **cannot be restored by
+`StartRestoreJob` at all**, so listing one only defers the failure to the
+restore step, where it costs a started job and a worse message. The workflow
+restores through Backup and now only considers what Backup can restore.
+
+**The general shape**, worth remembering alongside B-042: an IAM policy that is
+complete for the API you think you are calling can still be denied, because a
+parameter DEFAULT widened the call into a second service. The simulator will
+not show it, because the simulator evaluates the action and not the arguments.
+
+---
+
+## B-049 · The list API does not return the resource type the restore needs
+
+**Fixed** — 2026-09-18, found on the second live run.
+
+`ListRecoveryPointsByResource` omits `ResourceType` — it is implied by the
+resource you asked about, so the API leaves it out. The workflow selects a
+restore metadata override by resource type, so it refused with:
+
+    no restore metadata override for resource type ''
+
+which reads as an unsupported resource rather than a missing field.
+
+`DescribeRecoveryPoint` does return it, so the authoritative record is now
+fetched for the ONE point selected rather than for every point listed. Where
+the point sits in a vault this account cannot describe, the type is derived
+from the source ARN instead.
+
+That fallback carried its own bug, caught by a unit test rather than by AWS:
+field 5 is the resource segment in both ARN layouts, but EC2 uses
+`.../volume/vol-123` (slash) while RDS uses `...:cluster:name` (colon). Reading
+the LAST colon-delimited field gives `vol-123` for one and the cluster's *name*
+for the other, so every Aurora cluster looked like a plain RDS instance.
+
+---
+
+## B-050 · CloudWatch cannot alarm on a monthly metric
+
+**Fixed** — 2026-09-18, found deploying prompt 6.2.
+
+Prompt 6.2 asks for duration trend tracking so that creep is *"visible months
+before it breaches"*. That was first built as a CloudWatch alarm over the
+projection metric, alongside a second alarm for "the monthly test stopped
+running". The stack rolled back:
+
+    Metrics cannot be checked across more than a week
+    (EvaluationPeriods * Period must be <= 604800) for alarms using period >= 3600
+
+So the longest window any alarm with an hourly-or-longer period can examine is
+**one week**. The restore test runs **monthly**. Every alarm over its metrics
+would look at an empty window three weeks in four — permanently breaching or
+permanently blind depending on `TreatMissingData`, and both are worse than not
+having the alarm at all.
+
+The trend warning moved into the workflow, which already has the projection in
+hand at the moment it records: a run trending at the RTO declares
+`digest_and_jira` instead of `digest`, and the router turns that into a dated
+ticket and a digest line. Same single routing layer as everything else, and no
+metric-freshness problem. `recovery/20-restore-schedule.yaml` now contains no
+alarms at all.
+
+**Still open — nothing detects that the monthly test stopped running.** That
+detector was the second alarm, and it cannot be a CloudWatch alarm for the same
+reason. It needs something running DAILY that evaluates freshness and publishes
+it, which is exactly the heartbeat prompt 9.1 already specifies: *"Heartbeat
+per tenant, so absence of data is an event rather than a quiet month."*
+Building a one-off here would mean two heartbeat mechanisms.
+
+Prompt 6.2 does not ask for this alarm; it was added and then removed.
+`RestoreRunsRecorded` is published on every run including failures, so the data
+such a detector needs is already being written.
+
+**Close when** — prompt 9.1 builds the heartbeat, and restore-test freshness is
+one of the things it watches.
+
+---
+
+## B-051 · Every `digest` event lands in the review queue
+
+**Open** — 2026-09-18, noticed reading the routing log during 6.1 verification.
+
+B-039's own table says the `digest` routing class is *"recorded only"*, with
+prompt 4.4 reading the routing log. `alerting/src/router.py` does something
+else — `deliver()` ends with:
+
+    if not spec["pages"] and not spec.get("ticket"):
+        enqueue(REVIEW_QUEUE_URL, ...)
+
+`digest` pages nothing and tickets nothing, so every digest-class event is
+enqueued to `platform-review-queue`.
+
+Pre-existing and not introduced by phase 6; visible because the restore test's
+own `digest` record landed there next to a stream of Security Hub findings.
+
+Why it matters: the review queue is described as the gap detector — *"where an
+untagged alarm goes, and an untagged alarm means instrumentation did not create
+it"*. Diluting it with every routine digest event makes the one message that
+means something indistinguishable from the ones that do not. That is B-041's
+shape again: not a loud failure, just a signal quietly losing its meaning.
+
+**Decide** — either `digest` stops being enqueued and 4.4 reads the routing log
+as B-039 says, or genuine gaps get a queue of their own. Not changed here: it
+alters routing behaviour for every digest-class event in the platform, which is
+not a phase 6 change.

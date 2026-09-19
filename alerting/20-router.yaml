@@ -377,7 +377,14 @@ Resources:
       Name: platform-route-dossiers
       EventBusName: !Ref PlatformBus
       EventPattern:
-        source: ['platform.response']
+        # Two emitters, one shape. platform.recovery is the restore workflow
+        # (recovery/src/worker.py), which emits a dossier rather than routing
+        # for itself — prompt 6.2: "DO NOT build a second routing path".
+        #
+        # Listed explicitly rather than matched on the detail-type alone,
+        # because the pattern is also the list of things allowed to raise an
+        # incident on this platform's pager, and that list should be readable.
+        source: ['platform.response', 'platform.recovery']
         detail-type: ['Platform Incident Dossier']
       State: ENABLED
       Targets:

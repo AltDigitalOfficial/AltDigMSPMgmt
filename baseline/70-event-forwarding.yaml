@@ -195,7 +195,12 @@ Resources:
     Properties:
       Name: platform-forward-dossiers
       EventPattern:
-        source: ['platform.response']
+        # platform.recovery is the restore workflow (prompt 6.1), which emits
+        # the same dossier shape so that it needs no destination of its own.
+        # Must stay in step with DossierRule in alerting/20-router.yaml: a
+        # source forwarded here and not matched there lands in the review
+        # queue, which has no consumer.
+        source: ['platform.response', 'platform.recovery']
         detail-type: ['Platform Incident Dossier']
       State: ENABLED
       Targets:

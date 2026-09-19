@@ -278,7 +278,12 @@ def from_dossier(event):
     alarm = d.get("alarm") or {}
     return {
         "kind": "dossier",
-        "source": "response-engine",
+        # The emitting source, not a hardcoded name. There are two dossier
+        # emitters now — platform.response and platform.recovery — and the
+        # routing log is what answers "why was I not paged about this". A log
+        # line attributing a restore test to the response engine sends whoever
+        # is reading it to the wrong component.
+        "source": event.get("source") or "response-engine",
         "account_id": alarm.get("account_id") or event.get("account"),
         "region": event.get("region"),
         "title": alarm.get("name") or "response engine",
@@ -288,7 +293,11 @@ def from_dossier(event):
         "occurred_at": d.get("recorded_at") or event.get("time"),
         "state": d.get("current_state"),
         "dossier": d,
-        "routing": None,
+        # The emitter's own routing class, if it stated one. Honoured only as a
+        # DOWNGRADE -- see decide(). The response engine states none and is
+        # unaffected; recovery/src/worker.py states one for a restore test that
+        # was merely slow.
+        "routing": d.get("routing"),
     }
 
 
@@ -452,8 +461,43 @@ def decide(norm):
         # is needed, so the routing class is not in question — what varies is
         # urgency, and that is the tier's business below.
         tier = norm.get("environment_tier") or "prod"
-        return ("pagerduty" if tier in ("uat", "prod")
-                else "digest_and_jira"), f"response engine escalation, tier {tier}"
+        default = "pagerduty" if tier in ("uat", "prod") else "digest_and_jira"
+
+        # An emitter may DOWNGRADE its own dossier, and may never escalate one.
+        #
+        # The asymmetry is the point. Downgrading is a statement about the
+        # emitter's own event that only the emitter can make — a restore test
+        # that merely ran slow knows it is not an outage, and nothing here
+        # could work that out from the tier. Escalating is a statement about
+        # who gets woken up, and that decision belongs in one place: design/06a
+        # and the tier, read here.
+        #
+        # B-041 is the reason it is written as a rule rather than left to each
+        # emitter's judgement. Two components reduced 06a's five routing
+        # classes to "pages" and "does not page", picked the wrong half, and
+        # sent non-paging alarms to a PagerDuty-subscribed topic — five false
+        # pages, and a full day to trace, because a wrong routing decision
+        # looks exactly like a working one.
+        declared = norm.get("routing")
+        if declared:
+            spec = DESTINATIONS.get(declared)
+            if spec is None:
+                return default, (
+                    f"emitter declared routing class '{declared}', which is not "
+                    f"one of 06a's. Ignored and routed by tier {tier} instead — "
+                    "an unrecognised class is a bug in the emitter, not a "
+                    "reason to route somewhere undefined")
+            if spec["pages"] and not DESTINATIONS[default]["pages"]:
+                return default, (
+                    f"emitter declared '{declared}', which pages, but tier "
+                    f"{tier} does not. REFUSED: an emitter may lower its own "
+                    "urgency and may not raise it — escalation is the tier's "
+                    "decision (06a). See B-041")
+            return declared, (
+                f"emitter declared '{declared}'; tier {tier} would have given "
+                f"'{default}'. Honoured as a downgrade")
+
+        return default, f"response engine escalation, tier {tier}"
 
     # Findings. No routing decision travels with them, so the tier default
     # applies — and the tier is now LOOKED UP rather than assumed. It used to
