@@ -1,0 +1,433 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the AppDeployer role (prompt 8.1). The single
+  control point through which a tenant's CI deploys into a member account. OIDC
+  federation only, no static credentials, and a permissions boundary the role
+  cannot remove from itself.
+
+# ---------------------------------------------------------------------------
+# Why a role at all, when AltDigital does not control the pipeline
+# ---------------------------------------------------------------------------
+# design/08-change-and-release.md, "The constraint":
+#
+#   Development teams are not overseen by AltDigital. SOC 2 requires visibility
+#   and approval of changes to the environment. We therefore cannot rely on a
+#   gate we control — change management is a detective control, reconciled
+#   continuously.
+#
+# So this role is not a gate that approves anything. It is the CHOKE POINT that
+# makes the detective control possible: every deployment passes through one
+# named principal, so every deployment is attributable in CloudTrail whether the
+# dev team cooperates or not.
+#
+# design 08 again, on why that survives a change of supplier: "A later team
+# arriving with its own pipeline keeps their pipeline — they simply hand off at
+# this role. The control point stays constant even as the tooling varies."
+#
+# ---------------------------------------------------------------------------
+# No static credentials. Ever.
+# ---------------------------------------------------------------------------
+# The trust policy below federates an OIDC provider and nothing else. There is
+# no IAM user, no access key, and no cross-account role that could be given one.
+#
+# That is worth more than it sounds. A long-lived deploy key in a CI system is
+# the credential most likely to end up in a repository, a support ticket or a
+# container image, and it is the one nobody rotates because rotating it breaks
+# the pipeline on a Friday. An OIDC token is minted per run, expires in minutes,
+# and cannot be copied anywhere useful.
+#
+# THE SUBJECT CONDITION IS THE WHOLE CONTROL. Trusting the provider alone would
+# let ANY repository on that CI platform — anyone's GitHub account, anywhere —
+# assume this role. `token.actions.githubusercontent.com` is a single issuer
+# shared by every GitHub user on earth. The `sub` condition is what narrows it
+# to one tenant's repository, and this template refuses to deploy without one.
+
+Parameters:
+
+  ApplicationCode:
+    Type: String
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,8}[a-z0-9])?$'
+    Description: >-
+      The application this role deploys, from the account naming convention.
+      Used to scope every resource pattern below, so two applications in one
+      account cannot deploy over each other.
+
+  OidcProviderUrl:
+    Type: String
+    Default: 'https://token.actions.githubusercontent.com'
+    AllowedPattern: '^https://.+'
+    Description: >-
+      The tenant's CI identity provider. Questionnaire 8.1 collects the tooling
+      (`cicd_tooling`); this is the issuer that tooling actually presents.
+
+      GitHub Actions is the default because it is the common case, not because
+      it is assumed — GitLab, Bitbucket Pipelines and CircleCI all publish an
+      OIDC issuer and all work here unchanged.
+
+  OidcAudience:
+    Type: String
+    Default: 'sts.amazonaws.com'
+    Description: >-
+      The `aud` claim. For GitHub Actions configured with
+      aws-actions/configure-aws-credentials this is sts.amazonaws.com.
+
+  OidcSubjectPattern:
+    Type: String
+    MinLength: 3
+    Description: >-
+      REQUIRED, and the most important parameter in this template.
+
+      The `sub` claim pattern that may assume the role, e.g.
+      `repo:acme-corp/payments-service:ref:refs/heads/main` or
+      `repo:acme-corp/payments-service:environment:production`.
+
+      There is no default and no wildcard-only value accepted, because the OIDC
+      issuer is shared by every user of that CI platform. A trust policy that
+      checks the issuer and not the subject is assumable by any repository in
+      the world — it looks like federation and is an open door.
+
+      Prefer pinning to a branch or a deployment environment rather than
+      `repo:org/name:*`. A pattern ending in `:*` lets any branch, including one
+      opened by a pull request from a fork, deploy to production.
+
+  OidcThumbprintList:
+    Type: CommaDelimitedList
+    Default: '6938fd4d98bab03faadb97b34396831e3780aea1'
+    Description: >-
+      Certificate thumbprint(s) for the provider. The default is GitHub's
+      long-standing value.
+
+      AWS no longer verifies this for well-known providers and rotates it
+      itself, so a stale value is usually harmless — "usually" being why it is a
+      parameter rather than a constant.
+
+  CreateOidcProvider:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      An IAM OIDC provider is an ACCOUNT-LEVEL resource, one per issuer URL.
+      Two stacks in the same account both trying to create
+      token.actions.githubusercontent.com will collide — the second fails with
+      EntityAlreadyExists, which names the entity and not the other stack.
+
+      Set false for the second and subsequent applications in an account and
+      pass ExistingOidcProviderArn instead.
+
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: 'Used when CreateOidcProvider is false.'
+
+Conditions:
+  MakeProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+
+  OidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeProvider
+    # Retain. The provider is shared by every AppDeployer role in the account,
+    # so deleting this stack must not break the other applications' pipelines.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: !Ref OidcProviderUrl
+      ClientIdList: [!Ref OidcAudience]
+      ThumbprintList: !Ref OidcThumbprintList
+
+  # -------------------------------------------------------------------------
+  # The boundary, defined before the role that must carry it
+  # -------------------------------------------------------------------------
+  # Prompt 8.1: "Include a permissions boundary so the role cannot escalate
+  # itself."
+  #
+  # A boundary is a ceiling, not a grant. Whatever the role's own policy says,
+  # the effective permission is the intersection — so a tenant who talks
+  # somebody into widening the role's policy still cannot exceed this.
+  #
+  # The explicit denies matter more than the allows. Without them, a role with
+  # iam:* in its own policy could create a SECOND role with no boundary and
+  # assume it, which is the classic boundary escape and the reason
+  # iam:CreateRole is denied here unless the new role carries this same
+  # boundary.
+  AppDeployerBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'PlatformAppDeployerBoundary-${ApplicationCode}'
+      Description: >-
+        Permissions boundary for the AppDeployer role. Caps what the role can
+        ever do, regardless of what its own policy grants.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: TheCeiling
+            Effect: Allow
+            # Deliberately broad on the allow side. The boundary's job is to
+            # cap, and the role's OWN policy is what grants; listing services
+            # here as well would mean maintaining the same list twice and
+            # discovering the drift when a legitimate deploy fails.
+            Action:
+              - 'cloudformation:*'
+              - 'ecs:*'
+              - 'lambda:*'
+              - 'ec2:Describe*'
+              - 'ecr:*'
+              - 'logs:*'
+              - 's3:*'
+              - 'rds:Describe*'
+              - 'rds:ModifyDBParameterGroup'
+              - 'elasticloadbalancing:*'
+              - 'application-autoscaling:*'
+              - 'apigateway:*'
+              - 'states:*'
+              - 'events:*'
+              - 'sqs:*'
+              - 'sns:*'
+              - 'ssm:GetParameter*'
+              - 'secretsmanager:GetSecretValue'
+              - 'iam:PassRole'
+              - 'iam:Get*'
+              - 'iam:List*'
+              - 'sts:GetCallerIdentity'
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:DescribeKey'
+            Resource: '*'
+
+          - Sid: NeverTouchPlatformManagedResources
+            Effect: Deny
+            # design 08: "Denied from touching platform-managed resources
+            # (SCP)". The SCP is the outer fence; this is the inner one, and
+            # both exist because they fail differently. An SCP protects against
+            # everything in the account; a boundary travels with the role even
+            # if the account is later moved out from under that SCP.
+            Action: '*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Platform*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/Platform*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/OrganizationAccountAccessRole'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/stacksets-exec-*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/platform/*'
+
+          - Sid: NeverEscapeTheBoundary
+            Effect: Deny
+            # The escape this exists to close: create a new role WITHOUT a
+            # boundary, give it everything, assume it. Creating roles is
+            # permitted only when the new role carries this exact boundary,
+            # so the ceiling is inherited rather than shed.
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:CreateUser'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                'iam:PermissionsBoundary': !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/PlatformAppDeployerBoundary-${ApplicationCode}'
+
+          - Sid: NeverAlterTheBoundaryItself
+            Effect: Deny
+            # Without this, the role could rewrite its own ceiling. Note
+            # DeleteRolePermissionsBoundary in particular — removing the
+            # boundary is the same escape as never having had one.
+            Action:
+              - 'iam:DeleteRolePermissionsBoundary'
+              - 'iam:DeleteUserPermissionsBoundary'
+              - 'iam:PutRolePermissionsBoundary'
+              - 'iam:PutUserPermissionsBoundary'
+              - 'iam:CreatePolicyVersion'
+              - 'iam:DeletePolicy'
+              - 'iam:DeletePolicyVersion'
+              - 'iam:SetDefaultPolicyVersion'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/PlatformAppDeployerBoundary-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformAppDeployer-*'
+
+          - Sid: NeverDisarmTheDetectiveControl
+            Effect: Deny
+            # The whole of design 08 rests on CloudTrail being the
+            # authoritative record. A deployer that can stop logging can
+            # deploy unobserved, and reconciliation would show a quiet month
+            # rather than a gap.
+            #
+            # These are also denied by SCP. Both, because a boundary is
+            # attached to the role and an SCP to the account, and the question
+            # "which one is missing" should never have a single answer.
+            Action:
+              - 'cloudtrail:StopLogging'
+              - 'cloudtrail:DeleteTrail'
+              - 'cloudtrail:UpdateTrail'
+              - 'cloudtrail:PutEventSelectors'
+              - 'config:DeleteConfigurationRecorder'
+              - 'config:StopConfigurationRecorder'
+              - 'config:DeleteDeliveryChannel'
+              - 'guardduty:DeleteDetector'
+              - 'guardduty:UpdateDetector'
+              - 'securityhub:DisableSecurityHub'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DisableKey'
+              - 'backup:DeleteBackupVault'
+              - 'backup:DeleteRecoveryPoint'
+              - 'organizations:LeaveOrganization'
+            Resource: '*'
+
+  # -------------------------------------------------------------------------
+  # The role
+  # -------------------------------------------------------------------------
+  AppDeployerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Platform-prefixed so the SCP that stops a member account editing
+      # platform roles also protects this one. A tenant that could rewrite its
+      # own deployer role's trust policy could point it at any repository.
+      RoleName: !Sub 'PlatformAppDeployer-${ApplicationCode}'
+      Description: >-
+        The single control point for tenant deployments into this account.
+        Assumable only by the tenant CI identity over OIDC. Every assumption is
+        reconciled against a change record - design 08.
+      # One hour. A deploy that needs longer than an hour of continuously valid
+      # credentials is a deploy that should be broken into steps; the cost of a
+      # leaked short-lived token scales with this number.
+      MaxSessionDuration: 3600
+      PermissionsBoundary: !Ref AppDeployerBoundary
+      # Written as a !Sub'd JSON STRING rather than as YAML, and not by choice.
+      #
+      # An IAM condition KEY here has to be `<issuer-host>:aud`, which means
+      # interpolating a parameter into a mapping key. CloudFormation refuses:
+      # `Unhashable type "{'Fn::Sub': ...}"`, an error that names the YAML
+      # construct and says nothing about condition keys. The same trap caught
+      # containment/20-exercise-target.yaml, where the fix was to hardcode the
+      # key — viable there because it was one tag, not viable here because the
+      # issuer varies per tenant and hardcoding GitHub would silently break
+      # every GitLab tenant.
+      #
+      # AssumeRolePolicyDocument accepts a JSON string, so !Sub can build the
+      # whole document and the keys interpolate normally.
+      #
+      # Note the host is the URL with the scheme STRIPPED. The condition key is
+      # `token.actions.githubusercontent.com:sub`, not
+      # `https://token.actions.githubusercontent.com:sub` — a trust policy with
+      # the scheme left on parses, deploys, and then matches nothing, so every
+      # assumption fails with a message about the token rather than about the
+      # policy.
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": { "Federated": "${ProviderArn}" },
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {
+                  "StringEquals": { "${IssuerHost}:aud": "${OidcAudience}" },
+                  "StringLike": { "${IssuerHost}:sub": "${OidcSubjectPattern}" }
+                }
+              }
+            ]
+          }
+        - ProviderArn: !If
+            - MakeProvider
+            - !Ref OidcProvider
+            - !Ref ExistingOidcProviderArn
+          IssuerHost: !Select [1, !Split ['https://', !Ref OidcProviderUrl]]
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-purpose, Value: tenant-deployment }
+        - { Key: platform-application, Value: !Ref ApplicationCode }
+
+  AppDeployerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: Deploy
+      Roles: [!Ref AppDeployerRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DeployTheApplicationStack
+            Effect: Allow
+            # Scoped by NAME to this application. design 08: "Scoped to the
+            # resources that application legitimately deploys". Two tenants'
+            # applications in one account cannot reach each other's stacks.
+            Action: 'cloudformation:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ApplicationCode}-*/*'
+              - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/*'
+          - Sid: ReadCloudFormationGlobally
+            Effect: Allow
+            # ValidateTemplate and the List* calls have no resource to scope
+            # to; CloudFormation rejects a resource ARN on them entirely.
+            Action:
+              - 'cloudformation:ValidateTemplate'
+              - 'cloudformation:List*'
+              - 'cloudformation:Describe*'
+            Resource: '*'
+          - Sid: TheApplicationsOwnCompute
+            Effect: Allow
+            Action:
+              - 'ecs:*'
+              - 'lambda:*'
+              - 'states:*'
+              - 'apigateway:*'
+              - 'elasticloadbalancing:*'
+              - 'application-autoscaling:*'
+            Resource: '*'
+          - Sid: ImagesAndArtifacts
+            Effect: Allow
+            Action: ['ecr:*']
+            Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ApplicationCode}*'
+          - Sid: EcrAuthIsAccountLevel
+            Effect: Allow
+            # GetAuthorizationToken takes no resource. Without it `docker
+            # login` fails with an authorization error that reads like bad
+            # credentials rather than a missing permission.
+            Action: 'ecr:GetAuthorizationToken'
+            Resource: '*'
+          - Sid: ObservabilityForItsOwnWorkloads
+            Effect: Allow
+            Action: ['logs:*']
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationCode}*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ecs/${ApplicationCode}*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${ApplicationCode}*'
+          - Sid: PassOnlyItsOwnRoles
+            Effect: Allow
+            # iam:PassRole is the most commonly over-granted permission in AWS
+            # and the usual route from "can deploy" to "can be anything": pass
+            # a privileged role to a Lambda you control and the Lambda runs as
+            # that role. Narrowed to roles named for this application.
+            Action: 'iam:PassRole'
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ApplicationCode}-*'
+          - Sid: ReadConfigurationAndSecretsItOwns
+            Effect: Allow
+            Action: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath']
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ApplicationCode}/*'
+          - Sid: SecretsForItsOwnApplication
+            Effect: Allow
+            Action: 'secretsmanager:GetSecretValue'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationCode}/*'
+          - Sid: KnowWhoItIs
+            Effect: Allow
+            # sts:GetCallerIdentity is how a pipeline proves which role it
+            # assumed, and it is the first thing in any useful deploy log.
+            Action: 'sts:GetCallerIdentity'
+            Resource: '*'
+
+Outputs:
+  AppDeployerRoleArn:
+    Description: >-
+      Give this to the tenant. It is the only credential they ever receive, and
+      it is not a credential — it is a role ARN their pipeline assumes.
+    Value: !GetAtt AppDeployerRole.Arn
+  BoundaryArn:
+    Value: !Ref AppDeployerBoundary
+  OidcProviderArn:
+    Description: >-
+      Pass as ExistingOidcProviderArn for the second and subsequent
+      applications in this account.
+    Value: !If [MakeProvider, !Ref OidcProvider, !Ref ExistingOidcProviderArn]
+  SubjectPattern:
+    Description: >-
+      Recorded in the outputs so that "who can deploy here" is answerable from
+      the stack without reading the trust policy.
+    Value: !Ref OidcSubjectPattern
