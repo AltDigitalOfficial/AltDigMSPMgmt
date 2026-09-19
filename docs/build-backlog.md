@@ -1909,3 +1909,131 @@ before `Triage`, so `Finalise` has one shape for every route.
 workflow.yaml` avoided this only by accident, because its record step reads the
 whole state object (`state.$: "$"`) rather than naming individual fields. Naming
 fields is better for readability and strictly more fragile.
+
+---
+
+## B-058 · The readout cannot ask Access Analyzer what a principal can reach
+
+**Open** — 2026-09-19.
+
+design 07's readout asks for "what else that principal can reach (**Access
+Analyzer**, policy evaluation)". The policy half is implemented — the attached
+and inline policies the principal carries, which is what an incident responder
+reaches for first. Access Analyzer is not consulted.
+
+The reason is that there is usually nothing to consult. An IAM Access Analyzer
+is a per-account, per-region resource, and nothing in this platform creates
+one. Querying an analyzer that does not exist returns an empty result, and an
+empty "external access findings" section reads exactly like a clean result —
+which is the failure mode this platform keeps running into (B-042, B-054). So
+the readout states that the check was not made and why.
+
+What Access Analyzer would add over the policy list: whether the principal can
+be assumed from outside the account, and which of its resources are shared
+externally. That is genuinely different information from "what policies does it
+have", and it is the half that answers "how did they get in".
+
+**Revisit when** — an analyzer is provisioned per account, which is most
+naturally part of the member baseline rather than of containment. Design 04
+(Security Controls and Evidence) is the document that would say so, and it is
+absent.
+
+---
+
+## B-059 · Notification windows are per-partner only; the client level is not stored
+
+**Open** — 2026-09-19.
+
+design 07: "Notification windows are fields in the onboarding record at **two
+levels** — per partner and per client. Both run simultaneously from the same
+`discovery_time`, and an unset window at either level blocks go-live."
+
+Only the partner level is stored. `scripts/registry.sh` writes `altdig_hours`
+and `notify_hours` onto the PARTNER record and writes no window onto a CLIENT
+record. The questionnaire field that would carry the client level —
+`baa_window_partner_to_client_hours`, field 2.6 — is validated by
+`scripts/derive-vesting.py` (it blocks vesting when PHI is true and the value
+is null) and then not persisted anywhere the clock can read.
+
+So today every client under a partner inherits that partner's window. A client
+who negotiated a tighter one would be counted against the wrong deadline, and
+the clock would report a comfortable margin that does not exist.
+
+Three small pieces: `registry.sh client` gains a window argument,
+`sync-notification-windows.sh` prefers the client value over the partner
+default, and `clock.py` needs no change — it already reads whatever the map
+gives it per account.
+
+**Revisit when** — the first client negotiates a window different from their
+partner's default, or at the first real vesting, whichever comes first.
+
+---
+
+## B-060 · The package did not contain the handlers the template named
+
+**Fixed** — 2026-09-19.
+
+`containment/10-containment.yaml` was deployed with three Lambda functions
+whose code was a package containing only two of the four modules. The stack
+deployed clean. `platform-incident-readout` and `platform-notification-clock`
+would both have failed at invocation with "Unable to import module" — during an
+incident, which is the only time either of them runs.
+
+Two causes, both worth keeping:
+
+**The module list was maintained by hand.** `publish-containment.sh` named
+`contain.py` and `declare.py` in a `cp` line. Adding two modules to the
+template required remembering to add them to the script, and nothing connected
+the two. Fixed by deriving the check FROM the template: the publish script now
+greps every `Handler: <module>.handler` out of the CloudFormation and refuses
+to package if the corresponding file is not in the archive. The template is the
+thing that declares what must exist, so the template is what the check reads.
+
+**The publish script was piped to `head`.** The run that was supposed to upload
+the corrected package printed its key and exited before the upload, because
+`head` closed the pipe and the script took SIGPIPE. The key was then quoted
+into a deploy, which failed with S3 `NoSuchKey` — an error that points at the
+bucket rather than at the pipe.
+
+CLAUDE.md already carries this trap, under "Windows / Git Bash traps":
+
+> **Do not pipe a script into `tail`/`head` when the exit code matters.** The
+> pipeline returns the *last* command's status, so a `set -e` abort inside the
+> script reports success. Redirect to a file and read the file.
+
+It is written about exit codes. The failure here was worse than a wrong exit
+code: the script did not finish its work at all, and the truncated output still
+looked like a successful run. Redirect to a file and grep the file.
+
+---
+
+## B-061 · `AWS_PROFILE=` sets an empty profile rather than unsetting it
+
+**Fixed** — 2026-09-19, found writing `sync-notification-windows.sh`.
+
+To run one AWS call with assumed-role credentials instead of the configured
+profile, the obvious form is an inline prefix:
+
+    AWS_ACCESS_KEY_ID=... AWS_PROFILE= aws dynamodb scan ...
+
+That sets `AWS_PROFILE` to the empty string, which is not the same as unsetting
+it. The CLI looks for a profile named `""` and fails:
+
+    The config profile () could not be found
+
+Which reads like a broken `~/.aws/config` and sends you to the wrong file
+entirely. There is no shell syntax for unsetting a variable for the duration of
+one command, so the fix is a subshell:
+
+    RESULT="$( unset AWS_PROFILE
+               export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+               aws dynamodb scan ... )"
+
+Every other script in `scripts/` that assumes a role does this correctly, by
+accident of structure: they `unset AWS_PROFILE` once at the top level after
+assuming, because they then make several calls. This was the first place a
+single call needed it inline.
+
+Compounding it, the call had `2>/dev/null` on it and reported "Could not read
+the registry table" — which points at the table name and at permissions, and
+the cause was neither. The error is now captured and printed.

@@ -93,6 +93,28 @@ Parameters:
       back to the account named in the finding — a drill that reaches a real
       account is worse than a drill that does not run.
 
+  EscalationFractions:
+    Type: String
+    Default: '0.5,0.75,0.9,1.0'
+    Description: >-
+      Fractions of a notification window at which the clock speaks up. design
+      07 says "escalating at defined fractions of the window" and does not
+      define them; these are the build's choice.
+
+      Deliberately sparse. Every escalation that is not actionable trains
+      somebody to stop reading them, so: half the window is the last
+      comfortable moment to start drafting, 90% is the stop-what-you-are-doing
+      point, and 1.0 records the breach itself, because a missed contractual
+      deadline is a fact somebody will later need the exact time of.
+
+  ClockSweepExpression:
+    Type: String
+    Default: 'rate(5 minutes)'
+    Description: >-
+      How often deadlines are recomputed. Five minutes is the granularity of
+      the countdown; the arithmetic is redone from discovery_time each time, so
+      a missed sweep catches up rather than losing a deadline.
+
   LogsKeyArn:
     Type: String
     Default: ''
@@ -144,9 +166,30 @@ Resources:
       AttributeDefinitions:
         - { AttributeName: PK, AttributeType: S }
         - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: record_type, AttributeType: S }
+        - { AttributeName: discovery_time, AttributeType: S }
       KeySchema:
         - { AttributeName: PK, KeyType: HASH }
         - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        # How the notification clock finds incidents whose deadline may still
+        # be live, without scanning the table.
+        #
+        # SPARSE BY DESIGN: only the header item carries BOTH record_type and
+        # discovery_time, so containment events and clock announcements are not
+        # indexed at all. The index holds exactly one entry per incident, which
+        # is what makes a range query on discovery_time the right shape.
+        #
+        # record_type is a single value for every header, so this is a
+        # one-partition index. Acceptable here and not in general: security
+        # incidents are rare by construction, and if they ever are not, the
+        # platform has a larger problem than a hot partition.
+        - IndexName: by-record-type
+          KeySchema:
+            - { AttributeName: record_type, KeyType: HASH }
+            - { AttributeName: discovery_time, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
       SSESpecification:
@@ -430,6 +473,192 @@ Resources:
           EXERCISE_ACCOUNT_ID: !Ref ExerciseAccountId
           ALERT_BUS_NAME: !Ref AlertBusName
 
+
+  # -------------------------------------------------------------------------
+  # The readout (prompt 7.2)
+  # -------------------------------------------------------------------------
+  # Runs after containment has published its summary. The two carry the same
+  # account, resource and title, so the router derives the same dedup key and
+  # PagerDuty treats this as an UPDATE to the incident already raised: the page
+  # goes out with what was done, and the evidence catches up.
+  ReadoutRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformIncidentReadout
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: Readout
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AssumeTheResponderRole
+                Effect: Allow
+                # The same role containment uses, for the same reason: reading
+                # a member account CloudTrail and IAM needs a principal in that
+                # account, and the responder role is the one the member cannot
+                # deny.
+                Action: 'sts:AssumeRole'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${ResponderRoleName}'
+              - Sid: TheCrossAccountSweep
+                Effect: Allow
+                # The permission that makes prompt 7.2's cross-account
+                # indicator check possible without a single cross-account call.
+                # Audit is the Security Hub delegated administrator, so
+                # findings from every account in the organization are already
+                # local to it.
+                Action:
+                  - 'securityhub:GetFindings'
+                  - 'securityhub:DescribeHub'
+                Resource: '*'
+              - Sid: AppendOnlyIncidentRecord
+                Effect: Allow
+                Action: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:Query']
+                Resource: !GetAtt IncidentTable.Arn
+              - Sid: PublishTheReadout
+                Effect: Allow
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  ReadoutLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-incident-readout
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ReadoutFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ReadoutLogGroup
+    Properties:
+      FunctionName: platform-incident-readout
+      Runtime: python3.12
+      Handler: readout.handler
+      Role: !GetAtt ReadoutRole.Arn
+      # Longer than any containment stage. A 24-hour CloudTrail lookup and an
+      # organization-wide Security Hub sweep are both slow, and prompt 7.2 is
+      # explicit that the cross-account check must not be skipped for speed.
+      Timeout: 600
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          INCIDENT_TABLE: !Ref IncidentTable
+          RESPONDER_ROLE_NAME: !Ref ResponderRoleName
+          RESPONDER_EXTERNAL_ID: !Ref ResponderExternalId
+          ALERT_BUS_NAME: !Ref AlertBusName
+
+  # -------------------------------------------------------------------------
+  # The notification clock (prompt 7.3)
+  # -------------------------------------------------------------------------
+  ClockRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformNotificationClock
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: Clock
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadIncidentsAndAnnounceOnce
+                Effect: Allow
+                # PutItem, Query, and no UpdateItem or DeleteItem -- the same
+                # append-only guarantee the rest of this stack keeps. An
+                # escalation that has been announced cannot be unannounced.
+                Action: ['dynamodb:PutItem', 'dynamodb:Query']
+                Resource:
+                  - !GetAtt IncidentTable.Arn
+                  - !Sub '${IncidentTable.Arn}/index/by-record-type'
+              - Sid: ReadNotificationWindows
+                Effect: Allow
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/incident/*'
+              - Sid: AnnounceDeadlines
+                Effect: Allow
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  ClockLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-notification-clock
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ClockFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ClockLogGroup
+    Properties:
+      FunctionName: platform-notification-clock
+      Runtime: python3.12
+      Handler: clock.handler
+      Role: !GetAtt ClockRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          INCIDENT_TABLE: !Ref IncidentTable
+          ALERT_BUS_NAME: !Ref AlertBusName
+          ESCALATION_FRACTIONS: !Ref EscalationFractions
+
+  # A sweep, not a timer per deadline.
+  #
+  # One-shot schedules per escalation would be the obvious build and fail in
+  # the one way that matters: a schedule that was never created, or was created
+  # and removed, fires nothing and reports nothing. Recomputing every deadline
+  # from discovery_time on a fixed cadence is idempotent and self-healing -- a
+  # missed sweep catches up on the next one rather than losing a deadline
+  # permanently.
+  ClockSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-notification-clock-sweep
+      Description: >-
+        Recomputes every live notification deadline from discovery_time and
+        announces the ones that have newly crossed an escalation fraction.
+      ScheduleExpression: !Ref ClockSweepExpression
+      State: ENABLED
+      Targets:
+        - Id: clock
+          Arn: !GetAtt ClockFunction.Arn
+
+  ClockInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ClockFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ClockSchedule.Arn
+
   # -------------------------------------------------------------------------
   # The sequence
   # -------------------------------------------------------------------------
@@ -495,6 +724,7 @@ Resources:
               LogGroupArn: !GetAtt ContainmentStateMachineLogGroup.Arn
       DefinitionSubstitutions:
         ContainArn: !GetAtt ContainmentFunction.Arn
+        ReadoutArn: !GetAtt ReadoutFunction.Arn
       # The sequence design 07 calls non-negotiable, written out so an auditor
       # and whoever is on call at 3am read the same thing.
       #
@@ -662,7 +892,31 @@ Resources:
               "Catch": [
                 { "ErrorEquals": ["States.ALL"], "ResultPath": "$.finaliseError", "Next": "RecordingFailed" }
               ],
+              "Next": "Readout"
+            },
+
+            "Readout": {
+              "Type": "Task",
+              "Comment": "Prompt 7.2. Runs AFTER the summary has been published, because the summary is what pages somebody and this is slow -- a 24-hour CloudTrail lookup and an organization-wide indicator sweep. Carries the same account, resource and title, so the router derives the same dedup key and PagerDuty updates the open incident rather than raising a second one.",
+              "Resource": "${ReadoutArn}",
+              "Parameters": {
+                "incident.$": "$.incident"
+              },
+              "ResultPath": "$.readout",
+              "Retry": [
+                { "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.readoutError", "Next": "ReadoutFailed" }
+              ],
               "Next": "Done"
+            },
+
+            "ReadoutFailed": {
+              "Type": "Fail",
+              "Comment": "CONTAINMENT SUCCEEDED; the readout did not. Marked failed deliberately so it reaches a human: an incident that paged with what was done, and then produced no dossier, leaves whoever picks it up without the principal's activity, its reach, or the cross-account answer -- and the cross-account answer is the one that says whether this is one workload or the whole platform.",
+              "Error": "ReadoutFailed",
+              "Cause": "Containment completed and was recorded. The readout could not be generated; the incident record holds the containment stages, and the cross-account indicator question is UNANSWERED."
             },
 
             "RecordingFailed": {
@@ -739,6 +993,10 @@ Outputs:
     Value: !Ref ContainmentStateMachine
   IncidentTableName:
     Value: !Ref IncidentTable
+  ReadoutFunctionName:
+    Value: !Ref ReadoutFunction
+  ClockFunctionName:
+    Value: !Ref ClockFunction
   ExerciseConfigured:
     Description: >-
       "none" until prompt 7.4. Exercise mode refuses to run while unset.

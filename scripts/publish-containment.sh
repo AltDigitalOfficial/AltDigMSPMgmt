@@ -4,9 +4,10 @@
 #
 #   scripts/publish-containment.sh [--dry-run]
 #
-# One package, two handlers. declare.py creates the incident and contain.py
-# runs the sequence; they share the incident record's shape and are deployed
-# together so they cannot drift.
+# One package, four handlers: declare.py creates the incident, contain.py runs
+# the sequence, readout.py assembles the dossier and clock.py counts the
+# notification deadlines. All four read or write the same append-only incident
+# record, so they are deployed together and cannot drift apart.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -30,14 +31,33 @@ TOOLING="$(get_param /org/account/altdig-infra-tooling)"
 BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
-cp "${REPO_ROOT}/containment/src/contain.py" "${BUILD}/contain.py"
-cp "${REPO_ROOT}/containment/src/declare.py" "${BUILD}/declare.py"
+> "${BUILD}/.sources"
+for MODULE in contain declare readout clock; do
+  cp "${REPO_ROOT}/containment/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
+  printf '%s\n' "$(win_path "${REPO_ROOT}/containment/src/${MODULE}.py")" \
+    >> "${BUILD}/.sources"
+done
 
-info "Checking both handlers compile"
-"${PY}" -m py_compile \
-  "$(win_path "${REPO_ROOT}/containment/src/contain.py")" \
-  "$(win_path "${REPO_ROOT}/containment/src/declare.py")" \
+# Every handler the template names, checked against what is actually in the
+# package. This list was previously written out by hand and a silent edit
+# failure left readout.py and clock.py out of the archive while the stack had
+# already been deployed with Lambdas pointing at them -- functions that would
+# have failed at invocation with "Unable to import module", during an incident.
+info "Checking every handler the template references is packaged"
+for HANDLER in $(grep -oE '^      Handler: [a-z]+\.handler' \
+                   "${REPO_ROOT}/containment/10-containment.yaml" \
+                 | awk '{print $2}' | cut -d. -f1 | sort -u); do
+  [[ -f "${BUILD}/${HANDLER}.py" ]] \
+    || die "the template declares handler ${HANDLER}.handler but
+      ${HANDLER}.py is not in the package. Add it to the MODULE list above."
+  printf '  %s.py\n' "${HANDLER}"
+done
+ok "every referenced handler is present"
+
+info "Checking they all compile"
+xargs "${PY}" -m py_compile < "${BUILD}/.sources" \
   || die "containment sources do not compile. Nothing packaged."
+rm -f "${BUILD}/.sources"
 ok "compiles"
 
 # The state machine names six stages. One it does not implement fails at RUN
