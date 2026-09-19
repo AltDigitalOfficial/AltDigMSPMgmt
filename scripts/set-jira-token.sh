@@ -41,14 +41,29 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 FROM_STDIN=0
 SECRET_NAME="platform/jira/service-account"
 EMAIL=""
+# AUDIT, not Tooling.
+#
+# A secret is only useful in the account that reads it. The reconciliation
+# engine (8.2) and the quorum pipeline (8.3) both run in Audit, alongside the
+# router and containment, because that is where deployment events land and
+# where Security Hub is aggregated. Storing this in Tooling — the first version
+# of this script did — would have put the credential somewhere nothing can
+# reach it, and the failure would have surfaced as an AccessDenied on
+# GetSecretValue naming a secret that does exist, just not there.
+#
+# Same arrangement as the PagerDuty routing key, which
+# scripts/sync-pagerduty-secrets.sh places into the consuming account for
+# exactly this reason.
+ACCOUNT_KEY="altdig-security-audit"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --stdin)  FROM_STDIN=1; shift ;;
-    --email)  EMAIL="$2"; shift 2 ;;
-    --secret) SECRET_NAME="$2"; shift 2 ;;
+    --stdin)   FROM_STDIN=1; shift ;;
+    --email)   EMAIL="$2"; shift 2 ;;
+    --secret)  SECRET_NAME="$2"; shift 2 ;;
+    --account) ACCOUNT_KEY="$2"; shift 2 ;;
     -h|--help)
-      printf 'Usage: %s [--email <addr>] [--stdin] [--secret <name>]\n' "$0"
+      printf 'Usage: %s [--email <addr>] [--stdin] [--secret <name>] [--account <alias>]\n' "$0"
       exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
@@ -58,9 +73,9 @@ export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
 require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
 
-TOOLING="$(get_param /org/account/altdig-infra-tooling)"
+TOOLING="$(get_param "/org/account/${ACCOUNT_KEY}")"
 [[ -n "${TOOLING}" && "${TOOLING}" != "None" ]] \
-  || die "Platform Tooling account not registered."
+  || die "Account ${ACCOUNT_KEY} is not registered in SSM."
 
 if [[ -z "${EMAIL}" ]]; then
   # The email is not secret in the way the token is, so it is prompted

@@ -388,7 +388,8 @@ Resources:
         # it runs IN this account and puts straight onto this bus, so it never
         # passes through baseline/70-event-forwarding.yaml — which is why that
         # template's matching rule lists only the two member-side sources.
-        source: ['platform.response', 'platform.recovery', 'platform.security']
+        source: ['platform.response', 'platform.recovery', 'platform.security',
+                 'platform.change']
         detail-type: ['Platform Incident Dossier']
       State: ENABLED
       Targets:
@@ -425,6 +426,7 @@ Resources:
               - platform.response
               - platform.recovery
               - platform.security
+              - platform.change
       State: ENABLED
       Targets:
         - Id: router

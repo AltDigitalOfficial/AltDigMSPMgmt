@@ -2159,3 +2159,91 @@ succeeded.
 evidence. It is worth noting what that changes: V3 moves from an assumption
 somebody wrote down to a control with a date on it, which is the difference an
 auditor is asking about.
+
+---
+
+## B-066 · Three scripts now scan the registry and publish a slice of it
+
+**Open** — 2026-09-19.
+
+`sync-account-tiers.sh`, `sync-notification-windows.sh` and
+`sync-tenant-facts.sh` all do the same thing: scan the registry table in
+Tooling, project out a few fields, and write a per-account map into Audit as an
+SSM parameter. Three scans, three parameters, three consumers.
+
+The duplication is deliberate for now and should not be collapsed
+reflexively. Each map has one consumer and one meaning — the router reads
+tiers, the incident clock reads notification windows, reconciliation reads
+change projects — and a single shared document would couple three components'
+release cycles together. A change to what reconciliation needs would force a
+redeploy of the routing layer.
+
+What makes it worth revisiting is the operational half, not the code: three
+scripts must each be re-run after vesting, and forgetting one produces a
+different silent wrongness in each case. An account missing from the tier map
+routes as prod and pages; missing from the windows map reports its notification
+obligations as unknown; missing from the facts map reconciles against the
+platform default.
+
+**Revisit when** — a fourth appears, or vesting (prompt 12.x) automates the
+post-vest steps, at which point "re-run these three" becomes one saga step and
+the duplication stops costing anything.
+
+---
+
+## B-067 · Reconciliation would have skipped accounts absent from the tenant map
+
+**Fixed** — 2026-09-19, before first deployment, found by running the sync
+against an empty registry.
+
+The first version of `recent_deployments()` derived the list of accounts to
+reconcile from `/platform/change/tenant-facts`. With no tenants vested that map
+is `{}`, so reconciliation would have queried nothing — while capture happily
+recorded deployment events from the sandbox under
+`deployment#754280127660`.
+
+The general failure is worse than the empty-map case. Any account absent from
+the facts map — newly vested, or one the sync had not been re-run for — would
+have its deployments CAPTURED and then never compared. Evidence would
+accumulate, nothing would examine it, and the account would read as clean
+rather than as unexamined. That is the same silent-gap shape as B-062 and
+B-042, arrived at from a third direction.
+
+Fixed with a `by-record-type` GSI on the change table, keyed
+`record_type` + `occurred_at`. Reconciliation now reads the deployments
+themselves and covers everything that was captured; an account with no tenant
+record still gets reconciled, against the platform default, with that fact
+recorded in the finding rather than applied silently.
+
+**The rule worth carrying:** derive the work list from the EVIDENCE, not from a
+configuration map. A configuration map answers "who should exist"; the evidence
+answers "what actually happened", and reconciliation is a control over the
+second.
+
+---
+
+## B-068 · The Jira search endpoint is unverified against the live API
+
+**Open** — 2026-09-19.
+
+`change/src/jira.py` calls `/rest/api/3/search/jql`, which is Atlassian's
+replacement for the retired `/rest/api/3/search`. The request shape, the
+parameter names and the response envelope are written from documentation
+rather than from a live call, because no API token exists yet.
+
+Three things specifically unverified:
+
+- whether `fields` is accepted as a comma-separated string or must be an array
+- whether the response still returns `issues` at the top level
+- whether pagination is `nextPageToken` rather than `startAt`, and whether the
+  engine needs to follow it at the volumes involved
+
+None of this is guesswork about behaviour — it is guesswork about an interface,
+which is the kind that fails immediately and loudly rather than subtly. The
+engine already treats any Jira error as `change_source_unavailable`, so a wrong
+endpoint degrades to "no conclusion drawn" rather than to a false compliance
+finding.
+
+**Close when** — the service account token is in Secrets Manager and
+reconciliation has compared a real deployment against a real change record.
+That is the last unverified part of 8.2.

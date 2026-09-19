@@ -1,0 +1,688 @@
+"""Change reconciliation. Prompt 8.2, design/08-change-and-release.md.
+
+    Intent:   Pipeline registers a change in Jira before deploying
+    Reality:  CloudTrail + EventBridge capture what actually happened
+    Judgment: Reconciliation compares the two; mismatches are findings
+
+Why this is a DETECTIVE control and not a gate
+----------------------------------------------
+design 08's constraint, which shapes everything here:
+
+    Development teams are not overseen by AltDigital. SOC 2 requires visibility
+    and approval of changes to the environment. We therefore cannot rely on a
+    gate we control -- change management is a detective control, reconciled
+    continuously.
+
+So nothing in this module blocks a deployment. It observes what happened and
+compares it to what was declared, and the gap is the finding. design 08 is
+direct about why that is acceptable, and it is worth keeping in view while
+reading the outcomes below:
+
+    Auditors accept continuous reconciliation far more readily than a signature
+    on a form, because it is evidence rather than a claim.
+
+The fifth outcome
+-----------------
+design 08's table has four. This implements five, and the extra one is the
+important one:
+
+    change_source_unavailable
+
+If Jira cannot be read -- expired token, wrong project, an issue type that does
+not exist, an outage -- the engine does NOT conclude "no approved change" and
+report every deployment in the estate as unapproved. That is B-054's lesson
+(a denied lookup reported as a negative result) with the blast radius of B-043
+(a finding on every run, every account, until somebody mutes it).
+
+An unreadable change source is a finding about the PLATFORM, raised once per
+run, not a finding about each deployment.
+"""
+import datetime
+import hashlib
+import json
+import os
+
+import boto3
+
+import jira
+
+dynamodb = boto3.client("dynamodb")
+events = boto3.client("events")
+ssm = boto3.client("ssm")
+
+CHANGE_TABLE = os.environ.get("CHANGE_TABLE", "")
+ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
+CHANGE_ISSUETYPE = os.environ.get("JIRA_CHANGE_ISSUETYPE", "Change")
+DEFAULT_CHANGE_PROJECT = os.environ.get("JIRA_DEFAULT_CHANGE_PROJECT", "")
+TENANT_FACTS_PARAM = os.environ.get("TENANT_FACTS_PARAM",
+                                    "/platform/change/tenant-facts")
+
+# How far back a reconciliation run looks. Deliberately wider than the schedule
+# interval: a run that looked back exactly one interval would lose any
+# deployment that landed while the previous run was executing, and the gap
+# would never be revisited because reconciliation is not retrospective unless
+# somebody asks it to be.
+LOOKBACK_HOURS = int(os.environ.get("RECONCILE_LOOKBACK_HOURS", "26"))
+
+# How close in time a change record has to be to count as covering a
+# deployment. design 08 does not give a number; this is the build's.
+#
+# Generous rather than tight, because the failure modes are asymmetric. Too
+# tight and a legitimate deployment that ran long is reported as unapproved,
+# which is a false accusation against a tenant. Too loose and an unapproved
+# deployment hides behind an unrelated change record, which reconciliation
+# would catch on the next record that has no deployment. A false positive
+# costs trust; a false negative costs a day.
+MATCH_WINDOW_HOURS = float(os.environ.get("CHANGE_MATCH_WINDOW_HOURS", "24"))
+
+_FACTS = {}
+
+
+def _now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _iso(dt):
+    return dt.astimezone(datetime.timezone.utc).isoformat()
+
+
+def _parse(value):
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        # Jira returns offsets without a colon: 2026-09-19T12:00:00.000+0000.
+        # fromisoformat rejects that on Python < 3.11 and accepts it on 3.11+;
+        # normalising here means the code does not depend on which runtime it
+        # happens to land on.
+        if len(text) > 5 and (text[-5] in "+-") and text[-3] != ":":
+            text = text[:-2] + ":" + text[-2:]
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Capture. design 08's six deployment event types.
+# ---------------------------------------------------------------------------
+#
+# "What is captured as a deployment event", verbatim from design 08:
+#
+#   - AppDeployer role assumption
+#   - ECS task definition revisions and service updates
+#   - Lambda function code and configuration updates
+#   - CloudFormation stack create/update
+#   - EC2 launch template and AMI changes
+#   - RDS parameter group and engine version changes
+#
+# Each maps to CloudTrail event names. The mapping is data rather than code so
+# that adding a type is an edit to a table and not to a dispatch chain.
+
+DEPLOYMENT_EVENTS = {
+    # design 08 lists this first, and it is the one that matters most: it is
+    # the control point itself. A deployment that did NOT come through
+    # AppDeployer is a different and worse finding than one that did without a
+    # change record.
+    "AssumeRoleWithWebIdentity": "appdeployer-assumption",
+
+    "RegisterTaskDefinition": "ecs-task-definition",
+    "UpdateService": "ecs-service-update",
+    "CreateService": "ecs-service-update",
+
+    "UpdateFunctionCode": "lambda-code",
+    "UpdateFunctionConfiguration": "lambda-configuration",
+    "PublishVersion": "lambda-code",
+
+    "CreateStack": "cloudformation-stack",
+    "UpdateStack": "cloudformation-stack",
+    "ExecuteChangeSet": "cloudformation-stack",
+
+    "CreateLaunchTemplate": "ec2-launch-template",
+    "CreateLaunchTemplateVersion": "ec2-launch-template",
+    "ModifyLaunchTemplate": "ec2-launch-template",
+
+    "ModifyDBParameterGroup": "rds-parameter-group",
+    "ModifyDBInstance": "rds-engine-or-config",
+    "ModifyDBCluster": "rds-engine-or-config",
+}
+
+
+def classify_event(event):
+    detail = event.get("detail") or {}
+    name = detail.get("eventName")
+    kind = DEPLOYMENT_EVENTS.get(name)
+    if kind is None:
+        return None
+
+    identity = detail.get("userIdentity") or {}
+    arn = identity.get("arn") or ""
+    # Only AppDeployer assumptions count as the control point. A
+    # AssumeRoleWithWebIdentity for some other role is somebody else's
+    # federation and is not a deployment into this estate.
+    if kind == "appdeployer-assumption" and "PlatformAppDeployer" not in str(
+            (detail.get("requestParameters") or {}).get("roleArn", "")):
+        return None
+
+    return {
+        "event_name": name,
+        "kind": kind,
+        "account_id": detail.get("recipientAccountId") or event.get("account"),
+        "region": detail.get("awsRegion") or event.get("region"),
+        "occurred_at": detail.get("eventTime") or event.get("time"),
+        "principal_arn": arn,
+        "principal_type": identity.get("type"),
+        # The deployer session name, which for an OIDC assumption is the CI run
+        # -- the single most useful field when asking "which pipeline run did
+        # this".
+        "session": (identity.get("sessionContext") or {}).get(
+            "sessionIssuer", {}).get("userName") or identity.get("userName"),
+        "resource": _resource_of(detail),
+        "error_code": detail.get("errorCode"),
+        "event_id": detail.get("eventID"),
+        "via_appdeployer": "PlatformAppDeployer" in arn,
+    }
+
+
+def _resource_of(detail):
+    rp = detail.get("requestParameters") or {}
+    for key in ("stackName", "functionName", "service", "family",
+                "dBParameterGroupName", "dBInstanceIdentifier",
+                "launchTemplateName", "roleArn"):
+        if rp.get(key):
+            return str(rp[key])[:256]
+    resources = detail.get("resources") or []
+    if resources and isinstance(resources[0], dict):
+        return str(resources[0].get("ARN") or "")[:256]
+    return None
+
+
+def capture(event, context=None):
+    """Record one deployment event. Append-only, like every other record here.
+
+    Stored rather than reconciled immediately, for a reason worth stating: a
+    change record is often filed minutes AFTER the pipeline starts, so
+    reconciling at capture time would report half of a well-behaved tenant's
+    deployments as unapproved. Reconciliation runs on a schedule, over a
+    window, once the dust has settled.
+    """
+    record = classify_event(event)
+    if record is None:
+        out = {"captured": False,
+               "reason": "not a deployment event",
+               "event_name": (event.get("detail") or {}).get("eventName")}
+        print(json.dumps(out))
+        return out
+
+    if CHANGE_TABLE:
+        key = hashlib.sha256(
+            (record.get("event_id") or json.dumps(record, sort_keys=True)
+             ).encode()).hexdigest()[:24]
+        dynamodb.put_item(TableName=CHANGE_TABLE, Item={
+            "PK": {"S": f"deployment#{record['account_id']}"},
+            "SK": {"S": f"{record['occurred_at']}#{key}"},
+            "record_type": {"S": "deployment-event"},
+            "account_id": {"S": str(record["account_id"])},
+            "occurred_at": {"S": str(record["occurred_at"])},
+            "kind": {"S": record["kind"]},
+            "detail": {"S": json.dumps(record, default=str)[:38000]},
+        })
+
+    print(json.dumps({"captured": True, "kind": record["kind"],
+                      "account_id": record["account_id"],
+                      "via_appdeployer": record["via_appdeployer"]}))
+    return {"captured": True, "record": record}
+
+
+# ---------------------------------------------------------------------------
+# Tenant facts
+# ---------------------------------------------------------------------------
+
+
+def tenant_facts(account_id):
+    """Which Jira project holds this account's change records.
+
+    Per tenant, not global. design 08 routes an unapproved deployment to "the
+    tenant's change approver", and tenants must not see each other's change
+    records -- so the project is a property of the account, published into this
+    account the same way the tier map and the notification windows are.
+
+    Falls back to the configured default, which exists so the sandbox can be
+    exercised before any tenant is vested. The fallback is RECORDED in the
+    outcome rather than applied silently: reconciling a tenant's deployments
+    against somebody else's change project would produce confident nonsense.
+    """
+    if not _FACTS:
+        try:
+            raw = ssm.get_parameter(Name=TENANT_FACTS_PARAM)["Parameter"]["Value"]
+            _FACTS.update(json.loads(raw))
+        except Exception as exc:                   # noqa: BLE001
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            _FACTS["__error__"] = code or type(exc).__name__
+
+    entry = (_FACTS.get(account_id) or {}) if account_id else {}
+    project = entry.get("jira_change_project")
+    if project:
+        return {"project": project, "source": "tenant record",
+                "change_approver": entry.get("change_approver")}
+    if DEFAULT_CHANGE_PROJECT:
+        return {"project": DEFAULT_CHANGE_PROJECT,
+                "source": ("platform default -- no per-tenant change project "
+                           "is recorded for this account"),
+                "change_approver": entry.get("change_approver")}
+    return {"project": None,
+            "source": ("no change project is configured for this account and "
+                       "no platform default is set"),
+            "change_approver": entry.get("change_approver")}
+
+
+# ---------------------------------------------------------------------------
+# The comparison
+# ---------------------------------------------------------------------------
+
+
+def approved_changes(project):
+    """Change records in the window, with their planned windows.
+
+    Verifies the ISSUE TYPE EXISTS before searching. Without that check, a
+    wrong JIRA_CHANGE_ISSUETYPE returns zero issues and the engine would report
+    every deployment in the estate as unapproved -- a configuration mistake
+    presenting as a compliance catastrophe. open-items.md B9 (the golden Jira
+    scheme) is what finally settles the correct value.
+    """
+    types = jira.project_issue_types(project)
+    if CHANGE_ISSUETYPE not in types:
+        raise jira.JiraUnavailable(
+            f"project {project} has no issue type named "
+            f"'{CHANGE_ISSUETYPE}'. It has: {', '.join(types) or 'none'}. "
+            "No conclusion can be drawn about whether deployments were "
+            "approved -- this is a configuration fault, not a finding about "
+            "any deployment. See open-items.md B9.")
+
+    since = _iso(_now() - datetime.timedelta(hours=LOOKBACK_HOURS * 2))
+    jql = (f'project = "{project}" AND issuetype = "{CHANGE_ISSUETYPE}" '
+           f'AND updated >= "{since[:10]}" ORDER BY created DESC')
+    issues = jira.search(jql, fields=["summary", "status", "created", "updated",
+                                      "description", "labels", "reporter"])
+    changes = []
+    for issue in issues:
+        f = issue.get("fields") or {}
+        status = ((f.get("status") or {}).get("name") or "").lower()
+        changes.append({
+            "key": issue.get("key"),
+            "summary": f.get("summary"),
+            "status": (f.get("status") or {}).get("name"),
+            # design 08 warns not to trust the status field alone for QUORUM
+            # decisions. For reconciliation it is the available signal, and the
+            # consequence of it being wrong is a finding somebody reviews --
+            # not an irreversible action. The distinction is why 8.3 validates
+            # the changelog and 8.2 does not.
+            "approved": status in ("approved", "done", "closed", "resolved",
+                                   "in progress", "implementing"),
+            "created": f.get("created"),
+            "updated": f.get("updated"),
+            "labels": f.get("labels") or [],
+            # Accounts a change claims to touch, by label. A convention rather
+            # than a custom field, because a label needs no scheme change and
+            # B9 has not settled the scheme. e.g. account-754280127660
+            "accounts": [l.split("account-", 1)[1] for l in (f.get("labels") or [])
+                         if l.startswith("account-")],
+        })
+    return changes
+
+
+def match(deployment, changes):
+    """Does an approved change cover this deployment?
+
+    Matching is by ACCOUNT and TIME, not by resource name. Resource-level
+    matching sounds stronger and is brittle: a change record says "deploy the
+    payments service" and CloudTrail says `UpdateFunctionCode` on
+    `payments-api-prod-handler`, and no string comparison reliably bridges
+    that. Account plus a time window is coarse, honest, and catches the thing
+    the control exists to catch -- a deployment nobody declared.
+    """
+    when = _parse(deployment.get("occurred_at"))
+    if when is None:
+        return None, "the deployment event carries no usable timestamp"
+
+    window = datetime.timedelta(hours=MATCH_WINDOW_HOURS)
+    candidates = []
+    for change in changes:
+        if change["accounts"] and deployment.get("account_id") not in change["accounts"]:
+            continue
+        created = _parse(change.get("created"))
+        if created is None:
+            continue
+        # A change record filed AFTER the deployment it covers is not approval,
+        # it is a retrospective note. design 08's third outcome exists for
+        # exactly this shape, so it is matched but flagged rather than dropped.
+        delta = (when - created).total_seconds()
+        if -3600 <= delta <= window.total_seconds():
+            candidates.append((abs(delta), change, delta))
+
+    if not candidates:
+        return None, "no change record covers this deployment"
+    candidates.sort(key=lambda c: c[0])
+    _, change, delta = candidates[0]
+    if not change["approved"]:
+        return change, (f"change {change['key']} covers this deployment but is "
+                        f"in status '{change['status']}', not an approved state")
+    if delta < 0:
+        return change, (f"change {change['key']} was created AFTER the "
+                        "deployment -- a retrospective record, not an approval")
+    return change, None
+
+
+def reconcile(event, context=None):
+    """The scheduled run. Produces design 08's outcomes, plus the fifth."""
+    since = _now() - datetime.timedelta(hours=LOOKBACK_HOURS)
+    deployments = recent_deployments(since)
+
+    by_account = {}
+    for d in deployments:
+        by_account.setdefault(d.get("account_id"), []).append(d)
+
+    results = []
+    for account_id, account_deployments in by_account.items():
+        facts = tenant_facts(account_id)
+        project = facts["project"]
+
+        if not project:
+            results.append(_unavailable(account_id, account_deployments,
+                                        facts["source"]))
+            continue
+        try:
+            changes = approved_changes(project)
+        except jira.JiraUnavailable as exc:
+            results.append(_unavailable(account_id, account_deployments,
+                                        str(exc)))
+            continue
+
+        matched_keys = set()
+        for deployment in account_deployments:
+            change, problem = match(deployment, changes)
+            if change is None:
+                outcome = "no_change_record"
+            elif problem:
+                outcome = "outside_approved_window"
+                matched_keys.add(change["key"])
+            else:
+                outcome = "matched"
+                matched_keys.add(change["key"])
+            results.append(_finding(account_id, outcome, deployment, change,
+                                    problem, project, facts))
+
+        # design 08's fourth outcome: "Change record with no corresponding
+        # deployment -- Review: stale or abandoned."
+        for change in changes:
+            if change["key"] in matched_keys or not change["approved"]:
+                continue
+            if change["accounts"] and account_id not in change["accounts"]:
+                continue
+            results.append(_finding(account_id, "change_without_deployment",
+                                    None, change, None, project, facts))
+
+    emitted = [r for r in results if emit_finding(r)]
+    out = {
+        "record_type": "change-reconciliation",
+        "reconciled_at": _iso(_now()),
+        "window_hours": LOOKBACK_HOURS,
+        "deployments": len(deployments),
+        "accounts": len(by_account),
+        "outcomes": {k: sum(1 for r in results if r["outcome"] == k)
+                     for k in sorted({r["outcome"] for r in results})},
+        "emitted": len(emitted),
+    }
+    print(json.dumps(out, default=str))
+    return out
+
+
+def recent_deployments(since):
+    """Every captured deployment in the window, across every account.
+
+    Read from the by-record-type index rather than by querying a known list of
+    accounts, and the difference matters. Deriving the account list from the
+    tenant facts map -- the first version of this -- meant an account absent
+    from that map had its deployments captured and then never reconciled: the
+    evidence accumulated, nothing compared it, and the account read as clean
+    rather than as unexamined.
+
+    Reconciliation now covers everything that was captured. An account with no
+    tenant record still gets reconciled, against the platform default, with
+    that fact recorded in the finding.
+    """
+    if not CHANGE_TABLE:
+        return []
+    found = []
+    token = None
+    while True:
+        kwargs = {
+            "TableName": CHANGE_TABLE,
+            "IndexName": "by-record-type",
+            "KeyConditionExpression": "record_type = :t AND occurred_at >= :s",
+            "ExpressionAttributeValues": {
+                ":t": {"S": "deployment-event"},
+                ":s": {"S": _iso(since)},
+            },
+        }
+        if token:
+            kwargs["ExclusiveStartKey"] = token
+        page = dynamodb.query(**kwargs)
+        for item in page.get("Items", []):
+            found.append(json.loads(item["detail"]["S"]))
+        token = page.get("LastEvaluatedKey")
+        if not token:
+            return found
+
+
+def _finding(account_id, outcome, deployment, change, problem, project, facts):
+    return {
+        "outcome": outcome,
+        "account_id": account_id,
+        "deployment": deployment,
+        "change": change,
+        "problem": problem,
+        "jira_project": project,
+        "project_source": facts["source"],
+        "change_approver": facts.get("change_approver"),
+    }
+
+
+def _unavailable(account_id, deployments, reason):
+    return {
+        "outcome": "change_source_unavailable",
+        "account_id": account_id,
+        "deployment": None,
+        "deployments_unreconciled": len(deployments),
+        "change": None,
+        "problem": reason,
+        "jira_project": None,
+        "project_source": reason,
+        "change_approver": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Routing. design 08's table, through the one routing layer.
+# ---------------------------------------------------------------------------
+#
+#   Deployment with a matching approved change | Evidence record, no action
+#   Deployment with no change record           | Low-severity page + Jira ticket
+#   Deployment outside an approved window      | Finding, owned and dated
+#   Change record with no corresponding deploy | Review -- stale or abandoned
+#
+# `no_change_record` declares NOTHING, so the router applies the account's tier
+# default from design/06a. In prod that pages, which is design 08's
+# "low-severity page"; in dev it does not, which is the tier table's business
+# and not this module's. Declaring `pagerduty` here would be B-041's shape --
+# a component deciding for itself who gets woken.
+DECLARED_ROUTING = {
+    "matched": "digest",
+    "no_change_record": None,
+    "outside_approved_window": "digest_and_jira",
+    "change_without_deployment": "digest_and_jira",
+    # A platform fault, not a tenant one. Dated work for AltDigital.
+    "change_source_unavailable": "digest_and_jira",
+}
+
+
+def emit_finding(result):
+    """One dossier per finding, except the ones that are only evidence.
+
+    A matched deployment is recorded and not emitted. There will be far more of
+    those than anything else, and a digest entry per successful deployment
+    would bury the three outcomes that need a human in a list of the one that
+    does not.
+    """
+    outcome = result["outcome"]
+    if outcome == "matched":
+        return False
+
+    deployment = result.get("deployment") or {}
+    change = result.get("change") or {}
+    summaries = {
+        "no_change_record": (
+            "Deployment with NO change record. "
+            f"{deployment.get('kind')} on {deployment.get('resource')} at "
+            f"{deployment.get('occurred_at')}"
+            + ("" if deployment.get("via_appdeployer") else
+               " -- and NOT through the AppDeployer role, so it did not come "
+               "through the control point at all")),
+        "outside_approved_window": (
+            f"Deployment outside an approved window. {result.get('problem')}"),
+        "change_without_deployment": (
+            f"Change record {change.get('key')} has no corresponding "
+            "deployment -- stale or abandoned."),
+        "change_source_unavailable": (
+            "CHANGE SOURCE UNAVAILABLE -- no conclusion can be drawn about "
+            f"{result.get('deployments_unreconciled', 0)} deployment(s) in "
+            f"account {result.get('account_id')}. {result.get('problem')}"),
+    }
+
+    dossier = {
+        "record_type": "change-reconciliation-finding",
+        "recorded_at": _iso(_now()),
+        "current_state": "ALARM",
+        "routing": DECLARED_ROUTING.get(outcome),
+        "alarm": {
+            "name": f"platform-change-{outcome.replace('_', '-')}",
+            "resource_id": deployment.get("resource") or change.get("key")
+                           or result.get("account_id") or "unknown",
+            "account_id": result.get("account_id"),
+        },
+        "assessment": {"probable_cause": summaries.get(outcome, outcome)},
+        # The ticket goes to the tenant's change approver. Resolving WHO that
+        # is happens at ticket creation, not here: the Jira intents queue has
+        # no consumer until prompt 12.3, and resolving an approver now would be
+        # building for a consumer that does not exist. The account id travels
+        # so the consumer can resolve it. B-039.
+        "change_reconciliation": result,
+    }
+    events.put_events(Entries=[{
+        "Source": "platform.change",
+        "DetailType": "Platform Incident Dossier",
+        "Detail": json.dumps(dossier, default=str),
+        "EventBusName": ALERT_BUS_NAME,
+    }])
+    return True
+
+
+# ---------------------------------------------------------------------------
+# The commercial one. Prompt 8.2 calls it first-class; it is.
+# ---------------------------------------------------------------------------
+
+
+def customer_caused(event, context=None):
+    """Deployments in an account shortly before a given moment.
+
+    Prompt 8.2: "Make the customer-caused-outage correlation query a
+    first-class function, because it is what we rely on commercially."
+
+    This is the SLA exclusion determination in design 10: if an outage began
+    twenty minutes after the tenant deployed, the tenant's change is the first
+    thing to look at, and the platform should be able to say so from evidence
+    rather than from memory.
+
+    Deliberately NOT a verdict. It returns what was deployed and when, and the
+    word "caused" appears nowhere in the output -- correlation is not
+    causation, an SLA exclusion is a commercial conversation, and an automated
+    system asserting fault would be both wrong sometimes and unhelpful always.
+    The function's value is that the conversation starts from a list of facts.
+
+    Needs NO Jira. It reads captured deployment events only, so it works
+    whether or not the tenant files change records at all.
+    """
+    account_id = event.get("account_id")
+    at = _parse(event.get("at")) or _now()
+    window = float(event.get("window_hours") or 4)
+    if not account_id:
+        raise ValueError("customer_caused requires an account_id")
+
+    since = at - datetime.timedelta(hours=window)
+    got = dynamodb.query(
+        TableName=CHANGE_TABLE,
+        KeyConditionExpression="PK = :p AND SK BETWEEN :s AND :e",
+        ExpressionAttributeValues={
+            ":p": {"S": f"deployment#{account_id}"},
+            ":s": {"S": _iso(since)},
+            ":e": {"S": _iso(at)},
+        },
+    ).get("Items", [])
+
+    deployments = [json.loads(i["detail"]["S"]) for i in got]
+    deployments.sort(key=lambda d: str(d.get("occurred_at")))
+
+    out = {
+        "record_type": "deployment-correlation",
+        "account_id": account_id,
+        "incident_at": _iso(at),
+        "window_hours": window,
+        "window_start": _iso(since),
+        "deployment_count": len(deployments),
+        "deployments": deployments,
+        "nearest": None,
+        "finding": None,
+    }
+    if deployments:
+        last = deployments[-1]
+        when = _parse(last.get("occurred_at"))
+        out["nearest"] = {
+            "kind": last.get("kind"),
+            "resource": last.get("resource"),
+            "occurred_at": last.get("occurred_at"),
+            "via_appdeployer": last.get("via_appdeployer"),
+            "minutes_before_incident": (round((at - when).total_seconds() / 60, 1)
+                                        if when else None),
+        }
+        out["finding"] = (
+            f"{len(deployments)} tenant deployment(s) in the {window}h before "
+            f"this incident; the most recent was "
+            f"{out['nearest']['minutes_before_incident']} minutes before. "
+            "This is CORRELATION, not a determination of cause.")
+    else:
+        out["finding"] = (
+            f"No tenant deployments in the {window}h before this incident. "
+            "An SLA exclusion on change grounds is not supported by the "
+            "deployment record.")
+    print(json.dumps(out, default=str))
+    return out
+
+
+# ---------------------------------------------------------------------------
+
+
+HANDLERS = {"capture": capture, "reconcile": reconcile,
+            "customer_caused": customer_caused}
+
+
+def handler(event, context):
+    # Two invocation shapes: an EventBridge event (capture) and a scheduled or
+    # explicit call carrying `action`. An EventBridge deployment event has no
+    # `action`, so the default is capture.
+    action = event.get("action")
+    if action is None and "detail" in event:
+        action = "capture"
+    fn = HANDLERS.get(action or "reconcile")
+    if fn is None:
+        raise ValueError(
+            f"unknown action '{action}'. Known: {', '.join(sorted(HANDLERS))}")
+    return fn(event, context)

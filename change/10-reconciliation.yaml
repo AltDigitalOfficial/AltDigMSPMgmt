@@ -1,0 +1,418 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — change reconciliation (prompt 8.2). Captures
+  deployment events from every member account, compares them against change
+  records in Jira on a schedule, and produces design 08's four outcomes plus a
+  fifth for when the change source cannot be read. Deploys to the Audit account.
+
+# ---------------------------------------------------------------------------
+# A detective control, reconciled continuously
+# ---------------------------------------------------------------------------
+# design/08-change-and-release.md: "Development teams are not overseen by
+# AltDigital [...] we therefore cannot rely on a gate we control — change
+# management is a detective control, reconciled continuously."
+#
+# Nothing in this stack blocks a deployment. It observes and compares, and the
+# gap between what happened and what was declared is the finding. design 08 is
+# direct about why that is the stronger position anyway: "Auditors accept
+# continuous reconciliation far more readily than a signature on a form,
+# because it is evidence rather than a claim."
+#
+# ---------------------------------------------------------------------------
+# Why capture and reconciliation are separated in TIME
+# ---------------------------------------------------------------------------
+# Capture is event-driven and immediate. Reconciliation runs on a schedule over
+# a window that is wider than the schedule interval.
+#
+# That is not an optimisation. A change record is routinely filed minutes AFTER
+# a pipeline starts — somebody opens the ticket while the build runs —
+# so reconciling at capture time would report a large share of a
+# well-behaved tenant's deployments as unapproved. The window is what lets the
+# two arrive in either order.
+#
+# ---------------------------------------------------------------------------
+# The fifth outcome
+# ---------------------------------------------------------------------------
+# design 08's table has four. The engine implements five, and the extra one
+# carries the weight: `change_source_unavailable`.
+#
+# If Jira cannot be read — expired token, wrong project, an issue type that
+# does not exist in the project — the engine does not conclude "no approved
+# change". Reporting every deployment in the estate as unapproved because a
+# credential expired is B-054's lesson (a denied lookup read as a negative
+# result) with B-043's blast radius (a finding on every run until somebody
+# mutes it). An unreadable change source is one finding about the platform.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+    Description: >-
+      The organization event bus. Deployment events arrive here from member
+      accounts via baseline/70-event-forwarding.yaml, and findings are
+      published back onto it so the ONE routing layer decides who hears them.
+
+  ChangeTableName:
+    Type: String
+    Default: platform-change-events
+    Description: Append-only deployment event record.
+
+  JiraSite:
+    Type: String
+    Default: ''
+    Description: >-
+      Jira Cloud site URL. Empty means reconciliation reports the change source
+      as unavailable rather than guessing — which is the correct behaviour
+      before the credential is in place, and is why this has a default at all.
+
+  JiraSecretName:
+    Type: String
+    Default: platform/jira/service-account
+    Description: >-
+      Holds {"email", "api_token"}. Written by scripts/set-jira-token.sh into
+      THIS account — a secret is only useful where it is read.
+
+  JiraChangeIssueType:
+    Type: String
+    Default: Change
+    Description: >-
+      The issue type that represents a change record. The engine verifies this
+      type EXISTS in the project before searching: a wrong value returns zero
+      issues, and an engine that trusted that would report every deployment as
+      unapproved. open-items.md B9 settles the correct value.
+
+  JiraDefaultChangeProject:
+    Type: String
+    Default: ''
+    Description: >-
+      Fallback change project, used when an account has no per-tenant project
+      recorded. Exists so the sandbox can be exercised before the first tenant
+      is vested. Its use is RECORDED in every finding rather than applied
+      silently — reconciling one tenant's deployments against another tenant's
+      change project would produce confident nonsense.
+
+  ReconcileSchedule:
+    Type: String
+    Default: 'rate(6 hours)'
+    Description: >-
+      How often the comparison runs. Four times a day rather than hourly: the
+      lookback window is wider than the interval, so nothing is missed by
+      running less often, and each run costs a Jira search per account.
+
+  LookbackHours:
+    Type: Number
+    Default: 26
+    MinValue: 2
+    Description: >-
+      Deliberately wider than the schedule interval. A run that looked back
+      exactly one interval would lose any deployment that landed while the
+      previous run was executing, and would never revisit it.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Pass the alerts key. alias/platform-logs is created by the MEMBER
+      baseline and does not exist in a platform account.
+
+  AlertTopicArn:
+    Type: String
+    Default: ''
+
+Conditions:
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+
+Resources:
+
+  ChangeTable:
+    Type: AWS::DynamoDB::Table
+    # Retain. These records are the evidence that change management was
+    # operating, and reconciliation is RETROSPECTIVE — a month of deployment
+    # events lost is a month that can never be reconciled, because CloudTrail
+    # in the member account expires long before an audit asks.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref ChangeTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: record_type, AttributeType: S }
+        - { AttributeName: occurred_at, AttributeType: S }
+      KeySchema:
+        # PK is deployment#<account>, SK is the ISO timestamp. That shape is
+        # what makes both queries this engine needs cheap: "everything in this
+        # account since T" for reconciliation, and "everything in this account
+        # between T1 and T2" for the outage correlation.
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        # How reconciliation finds deployments WITHOUT first knowing which
+        # accounts to look in.
+        #
+        # The first version derived the account list from the tenant facts map,
+        # and that was a silent gap waiting to happen: an account absent from
+        # the map -- newly vested, or one the sync had not been re-run for --
+        # would have its deployments captured and then never reconciled. The
+        # evidence would accumulate and nothing would ever compare it, which
+        # reads as a clean account rather than an unexamined one.
+        #
+        # Reading the deployments themselves means reconciliation covers
+        # everything that was captured, and an account missing from the facts
+        # map falls back to the platform default WITH that fact recorded in
+        # every finding.
+        - IndexName: by-record-type
+          KeySchema:
+            - { AttributeName: record_type, KeyType: HASH }
+            - { AttributeName: occurred_at, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-purpose, Value: change-reconciliation }
+
+  ReconcileRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformChangeReconciliation
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: Reconcile
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppendOnlyDeploymentRecord
+                Effect: Allow
+                # No UpdateItem and no DeleteItem. The deployment record is
+                # evidence of what a tenant did; nothing in this platform
+                # should be able to edit it after the fact, least of all the
+                # component that reports on it.
+                Action: ['dynamodb:PutItem', 'dynamodb:Query']
+                Resource:
+                  - !GetAtt ChangeTable.Arn
+                  - !Sub '${ChangeTable.Arn}/index/by-record-type'
+              - Sid: ReadTheJiraCredential
+                Effect: Allow
+                Action: 'secretsmanager:GetSecretValue'
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${JiraSecretName}-*'
+              - Sid: ReadTenantFacts
+                Effect: Allow
+                # Which Jira project holds each account's change records.
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/change/*'
+              - Sid: PublishFindings
+                Effect: Allow
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  ReconcileLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-change-reconciliation
+      # Seven years. SOC 2 evidence that change management operated, and the
+      # period an auditor asks about is measured in years.
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ReconcileFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ReconcileLogGroup
+    Properties:
+      FunctionName: platform-change-reconciliation
+      Runtime: python3.12
+      Handler: reconcile.handler
+      Role: !GetAtt ReconcileRole.Arn
+      # A reconciliation run makes one Jira search per account plus a DynamoDB
+      # query each. Capture invocations finish in milliseconds; this is sized
+      # for the scheduled run.
+      Timeout: 300
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          CHANGE_TABLE: !Ref ChangeTable
+          ALERT_BUS_NAME: !Ref AlertBusName
+          JIRA_SITE: !Ref JiraSite
+          JIRA_SECRET_NAME: !Ref JiraSecretName
+          JIRA_CHANGE_ISSUETYPE: !Ref JiraChangeIssueType
+          JIRA_DEFAULT_CHANGE_PROJECT: !Ref JiraDefaultChangeProject
+          RECONCILE_LOOKBACK_HOURS: !Ref LookbackHours
+
+  # -------------------------------------------------------------------------
+  # Capture
+  # -------------------------------------------------------------------------
+  # design 08's six deployment event types arrive as CloudTrail events
+  # forwarded from member accounts. The pattern filters by eventName here as
+  # well as in the member account, deliberately: the member-side rule decides
+  # what crosses the account boundary and costs money to forward, and this one
+  # decides what is worth storing. Either alone would be a single point of
+  # "somebody widened a pattern and nobody noticed".
+  DeploymentCaptureRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-capture-deployments
+      EventBusName: !Ref AlertBusName
+      Description: >-
+        Deployment events from member accounts. design 08, "What is captured as
+        a deployment event".
+      EventPattern:
+        detail-type: ['AWS API Call via CloudTrail']
+        detail:
+          eventName:
+            - AssumeRoleWithWebIdentity
+            - RegisterTaskDefinition
+            - UpdateService
+            - CreateService
+            - UpdateFunctionCode
+            - UpdateFunctionConfiguration
+            - PublishVersion
+            - CreateStack
+            - UpdateStack
+            - ExecuteChangeSet
+            - CreateLaunchTemplate
+            - CreateLaunchTemplateVersion
+            - ModifyLaunchTemplate
+            - ModifyDBParameterGroup
+            - ModifyDBInstance
+            - ModifyDBCluster
+      State: ENABLED
+      Targets:
+        - Id: capture
+          Arn: !GetAtt ReconcileFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt CaptureDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 4
+            MaximumEventAgeInSeconds: 3600
+
+  CaptureDlq:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: platform-change-capture-dlq
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CaptureInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ReconcileFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DeploymentCaptureRule.Arn
+
+  ReconcileScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-change-reconcile
+      Description: >-
+        The scheduled comparison. Produces design 08's outcomes over a window
+        wider than this interval.
+      ScheduleExpression: !Ref ReconcileSchedule
+      State: ENABLED
+      Targets:
+        - Id: reconcile
+          Arn: !GetAtt ReconcileFunction.Arn
+          Input: '{"action": "reconcile"}'
+
+  ReconcileInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ReconcileFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReconcileScheduleRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Watching the watcher
+  # -------------------------------------------------------------------------
+  # Reconciliation failing silently is the worst outcome available here: the
+  # platform would show a clean month, which is indistinguishable from a month
+  # in which every tenant behaved. That is the shape prompt 9.1 names as "the
+  # failure mode that destroys an audit".
+  ReconcileErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerting
+    Properties:
+      AlarmName: platform-change-reconciliation-errors
+      AlarmDescription: >-
+        Change reconciliation is failing. Deployment events may still be being
+        captured, but nothing is being compared against change records — and an
+        absence of findings currently looks identical to compliance.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ReconcileFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+  CaptureDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerting
+    Properties:
+      AlarmName: platform-change-capture-dlq-not-empty
+      AlarmDescription: >-
+        A deployment event never reached the capture function. That deployment
+        is now absent from the evidence record and cannot be reconciled — the
+        message body in the DLQ is the only remaining trace of it.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CaptureDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+Outputs:
+  ReconcileFunctionName:
+    Value: !Ref ReconcileFunction
+  ChangeTableName:
+    Value: !Ref ChangeTable
+  CorrelationInvocation:
+    Description: >-
+      The SLA exclusion query, prompt 8.2's first-class function. Returns
+      correlation and deliberately never asserts cause.
+    Value: !Sub >-
+      aws lambda invoke --function-name ${ReconcileFunction} --payload
+      '{"action":"customer_caused","account_id":"<id>","at":"<iso8601>","window_hours":4}'
+      out.json

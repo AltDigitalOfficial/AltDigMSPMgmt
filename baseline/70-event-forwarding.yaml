@@ -189,6 +189,59 @@ Resources:
   # nothing, and this arrives minutes later with everything the engine learned.
   # The router gives both the same dedup key, so the second updates the first
   # rather than paging again.
+  # design 08's six deployment event types, forwarded for reconciliation
+  # (prompt 8.2). CloudTrail management events reach the account's default bus
+  # already; this carries the deployment-shaped ones to the central bus where
+  # the reconciliation engine stores them.
+  #
+  # The eventName list is narrow ON PURPOSE, and is the same list the capture
+  # rule in change/10-reconciliation.yaml matches. Two filters for one decision
+  # looks redundant and is not: this one decides what crosses an account
+  # boundary and bills per event, and that one decides what is worth storing
+  # for seven years. Widening either alone is visible; widening both by
+  # accident is not.
+  #
+  # Volume is worth knowing before a busy tenant arrives. A team deploying
+  # several times a day produces tens of events a day, which is nothing. A team
+  # running CloudFormation in a loop, or an autoscaling group churning launch
+  # template versions, could produce thousands — at which point the right
+  # answer is a narrower list, not a bigger table.
+  DeploymentForwarding:
+    Type: AWS::Events::Rule
+    Condition: HasBus
+    Properties:
+      Name: platform-forward-deployments
+      Description: >-
+        Deployment events for change reconciliation. design 08, "What is
+        captured as a deployment event".
+      EventPattern:
+        source: ['aws.sts', 'aws.ecs', 'aws.lambda', 'aws.cloudformation',
+                 'aws.ec2', 'aws.rds']
+        detail-type: ['AWS API Call via CloudTrail']
+        detail:
+          eventName:
+            - AssumeRoleWithWebIdentity
+            - RegisterTaskDefinition
+            - UpdateService
+            - CreateService
+            - UpdateFunctionCode
+            - UpdateFunctionConfiguration
+            - PublishVersion
+            - CreateStack
+            - UpdateStack
+            - ExecuteChangeSet
+            - CreateLaunchTemplate
+            - CreateLaunchTemplateVersion
+            - ModifyLaunchTemplate
+            - ModifyDBParameterGroup
+            - ModifyDBInstance
+            - ModifyDBCluster
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+
   DossierForwarding:
     Type: AWS::Events::Rule
     Condition: HasBus
