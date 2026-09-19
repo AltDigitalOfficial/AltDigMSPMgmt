@@ -116,6 +116,23 @@ Parameters:
       exactly one interval would lose any deployment that landed while the
       previous run was executing, and would never revisit it.
 
+  JiraTokenExpires:
+    Type: String
+    Default: ''
+    AllowedPattern: '^([0-9]{4}-[0-9]{2}-[0-9]{2})?$'
+    Description: >-
+      YYYY-MM-DD. Atlassian caps API token lifetime at one year.
+
+      Not a secret — a date is not a credential — and it needs to be visible
+      enough to act on. When the token expires, reconciliation degrades to
+      "change source unavailable", which is correct and produces no false
+      compliance findings, and then stays that way silently. The expiry notice
+      goes to the Atlassian account's email, which is outside the platform's
+      control.
+
+      So the platform watches its own credential: every run publishes
+      JiraTokenDaysRemaining and the alarm below fires well before the date.
+
   LogsKeyArn:
     Type: String
     Default: ''
@@ -221,6 +238,10 @@ Resources:
                 # Which Jira project holds each account's change records.
                 Action: 'ssm:GetParameter'
                 Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/change/*'
+              - Sid: PublishCredentialHealth
+                Effect: Allow
+                Action: 'cloudwatch:PutMetricData'
+                Resource: '*'
               - Sid: PublishFindings
                 Effect: Allow
                 Action: 'events:PutEvents'
@@ -265,6 +286,7 @@ Resources:
           JIRA_CHANGE_ISSUETYPE: !Ref JiraChangeIssueType
           JIRA_DEFAULT_CHANGE_PROJECT: !Ref JiraDefaultChangeProject
           RECONCILE_LOOKBACK_HOURS: !Ref LookbackHours
+          JIRA_TOKEN_EXPIRES: !Ref JiraTokenExpires
 
   # -------------------------------------------------------------------------
   # Capture
@@ -400,6 +422,39 @@ Resources:
       EvaluationPeriods: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+  # The credential expiring is a slow, certain, silent failure: reconciliation
+  # keeps running, keeps reporting "change source unavailable", and looks like
+  # a platform that is working. This is the one thing that says otherwise.
+  #
+  # Note this CAN be a CloudWatch alarm where the restore-test freshness signal
+  # could not (B-050). Reconciliation runs every six hours, so the metric is
+  # dense enough for an ordinary threshold alarm; the restore metric is monthly
+  # and no alarm can span that gap.
+  JiraTokenExpiringAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerting
+    Properties:
+      AlarmName: platform-jira-token-expiring
+      AlarmDescription: >-
+        The Jira API token is approaching expiry. When it lapses, change
+        reconciliation stops being able to confirm or rule out approvals and
+        every run reports the change source as unavailable — which is correct
+        behaviour and indistinguishable from a quiet month unless somebody is
+        watching. Rotate with scripts/set-jira-token.sh and update
+        PLATFORM_JIRA_TOKEN_EXPIRES.
+      Namespace: AltDigital/Change
+      MetricName: JiraTokenDaysRemaining
+      Statistic: Minimum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 30
+      ComparisonOperator: LessThanThreshold
+      # notBreaching, not breaching. An absent metric means reconciliation is
+      # not running at all, which is the ReconcileErrorAlarm's business — two
+      # alarms on one symptom is how a rotation gets two tickets.
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopicArn]
 

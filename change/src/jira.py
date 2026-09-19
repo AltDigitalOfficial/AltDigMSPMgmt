@@ -121,8 +121,34 @@ def _get(path, params=None):
         except Exception:                          # noqa: BLE001
             pass
         # 401 and 403 are the interesting ones and are NOT "no results".
+        #
+        # Jira answers a bad credential with "Client must be authenticated to
+        # access this resource", which is true and useless — it does not
+        # distinguish a wrong token from a wrong identity from the wrong auth
+        # SCHEME. The causes are few and worth naming here, because the
+        # alternative is somebody regenerating a perfectly good token.
+        hint = ""
+        if exc.code == 401:
+            hint = (
+                "\n      A 401 from Jira Cloud is almost always one of:"
+                "\n      (1) the email is not the Atlassian account's PRIMARY "
+                "address. A mail alias or distribution address is not an "
+                "Atlassian identity — the account is known by the address it "
+                "was registered with, and Basic auth must use that one."
+                "\n      (2) the token is a SCOPED api token. Scoped tokens "
+                "authenticate as Bearer, not Basic, and will 401 against this "
+                "client. Create a classic unscoped API token instead."
+                "\n      (3) the token was revoked, expired, or belongs to a "
+                "different Atlassian site."
+                "\n      Re-run scripts/set-jira-token.sh to correct it; the "
+                "previous version is retained by Secrets Manager.")
+        elif exc.code == 403:
+            hint = (
+                "\n      403 means the credential is VALID but the account "
+                "lacks permission. Check it has product access to Jira and "
+                "browse permission on the project.")
         raise JiraUnavailable(
-            f"Jira returned HTTP {exc.code} for {path}: {body}") from exc
+            f"Jira returned HTTP {exc.code} for {path}: {body}{hint}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise JiraUnavailable(f"could not reach Jira: {exc}") from exc
 

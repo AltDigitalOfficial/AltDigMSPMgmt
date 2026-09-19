@@ -2325,3 +2325,81 @@ must not accept a tenant's approver as a quorum member.
 **Close when** — the scheme exists in Jira and the engine is pointed at it.
 Until then 8.2 works on the label convention and 8.3 treats a missing target
 field as a refusal to execute rather than as a pass.
+
+---
+
+## B-070 · The Jira service account is a personal identity wearing another name
+
+**Open** — 2026-09-19. Owner: Art (mailbox provisioning), Jamie (Jira account).
+
+open-items.md B10 asks for "Service account identities for Jira, PagerDuty,
+Truveon — **platform identities, not personal**."
+
+What exists is `platform@altdigital.ai` as a mail ALIAS onto Jamie's mailbox.
+That is not an Atlassian identity. Atlassian knows an account by the address it
+was registered with; aliasing happens at the mail layer and is invisible to it.
+So the credential the platform holds authenticates as Jamie's personal
+Atlassian account, under a name that reads like a service account.
+
+Proved immediately rather than theoretically: the first `jira-check.sh` run
+returned HTTP 401 for `/rest/api/3/myself`, because the alias is not an
+address Atlassian will authenticate.
+
+**Why this is not cosmetic.** Change reconciliation is a SOC 2 control, and its
+evidence trail runs through this credential:
+
+- every Jira read in the audit log is attributed to a named individual rather
+  than to the platform, which muddies exactly the separation design 08's
+  reconciliation is meant to demonstrate
+- deactivating or recovering that individual's Atlassian account stops change
+  reconciliation, and the failure is silent by design — the engine reports
+  `change_source_unavailable`, which is correct and looks like a quiet month
+- 8.3's quorum control verifies that "neither approver is the requester". A
+  credential that IS one of the three quorum members reading its own approvals
+  is a conflict an auditor will ask about, even though the client is read-only
+
+**What is actually required.** A real mailbox — not an alias — so that
+Atlassian can send the account a verification email, security notices and the
+token expiry warning. Then an Atlassian account registered to it, granted
+product access to Jira, scoped read-only, and a fresh classic (unscoped) API
+token minted from it.
+
+Jamie cannot provision the mailbox; **Art can**.
+
+**Interim, accepted deliberately.** The token is minted from a personal
+Atlassian account so that Phase 8 can be verified end to end. Recorded as a
+deviation rather than left to look finished.
+
+**Close when** — Art provisions a shared mailbox, an Atlassian account is
+registered to it, and `scripts/set-jira-token.sh` is re-run with it. Rotation
+is a single command and Secrets Manager retains the previous version, so the
+swap is low risk. Before the first tenant is vested.
+
+---
+
+## B-071 · The Jira token expires 2027-09-19, and the platform watches it itself
+
+**Open** — 2026-09-19. Not action; a mechanism worth knowing about.
+
+Atlassian caps API token lifetime at one year. This one dies on 2027-09-19.
+
+When it does, change reconciliation degrades to `change_source_unavailable` on
+every run. That is the correct behaviour and produces no false compliance
+findings — and it is indistinguishable from a healthy platform in a quiet month
+unless somebody is watching. The expiry notice goes to the Atlassian account's
+email, which is outside the platform's control and, today, an alias (B-070).
+
+So the platform watches its own credential rather than depending on an email
+reaching a human. Every reconciliation run publishes
+`AltDigital/Change JiraTokenDaysRemaining`, and
+`platform-jira-token-expiring` fires below 30 days.
+
+Worth contrasting with B-050, where the equivalent idea was impossible. A
+CloudWatch alarm cannot span the gap between MONTHLY restore tests, because
+`EvaluationPeriods x Period` is capped at one week. Reconciliation runs every
+six hours, so the metric is dense enough for an ordinary threshold alarm. Same
+problem, opposite answer, and the difference is cadence.
+
+**On rotation** — re-run `scripts/set-jira-token.sh` and update
+`PLATFORM_JIRA_TOKEN_EXPIRES` in `config/platform.env`. The date is not a
+secret and is deliberately in plain config where it can be read.

@@ -46,6 +46,7 @@ import boto3
 
 import jira
 
+cloudwatch = boto3.client("cloudwatch")
 dynamodb = boto3.client("dynamodb")
 events = boto3.client("events")
 ssm = boto3.client("ssm")
@@ -56,6 +57,17 @@ CHANGE_ISSUETYPE = os.environ.get("JIRA_CHANGE_ISSUETYPE", "Change")
 DEFAULT_CHANGE_PROJECT = os.environ.get("JIRA_DEFAULT_CHANGE_PROJECT", "")
 TENANT_FACTS_PARAM = os.environ.get("TENANT_FACTS_PARAM",
                                     "/platform/change/tenant-facts")
+
+# When the Jira token expires, as YYYY-MM-DD. Atlassian caps token lifetime at
+# a year, and the expiry notice goes to the Atlassian account's email rather
+# than to anything the platform controls.
+#
+# Published as a metric on every reconciliation run so the platform notices
+# before the credential dies. This CAN be a CloudWatch alarm, unlike the
+# restore-test freshness signal in B-050: reconciliation runs every six hours,
+# so the metric is dense enough for an ordinary threshold alarm.
+TOKEN_EXPIRES = os.environ.get("JIRA_TOKEN_EXPIRES", "")
+METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "AltDigital/Change")
 
 # How far back a reconciliation run looks. Deliberately wider than the schedule
 # interval: a run that looked back exactly one interval would lose any
@@ -372,6 +384,36 @@ def match(deployment, changes):
     return change, None
 
 
+def token_days_remaining():
+    """Days until the Jira credential expires, or None if unknown."""
+    if not TOKEN_EXPIRES:
+        return None
+    try:
+        expires = datetime.datetime.fromisoformat(
+            TOKEN_EXPIRES).replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    return round((expires - _now()).total_seconds() / 86400.0, 1)
+
+
+def publish_credential_health():
+    """One metric, every run.
+
+    Deliberately a metric rather than a finding-per-run. A finding would fire
+    every six hours for however many days the warning window is, which is how a
+    real signal becomes something people filter. A metric plus one alarm says
+    the same thing once.
+    """
+    days = token_days_remaining()
+    if days is None:
+        return None
+    cloudwatch.put_metric_data(
+        Namespace=METRIC_NAMESPACE,
+        MetricData=[{"MetricName": "JiraTokenDaysRemaining",
+                     "Value": days, "Unit": "Count"}])
+    return days
+
+
 def reconcile(event, context=None):
     """The scheduled run. Produces design 08's outcomes, plus the fifth."""
     since = _now() - datetime.timedelta(hours=LOOKBACK_HOURS)
@@ -425,6 +467,7 @@ def reconcile(event, context=None):
     out = {
         "record_type": "change-reconciliation",
         "reconciled_at": _iso(_now()),
+        "jira_token_days_remaining": publish_credential_health(),
         "window_hours": LOOKBACK_HOURS,
         "deployments": len(deployments),
         "accounts": len(by_account),
@@ -670,8 +713,44 @@ def customer_caused(event, context=None):
 # ---------------------------------------------------------------------------
 
 
+def health(event=None, context=None):
+    """Can the platform read Jira, as whom, and is the scheme what we expect?
+
+    Invoked by scripts/jira-check.sh. Runs IN the Lambda rather than from a
+    laptop deliberately: the credential never leaves AWS, and the path being
+    tested is the real one -- execution role to Secrets Manager to Jira -- not
+    a similar path from somewhere else.
+
+    Checks the ISSUE TYPE as well as the connection, because a working
+    credential pointed at a project with no matching issue type is the failure
+    that would otherwise present as an estate-wide compliance finding.
+    """
+    ok, detail = jira.health()
+    out = {"record_type": "jira-health", "checked_at": _iso(_now()),
+           "connected": ok, "detail": detail,
+           "token_expires": TOKEN_EXPIRES or "unknown",
+           "token_days_remaining": token_days_remaining(),
+           "expected_issue_type": CHANGE_ISSUETYPE,
+           "default_change_project": DEFAULT_CHANGE_PROJECT}
+    if ok and DEFAULT_CHANGE_PROJECT:
+        try:
+            types = jira.project_issue_types(DEFAULT_CHANGE_PROJECT)
+            out["project_issue_types"] = types
+            out["issue_type_present"] = CHANGE_ISSUETYPE in types
+            if not out["issue_type_present"]:
+                out["warning"] = (
+                    f"project {DEFAULT_CHANGE_PROJECT} has no issue type "
+                    f"'{CHANGE_ISSUETYPE}'. Reconciliation will report the "
+                    "change source as UNAVAILABLE rather than reporting "
+                    "deployments as unapproved -- see open-items.md B9.")
+        except jira.JiraUnavailable as exc:
+            out["project_error"] = str(exc)
+    print(json.dumps(out, default=str))
+    return out
+
+
 HANDLERS = {"capture": capture, "reconcile": reconcile,
-            "customer_caused": customer_caused}
+            "customer_caused": customer_caused, "health": health}
 
 
 def handler(event, context):
