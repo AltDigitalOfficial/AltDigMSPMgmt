@@ -211,7 +211,8 @@ Outputs:
     Value: !Ref ScheduleEnabled
   ThresholdNote:
     Description: >-
-      Read this before quoting a restore duration result to anyone.
+      Where the duration thresholds stand.
     Value: >-
-      Duration warning/breach percentages are PLACEHOLDERS - open-items.md B3.
-      Every record emitted says so in thresholds_are_placeholders.
+      Warning 50% / breach 80% of RTO - decided 2026-09-18, open-items.md B3.
+      The TREND notice period was not part of B3 and is still unset; records
+      flag it separately as warn_months_is_placeholder.

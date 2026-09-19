@@ -34,9 +34,11 @@ The largest of those gaps, stated once here rather than repeated:
     error. See resolve(). B-043.
   * In-guest validation is not implemented and cannot be, from here. See
     VALIDATIONS. B-044.
-  * The restore duration thresholds are undecided (open-items.md B3). They are
-    parameters, they default to placeholders, and every record this emits says
-    so in a field. See evaluate_thresholds().
+  * The restore duration thresholds (open-items.md B3) were undecided when this
+    was built and were DECIDED on 2026-09-18: warning at 50% of the RTO, breach
+    at 80%. They remain parameters, because the RTO they are a percentage of is
+    per tenant. The TREND notice period was not part of B3 and is still unset —
+    it carries its own placeholder flag. See evaluate_thresholds() and trend().
 """
 import datetime
 import json
@@ -60,15 +62,14 @@ RESTORE_TIMEOUT_SECONDS = int(os.environ.get("RESTORE_TIMEOUT_SECONDS", "10800")
 # questionnaire 4.1: "RTO | Default 4 hours; drives restore test thresholds".
 RTO_SECONDS = int(os.environ.get("RTO_SECONDS", "14400"))
 
-# open-items.md B3 — "Restore duration warning/breach thresholds | Jamie |
-# Principle agreed (two tiers, differentiated routing); values not set".
+# open-items.md B3 — DECIDED 2026-09-18 by Jamie: warning at 50% of the RTO,
+# breach at 80%. Prompt 6.2 required these to be parameters rather than
+# constants and to default to obvious placeholders until the values were set;
+# they are set, and they remain parameters because the RTO they are a
+# percentage of is per tenant (questionnaire 4.1).
 #
-# Prompt 6.2: "The threshold percentages are parameters, not constants — they
-# have not been decided yet. Default them to placeholder values and make it
-# obvious in the code that they are unset."
-#
-# These are PLACEHOLDERS. The reasoning behind the two numbers, offered as a
-# proposal for B3 rather than as a decision:
+# The reasoning, kept because it is what a later reader will want to argue
+# with:
 #
 #   warning at 50% of RTO — half the budget spent is the last point at which
 #   there is still room to do something about it before the commitment is at
@@ -79,13 +80,15 @@ RTO_SECONDS = int(os.environ.get("RTO_SECONDS", "14400"))
 #   an early warning; the breach tier has to precede the breach it is named
 #   for.
 #
-# Every record emitted carries thresholds_are_placeholders: true so that no
-# downstream readout — digest, Jira ticket, PagerDuty payload — can present a
-# threshold result as a decided commitment.
+# Jamie's note on adopting them: "our testing will help inform client
+# discussions". So these are the PLATFORM's decided thresholds, and the monthly
+# restore tests are expected to produce the evidence that shapes what is
+# eventually offered to a given client. That is a reason to keep them
+# per-tenant parameters rather than to keep calling them undecided.
 WARNING_PERCENT_OF_RTO = float(os.environ.get("WARNING_PERCENT_OF_RTO", "50"))
 BREACH_PERCENT_OF_RTO = float(os.environ.get("BREACH_PERCENT_OF_RTO", "80"))
 THRESHOLDS_ARE_PLACEHOLDERS = (
-    os.environ.get("THRESHOLDS_ARE_PLACEHOLDERS", "true").lower() == "true")
+    os.environ.get("THRESHOLDS_ARE_PLACEHOLDERS", "false").lower() == "true")
 
 # Trend. Prompt 6.2: "duration trend tracking, so creep toward the RTO target
 # is visible months before it breaches."
@@ -93,8 +96,13 @@ TREND_MIN_POINTS = int(os.environ.get("TREND_MIN_POINTS", "3"))
 TREND_LOOKBACK_DAYS = int(os.environ.get("TREND_LOOKBACK_DAYS", "400"))
 
 # How much notice prompt 6.2's "visible months before it breaches" should give.
-# A PLACEHOLDER on the same footing as the duration percentages — B3 covers the
-# two duration tiers and says nothing about the trend.
+#
+# STILL A PLACEHOLDER, and deliberately not swept in with B3. B3 asked for the
+# two DURATION tiers and Jamie decided those; it says nothing about the trend,
+# and he did not decide this one. It carries its own flag
+# (TREND_MONTHS_IS_PLACEHOLDER) rather than riding the duration flag, which
+# would otherwise have started claiming this value was agreed the moment the
+# duration percentages were.
 #
 # The warning is raised HERE rather than by a CloudWatch alarm, and that is not
 # a stylistic choice. CloudWatch refuses any alarm whose EvaluationPeriods x
@@ -110,6 +118,8 @@ TREND_LOOKBACK_DAYS = int(os.environ.get("TREND_LOOKBACK_DAYS", "400"))
 # it says so in the record and lets the router decide who hears about it. Same
 # single routing layer as everything else, and no metric-freshness problem.
 TREND_WARN_MONTHS = float(os.environ.get("TREND_WARN_MONTHS", "6"))
+TREND_MONTHS_IS_PLACEHOLDER = (
+    os.environ.get("TREND_MONTHS_IS_PLACEHOLDER", "true").lower() == "true")
 
 
 class StepError(Exception):
@@ -1043,7 +1053,7 @@ def _error_text(err):
 
 
 def evaluate_thresholds(elapsed_seconds):
-    """Prompt 6.2's two tiers. The values are placeholders — see B3."""
+    """Prompt 6.2's two tiers. 50% and 80% of the RTO, decided 2026-09-18 (B3)."""
     warn_at = RTO_SECONDS * (WARNING_PERCENT_OF_RTO / 100.0)
     breach_at = RTO_SECONDS * (BREACH_PERCENT_OF_RTO / 100.0)
     if elapsed_seconds >= breach_at:
@@ -1065,7 +1075,7 @@ def evaluate_thresholds(elapsed_seconds):
         # Travels with every threshold result, all the way to the Jira ticket
         # and the PagerDuty payload.
         "thresholds_are_placeholders": THRESHOLDS_ARE_PLACEHOLDERS,
-        "open_item": "B3 — restore duration warning/breach thresholds undecided",
+        "decided": "B3 — 50%/80% of RTO, decided 2026-09-18",
     }
 
 
@@ -1133,7 +1143,7 @@ def trend(history):
     months = round(headroom / (slope * 30.0), 1)
     result["projected_months_to_rto"] = months
     result["warn_below_months"] = TREND_WARN_MONTHS
-    result["thresholds_are_placeholders"] = THRESHOLDS_ARE_PLACEHOLDERS
+    result["warn_months_is_placeholder"] = TREND_MONTHS_IS_PLACEHOLDER
     # The finding prompt 6.2 asks for: creep that is visible months before it
     # breaches. Nothing is wrong yet, which is the entire point — it is worth
     # acting on precisely while there is still time to act.
@@ -1196,7 +1206,6 @@ def record(event):
             "reason": "duration thresholds are only meaningful for a restore "
                       "that completed and validated; this run did not",
             "thresholds_are_placeholders": THRESHOLDS_ARE_PLACEHOLDERS,
-            "open_item": "B3",
         }
 
     history = duration_history(mode, resource_type)

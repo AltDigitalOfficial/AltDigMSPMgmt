@@ -45,7 +45,8 @@ Description: >-
 #   * the in-guest validation executor and its credentials
 #     -> not built; see recovery/src/worker.py VALIDATIONS and B-044
 #   * restore duration thresholds (open-items.md B3)
-#     -> parameters, defaulted to placeholders, marked as such in every record
+#     -> DECIDED 2026-09-18: 50%/80% of the RTO. Still parameters, because the
+#        RTO they are a percentage of is per tenant.
 #
 # Precedent: baseline/50-instrumentation.yaml was built the same way against a
 # missing design 06, and the swap was a data edit when 06 arrived.
@@ -179,13 +180,12 @@ Parameters:
     MinValue: 1
     MaxValue: 100
     Description: >-
-      PLACEHOLDER — NOT A DECIDED VALUE. open-items.md B3: "Restore duration
-      warning/breach thresholds | Jamie | Principle agreed (two tiers,
-      differentiated routing); values not set".
+      DECIDED 2026-09-18 (open-items.md B3). Half the RTO budget spent is the
+      last point at which there is still room to act before the commitment is
+      at risk; a warning at 90% is a notification that it is already too late.
 
-      Proposed reasoning, offered for B3 rather than assumed: half the RTO
-      budget spent is the last point at which there is still room to act before
-      the commitment is at risk.
+      Still a parameter rather than a constant, because the RTO it is a
+      percentage of is per tenant (questionnaire 4.1).
 
       A run crossing this raises a dated Jira ticket and appears in the digest.
       It does not page.
@@ -196,11 +196,10 @@ Parameters:
     MinValue: 1
     MaxValue: 100
     Description: >-
-      PLACEHOLDER — NOT A DECIDED VALUE. See B3 and the note above.
-
-      Proposed reasoning: 80 rather than 100, because crossing 100% means the
-      RTO has already been missed and an alert that fires at the moment of
-      failure has no value as an early warning.
+      DECIDED 2026-09-18 (open-items.md B3). 80 rather than 100, because
+      crossing 100% means the RTO has already been missed, and an alert that
+      fires at the moment of failure has no value as an early warning — the
+      breach tier has to precede the breach it is named for.
 
       A run crossing this declares no routing class of its own, so the router
       applies the account's tier default from design/06a — which pages in prod.
@@ -209,25 +208,29 @@ Parameters:
 
   ThresholdsArePlaceholders:
     Type: String
-    Default: 'true'
+    Default: 'false'
     AllowedValues: ['true', 'false']
     Description: >-
       Stamped into every record, ticket and page produced by a threshold
-      evaluation. Set to false only when B3 is closed and the two percentages
-      above are real commitments.
+      evaluation. NOW FALSE: B3 is closed and the two percentages above are the
+      platform's decided values.
 
-      This exists because prompt 6.2 asks that the unset state be OBVIOUS, and a
-      comment in a template is not obvious to somebody reading a Jira ticket at
-      the other end of the pipeline.
+      Kept rather than deleted, because the same question will be asked again
+      per tenant. A tenant whose RTO is under negotiation can be deployed with
+      this set to true, and every record for that account then says so at the
+      far end of the pipeline — which is what prompt 6.2 wanted the flag for in
+      the first place.
 
   TrendWarningMonths:
     Type: Number
     Default: 6
     MinValue: 1
     Description: >-
-      PLACEHOLDER, on the same footing as the two percentages above —
-      open-items.md B3 covers the duration tiers and says nothing about the
-      trend.
+      STILL A PLACEHOLDER, and deliberately not closed alongside B3. B3 covered
+      the two DURATION tiers and was decided on 2026-09-18; it says nothing
+      about the trend, and this value was not part of that decision. It carries
+      its own flag in the record (warn_months_is_placeholder) so that closing
+      B3 did not silently start claiming this number was agreed too.
 
       Prompt 6.2 asks that creep toward the RTO be "visible months before it
       breaches". The workflow fits a least-squares line to the last 400 days of
