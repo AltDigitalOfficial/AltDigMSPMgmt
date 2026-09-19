@@ -2403,3 +2403,66 @@ problem, opposite answer, and the difference is cadence.
 **On rotation** — re-run `scripts/set-jira-token.sh` and update
 `PLATFORM_JIRA_TOKEN_EXPIRES` in `config/platform.env`. The date is not a
 secret and is deliberately in plain config where it can be read.
+
+---
+
+## B-072 · AIINFRA is a JSM project, and JSM already has the change record
+
+**Open** — 2026-09-19, found by the first successful `jira-check.sh` run.
+
+The check reported AIINFRA's issue types:
+
+    [System] Service request
+    [System] Service request with approvals
+    [System] Incident
+    Task
+    Sub-task
+
+Two things follow.
+
+**There is no `Change` issue type**, so `PLATFORM_JIRA_CHANGE_ISSUETYPE=Change`
+matches nothing. The engine reports `change_source_unavailable` rather than
+reporting every deployment as unapproved — the check working as intended — but
+reconciliation cannot draw a conclusion until this is settled.
+
+**AIINFRA is Jira Service Management**, and that changes the recommendation for
+open item B9. The instinct was to design a change scheme by hand. JSM ships a
+Change Management request type set whose fields line up with Jamie's list
+almost item for item:
+
+| Jamie's field | JSM equivalent |
+|---|---|
+| business reason | Change reason |
+| change start time | Change start date |
+| change end time | Change completion date |
+| rollout plan | Implementation plan |
+| rollback plan | Backout plan |
+| technical testing | Test plan |
+| technical review + business review | Approvers, via the approvals feature |
+| business testing | no native field — custom |
+| *(the missing target)* | Affected services, or a custom field / label |
+
+Adopting it beats authoring one: the fields already exist, the workflow already
+exists, and it is what an auditor expects to see in a JSM instance.
+
+**The approvals feature matters more than the fields.** design 08 warns that
+the pipeline must "validate rather than trusting the ticket's status field
+alone", and JSM approvals are a first-class object rather than a status string:
+`/rest/servicedeskapi/request/{id}/approval` returns each approver's
+`accountId`, their decision, and when they made it.
+
+That is exactly what prompt 8.3 needs to check design 08's five conditions —
+both approvers authorised, neither is the requester, approvals postdate the
+request. Reading a real approval object is a materially stronger control than
+inferring approval from a workflow status, and it removes the guesswork about
+what "approved" means as a status name.
+
+**What this changes about the build.** 8.3 should read JSM approvals as its
+primary evidence, with the status field as corroboration rather than as the
+source of truth. 8.2's `approved` heuristic — a list of status names treated as
+approved — becomes a fallback for non-JSM projects rather than the main path.
+
+**Decide** — enable Change Management request types in AIINFRA (or a dedicated
+change project), then set `PLATFORM_JIRA_CHANGE_ISSUETYPE` to whatever the
+request type is actually called. Jamie is implementing the scheme in a separate
+session; this is the input for it.

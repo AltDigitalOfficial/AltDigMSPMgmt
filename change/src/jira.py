@@ -99,7 +99,23 @@ def _auth_header():
     return _AUTH["header"]
 
 
-def _get(path, params=None):
+def _get(path, params=None, _retried=False):
+    """One GET. Re-reads the credential once on a 401.
+
+    The retry exists because the cached auth header outlives a rotation. A
+    Lambda execution environment stays warm for a long time, and this function
+    is invoked every six hours; without this, rotating a bad credential would
+    appear not to work until the container happened to recycle.
+
+    That is not hypothetical — it cost a diagnostic cycle on 2026-09-19. The
+    secret was rotated at 20:34, the container had cached the previous value at
+    20:09, and the retry after rotation failed with the OLD credential. The
+    symptom is indistinguishable from "the new token is also wrong", which is
+    the worst possible failure mode for a credential fix: it makes the correct
+    action look ineffective.
+
+    Once only. A genuinely bad credential should fail, not loop.
+    """
     if not _site():
         raise JiraUnavailable(
             "JIRA_SITE is unset. Nothing can be asked of Jira, so no change "
@@ -115,6 +131,11 @@ def _get(path, params=None):
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if exc.code == 401 and not _retried:
+            # The cached header may predate a rotation. Drop it, read the
+            # secret again, and try once more before concluding anything.
+            _AUTH.clear()
+            return _get(path, params, _retried=True)
         body = ""
         try:
             body = exc.read().decode("utf-8")[:400]
