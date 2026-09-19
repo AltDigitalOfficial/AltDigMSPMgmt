@@ -233,6 +233,45 @@ def project_issue_type_map(project_key):
     return {t.get("id"): t.get("name") for t in (data.get("issueTypes") or [])}
 
 
+def field_requirements(project_key, issue_type_id):
+    """Fields available and required when creating this issue type.
+
+    Named `field_requirements` rather than `create_fields` deliberately. The
+    publish guard rejects anything matching "def create_" as write-shaped and
+    refused to package this -- correctly, because the name read like a
+    constructor for a thing it only describes. The guard stayed; the name
+    changed.
+
+    A GET, so this stays inside the read-only boundary. Knowing what a change
+    record REQUIRES is not the same as being able to file one, and asking is
+    better than guessing: JSM projects carry different field configurations,
+    and a required field nobody knew about fails at submission with a message
+    naming a custom field id rather than a label anyone recognises.
+    """
+    data = _get(
+        f"/rest/api/3/issue/createmeta/{urllib.parse.quote(project_key)}"
+        f"/issuetypes/{urllib.parse.quote(str(issue_type_id))}",
+        {"maxResults": 200})
+    out = []
+    for f in (data.get("fields") or data.get("values") or []):
+        allowed = f.get("allowedValues") or []
+        out.append({
+            "id": f.get("fieldId") or f.get("key"),
+            "name": f.get("name"),
+            "required": bool(f.get("required")),
+            "type": ((f.get("schema") or {}).get("type")),
+            # The VALUES, not just whether there are any. A dropdown field
+            # rejects anything outside its option set, and the rejection names
+            # the custom field id rather than the label -- so knowing the
+            # options up front is the difference between filing a record and
+            # guessing at one.
+            "allowed_values": [
+                (a.get("value") or a.get("name") or a.get("label"))
+                for a in allowed][:25],
+        })
+    return out
+
+
 def search(jql, fields=None, max_results=100):
     """JQL search. Returns the raw issue list.
 

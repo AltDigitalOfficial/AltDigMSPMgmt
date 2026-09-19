@@ -842,8 +842,32 @@ def health(event=None, context=None):
     return out
 
 
+def change_fields(event=None, context=None):
+    """What a change record in this project actually requires.
+
+    Read-only discovery. Answers "what do I need from Jamie" with data rather
+    than with a guess about how his scheme is configured.
+    """
+    project = (event or {}).get("project") or OPS_CHANGE_PROJECT         or DEFAULT_CHANGE_PROJECT
+    id_to_name = jira.project_issue_type_map(project)
+    wanted = {v: k for k, v in id_to_name.items()}.get(CHANGE_ISSUETYPE)
+    if not wanted:
+        return {"error": f"project {project} has no issue type "
+                         f"'{CHANGE_ISSUETYPE}'",
+                "available": sorted(id_to_name.values())}
+    fields = jira.field_requirements(project, wanted)
+    out = {"project": project, "issue_type": CHANGE_ISSUETYPE,
+           "required": [f for f in fields if f["required"]],
+           "optional": [f for f in fields if not f["required"]],
+           "choices": {f["name"]: f["allowed_values"] for f in fields
+                       if f.get("allowed_values")}}
+    print(json.dumps(out, default=str))
+    return out
+
+
 HANDLERS = {"capture": capture, "reconcile": reconcile,
-            "customer_caused": customer_caused, "health": health}
+            "customer_caused": customer_caused, "health": health,
+            "change_fields": change_fields}
 
 
 def handler(event, context):

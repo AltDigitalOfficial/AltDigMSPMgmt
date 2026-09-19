@@ -62,18 +62,38 @@ ok "compiles"
 # manufacture the approval it then verifies.
 info "Checking the Jira client is still read-only"
 "${PY}" - "$(win_path "${REPO_ROOT}/change/src/jira.py")" <<'READONLYEOF'
+import re
 import sys
 
-body = "\n".join(l for l in open(sys.argv[1], encoding="utf-8").read().split("\n")
+source = open(sys.argv[1], encoding="utf-8").read()
+
+# Definitions matched at the START OF A LINE, not as substrings.
+#
+# The substring form false-positived on the docstring that EXPLAINS this
+# guard: prose containing "def create_" tripped a check meant to find a
+# function named create_something. A guard that fires on a comment about
+# itself is one somebody works around rather than fixes, which is worse than
+# not having it. Same lesson as the containment role check -- strip the prose,
+# test the code.
+definitions = re.findall(r"^def\s+(\w+)", source, re.M)
+write_shaped = [d for d in definitions
+                if d.startswith(("create_", "update_", "delete_", "transition",
+                                 "add_comment", "post_", "put_"))]
+
+# HTTP methods stay a substring test: urllib takes the method as a string
+# argument, so there is no line-anchored form to match.
+body = "\n".join(l for l in source.split("\n")
                  if not l.strip().startswith("#"))
-forbidden = ('method="POST"', "method='POST'", 'method="PUT"', 'method="DELETE"',
-             "def create_", "def update_", "def transition", "def add_comment")
-hits = [f for f in forbidden if f in body]
+methods = [m for m in ('method="POST"', "method='POST'", 'method="PUT"',
+                       'method="DELETE"', 'method="PATCH"')
+           if m in body]
+
+hits = write_shaped + methods
 if hits:
     sys.exit("jira.py now contains write-shaped code: " + ", ".join(hits)
              + "\n      A credential that can edit issues can manufacture the"
                "\n      approval the quorum pipeline then verifies.")
-print("  no write methods present")
+print(f"  {len(definitions)} function(s), none write-shaped")
 READONLYEOF
 [[ $? -eq 0 ]] || die "jira.py is not safe to publish."
 ok "jira client is read-only"
