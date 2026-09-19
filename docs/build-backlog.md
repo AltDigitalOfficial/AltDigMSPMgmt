@@ -1374,8 +1374,15 @@ is explicitly scaffolding: one unlocked vault, one 1 GiB empty volume, no plan,
 no schedule, no retention rule. Vault Lock in particular is a one-way door, and
 guessing its duration is not a reversible mistake.
 
-**Close when** — design 05 arrives, or Jamie sets the backup values directly.
-The workflow needs no change; it needs a vault name and a source resource.
+**Deferred** — 2026-09-18, by Jamie. Not blocking anything today: there are no
+tenants, no tenant databases and nothing whose loss would matter. It gates
+B-044 and B-045, both of which are deferred behind it for the same reason.
+
+**Revisit when** — design 05 arrives, OR the first tenant is vested, whichever
+comes first. Vesting a tenant with no backup policy is the point at which this
+stops being a gap in a sandbox and becomes a gap in somebody's production
+account. The workflow itself needs no change; it needs a vault name and a
+source resource.
 
 ---
 
@@ -1414,8 +1421,31 @@ raise a ticket per run — the gap is this one item, not a monthly reminder that
 the same thing is still true, which is how a real signal gets trained out of a
 rotation.
 
-**Close when** — design 05 specifies the in-VPC executor and the credential
-source.
+**Deferred** — 2026-09-18, by Jamie, with more context expected by the time it
+matters. The executor would have nothing to validate today: no tenants, no
+databases, no backups.
+
+Two things worth carrying forward rather than rediscovering:
+
+  * The **credential question is governance, not engineering**, and has the
+    longest lead time of anything here. To connect to a restored database you
+    need credentials for it, and the three options have very different blast
+    radius — reuse the source's master secret (the restore-test executor can
+    then read every tenant's production database credentials, monthly, forever,
+    to run a test); reset the master password on the restored copy (a mutation,
+    needs `rds:ModifyDBInstance`); or IAM database authentication (requires the
+    source database to have it enabled, a tenant configuration decision). Art's
+    call as much as Jamie's.
+  * `checksums_match` is **not fixed by building the executor**. It needs a
+    checksum recorded AT BACKUP TIME to compare against, and nothing produces
+    one. That half belongs to B-043.
+
+`row_counts_plausible` is more tractable than it looks and needs no tenant
+input: compare against the previous run's count with a tolerance.
+
+**Revisit when** — B-043 delivers real backups of a real database, which is the
+first moment this is buildable and the first moment it is worth building.
+Practically: it is part of that work, not a separate item discovered later.
 
 ---
 
@@ -1440,8 +1470,11 @@ The RDS path never deletes automated backups (`DeleteAutomatedBackups: False`)
 and says so in its record. This platform's automation does not delete backups
 by any path.
 
-**Close when** — an RDS restore test has been exercised in a sandbox and its
-teardown verified.
+**Deferred** — 2026-09-18, by Jamie. Behind B-043: there is no RDS backup to
+restore, so there is no RDS restore test to exercise the teardown against.
+
+**Revisit when** — the first RDS restore test runs in a sandbox. Until then the
+unarmed default is the correct posture, not a limitation.
 
 ---
 
@@ -1601,8 +1634,22 @@ Prompt 6.2 does not ask for this alarm; it was added and then removed.
 `RestoreRunsRecorded` is published on every run including failures, so the data
 such a detector needs is already being written.
 
-**Close when** — prompt 9.1 builds the heartbeat, and restore-test freshness is
-one of the things it watches.
+**Deferred** — 2026-09-18, by Jamie. Risk today is near zero: one sandbox
+account, no tenants, and the consequence of an unnoticed stoppage is a test not
+running rather than data not being recoverable.
+
+It stops being near zero at the **first tenant**, because from that point the
+schedule is the only thing proving the restore path works and nothing watches
+it.
+
+If phase 9 has not landed by then, the cheap interim is the digest rather than a
+second heartbeat: `reporting/10-digest-sender.yaml` already runs on a weekday
+cron and already reads routing records, so restore-test freshness becomes a line
+in a report a human reads. That fits P5 — automation reports, humans review —
+and costs far less than building a heartbeat mechanism twice.
+
+**Revisit when** — prompt 9.1, or the first tenant is vested, whichever comes
+first.
 
 ---
 
@@ -1633,3 +1680,57 @@ shape again: not a loud failure, just a signal quietly losing its meaning.
 as B-039 says, or genuine gaps get a queue of their own. Not changed here: it
 alters routing behaviour for every digest-class event in the platform, which is
 not a phase 6 change.
+
+**Deferred** — 2026-09-18, by Jamie. The review queue has no consumer at all
+today (B-039), so a queue nobody reads being diluted by events nobody reads
+changes nothing yet.
+
+**Revisit when** — the review queue gets a consumer. That is the moment the
+dilution starts costing something, and the moment there is enough context to
+choose between the two options above rather than guessing.
+
+
+---
+
+## B-052 · UAT alerting sensitivity should be a per-tenant field
+
+**Open** — 2026-09-18, from Jamie's resolution of D-013.
+
+Prompt 6.2 says a restore duration breach pages. design/14 line 84 says UAT has
+no page routing. The build followed the tier, and recorded the difference as
+D-013.
+
+Jamie's resolution is that both documents were asserting a default for something
+that legitimately varies per tenant. The question belongs in the onboarding
+questionnaire — *"how sensitive do you want us to be on UAT?"* — and it is a
+commercial choice as much as a technical one, because paging on UAT means
+somebody has to be available to answer.
+
+**Why it is not a one-line change.** Making UAT sensitivity per-tenant means the
+ROUTER has to know it, and the router is deliberately the single place the "who
+gets woken up" decision is made. Putting a second copy of that decision
+anywhere else is B-041's shape.
+
+The mechanism already exists in the right shape:
+`/platform/routing/account-tiers` in SSM, written by
+`scripts/sync-account-tiers.sh` from deployed stackset parameters, is already a
+per-account map the router reads on the alert path. A sensitivity value rides
+that rather than needing anything new.
+
+**Three pieces, in order:**
+
+1. `design/onboarding-questionnaire.md` section 3a gains the field. Design
+   package source material — not edited by build work.
+2. `vesting/questionnaire.schema.json` implements it, alongside `uat_required`
+   and `release_cadence`, and `scripts/derive-vesting.py` derives from it.
+3. The router reads it for UAT accounts, defaulting to today's behaviour
+   (ticket, no page) when unset — an unset value must not silently start
+   paging somebody.
+
+**Note the scope boundary.** The support-cost and resource-availability
+consequences Jamie identified are pricing and SLA work, which CLAUDE.md places
+out of scope for this build. What is in scope is the field, its derivation, and
+the routing behaviour.
+
+**Revisit when** — the first tenant opts into UAT, or the questionnaire is next
+revised.

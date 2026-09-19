@@ -825,8 +825,39 @@ event that the tier cannot — a restore test that merely ran slow is not an
 outage — so downgrading is information only it has. Escalation is a statement
 about who gets woken up, and that belongs in one place.
 
-**Close when** — Jamie decides otherwise, which is a one-line change: the
-workflow would declare `pagerduty` on breach, and the router's downgrade-only
-rule would have to be relaxed with it. Worth deciding alongside
-open-items.md B3, since the threshold values and what crossing them means are
-the same conversation.
+**Resolved in principle** — 2026-09-18, by Jamie: UAT sensitivity becomes a
+**per-tenant questionnaire field**, not a platform-wide constant. The question
+to the tenant is *"how sensitive do you want us to be on UAT?"*, and it is a
+commercial choice as much as a technical one — it drives support cost and
+required resource availability, because paging on UAT means somebody has to be
+there to answer.
+
+That is a better answer than either side of the original disagreement. 6.2 said
+breach pages; design 14 said UAT never pages. Both were asserting a default for
+something that legitimately varies per tenant: a UAT holding real regulated data
+for a customer running acceptance tests on a deadline is not the same as one
+used a fortnight a quarter.
+
+**What this changes about the deviation** — the platform default stays as built
+(tier wins, UAT tickets rather than pages), and it becomes a *default* rather
+than a rule. The deviation is no longer "the build departs from 6.2"; it is
+"6.2 and design 14 both stated a default for a per-tenant field, and the field
+did not exist yet."
+
+**Not yet implemented.** Recorded as B-052, and deliberately not built alongside
+this record, because it is not a phase 6 change: making UAT sensitivity
+per-tenant means the ROUTER has to know it, and the router is the single place
+the "who gets woken up" decision is made. The mechanism already exists in the
+right shape — `/platform/routing/account-tiers` in SSM, written by
+`scripts/sync-account-tiers.sh` — so this rides an existing per-account map
+rather than needing a new one.
+
+**Owned outside this build** — the questionnaire field itself belongs in
+`design/onboarding-questionnaire.md` section 3a, which is design package source
+material and is not edited by build work. `vesting/questionnaire.schema.json`
+is the build-side half and is where the field lands once the design package
+carries it. The support-cost and availability consequences are pricing work,
+which CLAUDE.md puts out of scope for this build.
+
+**Close when** — the questionnaire carries the field, the vesting schema
+implements it, and the router reads it.
