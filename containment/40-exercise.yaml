@@ -1,0 +1,486 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the scheduled containment exercise (prompt
+  7.4). Deploys to the Audit account alongside containment. Fires the REAL
+  declaration and containment automation at a purpose-built target in the
+  isolated exercise account, verifies what actually happened from both ends,
+  and produces tabletop evidence with real timings.
+
+# ---------------------------------------------------------------------------
+# What makes this evidence rather than a narrative
+# ---------------------------------------------------------------------------
+# design 07: "This also produces tabletop evidence with real timings rather
+# than a narrated walkthrough — a considerably stronger audit artifact."
+#
+# The exercise plants a finding on the same event bus a GuardDuty finding
+# arrives on and then does not participate again until verification.
+# Declaration runs declare.py. Containment runs contain.py. The readout runs
+# readout.py. If the drill passes, the code that passed is the code that runs
+# during an incident, which is the whole of P4's claim and the reason design 07
+# says containment has the worst testing problem in the design.
+#
+# The verification is deliberately adversarial about its own result:
+#
+#   * isolation is checked by reading the instance's security groups AND by
+#     confirming the isolation group has no ingress rules. A correctly attached
+#     group with a permissive rule is isolation that looks right and is not.
+#   * the instance is asserted to be STILL RUNNING, because containment that
+#     stopped it would have destroyed the volatile evidence preservation exists
+#     to capture.
+#   * preserved evidence is confirmed FROM THE FORENSICS ACCOUNT, not from the
+#     account that shared it. A share can be requested against a wrong account
+#     id, or be unusable because of a KMS key policy, and the sharing side
+#     reports success in both cases.
+#
+# ---------------------------------------------------------------------------
+# The blast-radius verification (open-items.md V3)
+# ---------------------------------------------------------------------------
+# Prompt 7.4: "confirm a member account with full local admin cannot block the
+# containment role. Run it on the same schedule."
+#
+# Run as part of the same state machine rather than as a second scheduled
+# thing, because the two answer one question together: containment works, AND
+# it cannot be switched off by the account it is pointed at. Either alone is a
+# weaker claim than an auditor will accept.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  IncidentTableName:
+    Type: String
+    Default: platform-security-incidents
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  ExerciseAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: >-
+      The isolated account the drill runs in. REQUIRED — there is no default
+      and no fallback. contain.py refuses to run in exercise mode against any
+      other account, and this stack refuses to deploy without one.
+
+  ForensicsAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: >-
+      Checked from the far side to confirm preserved evidence actually arrived.
+
+  ExerciseSubnetId:
+    Type: String
+    AllowedPattern: '^subnet-[0-9a-f]+$'
+    Description: >-
+      Where the drill instance is launched, in the exercise account. Explicit
+      rather than discovered: a drill that picks its own subnet will eventually
+      pick a different one and quietly change what is being tested.
+
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(0 14 ? * 3#2 *)'
+    Description: >-
+      Monthly. Second Wednesday at 14:00 UTC, which is deliberately the day
+      AFTER the restore test in recovery/20-restore-schedule.yaml. Running both
+      exercises on the same morning would make a bad day look like two
+      unrelated failures, and they contend for the same attention.
+
+  ScheduleEnabled:
+    Type: String
+    Default: 'ENABLED'
+    AllowedValues: ['ENABLED', 'DISABLED']
+    Description: >-
+      The exercise launches and terminates a real instance. This stops it per
+      account without deleting the stack.
+
+  AwaitSeconds:
+    Type: Number
+    Default: 240
+    MinValue: 60
+    Description: >-
+      How long the exercise waits for containment to record a summary. A
+      timeout is a FINDING about containment being slow, not an error: the
+      exercise records the timings it has and tears down anyway, because
+      raising here would leave a live instance behind.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Pass the alerts key. alias/platform-logs does not exist in a platform
+      account — it comes from the member baseline. See B-060's sibling in
+      containment/10-containment.yaml.
+
+  AlertTopicArn:
+    Type: String
+    Default: ''
+
+Conditions:
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+
+Resources:
+
+  ExerciseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformContainmentExercise
+      Description: >-
+        Drives the scheduled containment drill. Holds no destructive permission
+        in this account; everything destructive happens in the exercise account
+        through a role conditioned on a tag the drill applies at creation.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: RunTheExercise
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PlantAndRemoveDrillTargets
+                Effect: Allow
+                # Three named roles in two named accounts. Not a wildcard
+                # account, because unlike the responder role these are not
+                # deployed everywhere — there is exactly one exercise account
+                # and exactly one forensics account, and naming them means a
+                # misconfiguration cannot point the drill somewhere real.
+                Action: 'sts:AssumeRole'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${ExerciseAccountId}:role/PlatformExerciseHarness'
+                  - !Sub 'arn:${AWS::Partition}:iam::${ExerciseAccountId}:role/PlatformExerciseLocalAdmin'
+                  - !Sub 'arn:${AWS::Partition}:iam::${ForensicsAccountId}:role/PlatformForensicsReader'
+              - Sid: PlantTheFinding
+                Effect: Allow
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+              - Sid: WatchTheIncidentRecordAndWriteEvidence
+                Effect: Allow
+                # Query to observe what containment recorded, PutItem to write
+                # the exercise evidence. No UpdateItem and no DeleteItem — the
+                # exercise cannot alter the incident it is observing, which is
+                # what keeps its own evidence worth having.
+                Action: ['dynamodb:Query', 'dynamodb:PutItem']
+                Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${IncidentTableName}'
+
+  ExerciseLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-containment-exercise
+      # Seven years. This is the tabletop evidence an auditor asks for, and the
+      # question "when did you last prove containment works" is asked years
+      # after the exercise that answers it.
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ExerciseFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ExerciseLogGroup
+    Properties:
+      FunctionName: platform-containment-exercise
+      Runtime: python3.12
+      Handler: exercise.handler
+      Role: !GetAtt ExerciseRole.Arn
+      # The await step polls for up to AwaitSeconds, and the prepare step waits
+      # for an instance to reach running. Both are bounded well inside this.
+      Timeout: 600
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          INCIDENT_TABLE: !Ref IncidentTableName
+          ALERT_BUS_NAME: !Ref AlertBusName
+          EXERCISE_ACCOUNT_ID: !Ref ExerciseAccountId
+          FORENSICS_ACCOUNT_ID: !Ref ForensicsAccountId
+          EXERCISE_SUBNET_ID: !Ref ExerciseSubnetId
+          AWAIT_SECONDS: !Ref AwaitSeconds
+
+  ExerciseStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformContainmentExerciseStateMachine
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeSteps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'lambda:InvokeFunction'
+                Resource: !GetAtt ExerciseFunction.Arn
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogDelivery'
+                  - 'logs:GetLogDelivery'
+                  - 'logs:UpdateLogDelivery'
+                  - 'logs:DeleteLogDelivery'
+                  - 'logs:ListLogDeliveries'
+                  - 'logs:PutResourcePolicy'
+                  - 'logs:DescribeResourcePolicies'
+                  - 'logs:DescribeLogGroups'
+                Resource: '*'
+
+  ExerciseStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/vendedlogs/states/platform-containment-exercise
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ExerciseStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: platform-containment-exercise
+      RoleArn: !GetAtt ExerciseStateMachineRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt ExerciseStateMachineLogGroup.Arn
+      DefinitionSubstitutions:
+        ExerciseArn: !GetAtt ExerciseFunction.Arn
+      DefinitionString: |
+        {
+          "Comment": "Prompt 7.4. Plant a target, plant a finding, let the REAL automation run, verify from both ends, prove the account cannot block containment, tear down, record.",
+          "StartAt": "Initialise",
+          "States": {
+
+            "Initialise": {
+              "Type": "Pass",
+              "Comment": "Seeds every field the later states read. Step Functions FAILS a state whose Parameters name a JSONPath that is absent, and every one of these is absent on some path -- B-057, found the same way in the containment state machine.",
+              "Parameters": {
+                "prepared": null,
+                "planted": null,
+                "awaited": null,
+                "verified": null,
+                "blast": null,
+                "teardown": null,
+                "error": null
+              },
+              "Next": "Prepare"
+            },
+
+            "Prepare": {
+              "Type": "Task",
+              "Comment": "Launch the drill instance and create the drill principal, both tagged with this exercise id at creation. Nothing is reused between runs: a long-lived drill target drifts, and an exercise that passes against a target nobody has rebuilt proves less than it looks like.",
+              "Resource": "${ExerciseArn}",
+              "Parameters": { "step": "prepare" },
+              "ResultPath": "$.prepared",
+              "Retry": [
+                { "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Teardown" }
+              ],
+              "Next": "Plant"
+            },
+
+            "Plant": {
+              "Type": "Task",
+              "Comment": "Put a finding on the platform bus. From here until Verify the exercise does not participate: declaration, containment and the readout all run their real code.",
+              "Resource": "${ExerciseArn}",
+              "Parameters": { "step": "plant", "prepared.$": "$.prepared" },
+              "ResultPath": "$.planted",
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Teardown" }
+              ],
+              "Next": "Await"
+            },
+
+            "Await": {
+              "Type": "Task",
+              "Comment": "Poll the append-only incident record until containment writes its summary. The RECORD, not the execution status -- an execution that succeeded without recording anything is exactly the failure this drill exists to catch.",
+              "Resource": "${ExerciseArn}",
+              "Parameters": { "step": "await", "prepared.$": "$.prepared", "planted.$": "$.planted" },
+              "ResultPath": "$.awaited",
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Teardown" }
+              ],
+              "Next": "Verify"
+            },
+
+            "Verify": {
+              "Type": "Task",
+              "Comment": "Assert what happened, adversarially: the isolation group is attached AND denies all ingress, the instance is still running, and the evidence is readable FROM the Forensics account rather than merely shared towards it.",
+              "Resource": "${ExerciseArn}",
+              "Parameters": { "step": "verify", "prepared.$": "$.prepared", "awaited.$": "$.awaited" },
+              "ResultPath": "$.verified",
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Teardown" }
+              ],
+              "Next": "BlastRadius"
+            },
+
+            "BlastRadius": {
+              "Type": "Task",
+              "Comment": "open-items.md V3. Assume a role that IAM has granted the exact rights to disable the containment role, and attempt it. A denial can then only have come from the SCP, which is what isolates the variable.",
+              "Resource": "${ExerciseArn}",
+              "Parameters": { "step": "blast", "prepared.$": "$.prepared" },
+              "ResultPath": "$.blast",
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Teardown" }
+              ],
+              "Next": "Teardown"
+            },
+
+            "Teardown": {
+              "Type": "Task",
+              "Comment": "EVERY path arrives here, including every Catch, because every path may have left a running instance behind. Removes only what this exercise can prove it created; anything else is reported as an orphan and left alone.",
+              "Resource": "${ExerciseArn}",
+              "Parameters": { "step": "teardown", "prepared.$": "$.prepared" },
+              "ResultPath": "$.teardown",
+              "Retry": [
+                { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.teardownError", "Next": "Record" }
+              ],
+              "Next": "Record"
+            },
+
+            "Record": {
+              "Type": "Task",
+              "Comment": "Tabletop evidence with real timings, written to the append-only record and routed through the one routing layer. A PASSED exercise declares digest -- it is evidence, not news. A FAILED one declares nothing, so the tier decides and it pages where paging exists.",
+              "Resource": "${ExerciseArn}",
+              "Parameters": {
+                "step": "record",
+                "prepared.$": "$.prepared",
+                "awaited.$": "$.awaited",
+                "verified.$": "$.verified",
+                "blast.$": "$.blast",
+                "teardown.$": "$.teardown",
+                "error.$": "$.error"
+              },
+              "ResultPath": "$.evidence",
+              "Retry": [
+                { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Next": "Outcome"
+            },
+
+            "Outcome": {
+              "Type": "Choice",
+              "Comment": "The execution status mirrors the drill's verdict, so the console shows at a glance whether containment was last proven to work.",
+              "Choices": [
+                { "Variable": "$.evidence.passed", "BooleanEquals": true, "Next": "Passed" }
+              ],
+              "Default": "Failed"
+            },
+
+            "Passed": { "Type": "Succeed" },
+
+            "Failed": {
+              "Type": "Fail",
+              "Comment": "Containment could not be demonstrated. The evidence record names the specific checks that failed; this state exists so that the failure is visible in the console next to every previous month's success.",
+              "Error": "ContainmentExerciseFailed",
+              "Cause": "The scheduled containment exercise did not pass. See the exercise evidence record for the failed checks and the blast-radius verdict."
+            }
+          }
+        }
+
+  ExerciseSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-containment-exercise-monthly
+      Description: >-
+        Prompt 7.4 — monthly containment drill against the purpose-built target
+        in the isolated exercise account.
+      ScheduleExpression: !Ref ScheduleExpression
+      State: !Ref ScheduleEnabled
+      Targets:
+        - Id: exercise
+          Arn: !Ref ExerciseStateMachine
+          RoleArn: !GetAtt ExerciseScheduleRole.Arn
+
+  ExerciseScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformContainmentExerciseSchedule
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: StartTheExercise
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'states:StartExecution'
+                Resource: !Ref ExerciseStateMachine
+
+  # The exercise proves containment works. THIS proves the exercise is still
+  # running -- which is a different question, and the one that goes unnoticed.
+  #
+  # Unlike the restore test (B-050), this CAN be a CloudWatch alarm: the drill
+  # is monthly, but a state machine emits ExecutionsStarted on the day it runs
+  # and the alarm only has to notice a FAILED one, which is a same-day signal
+  # rather than an absence spanning weeks.
+  ExerciseFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerting
+    Properties:
+      AlarmName: platform-containment-exercise-failed
+      AlarmDescription: >-
+        The scheduled containment exercise failed. Containment could not be
+        demonstrated against a purpose-built target, which means the platform
+        cannot currently show that it would work during a real incident. Check
+        the exercise evidence record for the failed checks.
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref ExerciseStateMachine
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref ExerciseStateMachine
+  ExerciseRoleArn:
+    Description: >-
+      Pass to containment/20-exercise-target.yaml and
+      containment/30-forensics-reader.yaml as ExerciseRoleArn. Both trust this
+      ARN and nothing else.
+    Value: !GetAtt ExerciseRole.Arn

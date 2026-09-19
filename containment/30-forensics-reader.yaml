@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — a read-only role in the Forensics account that
+  lets the containment exercise confirm preserved evidence actually arrived
+  (prompt 7.4). Deploys to altdig-security-forensics ONLY.
+
+# ---------------------------------------------------------------------------
+# Why the check has to run from this side
+# ---------------------------------------------------------------------------
+# Prompt 7.4: "Verify snapshots landed in Forensics."
+#
+# The exercise could check that from the account being contained, by reading
+# the snapshot's createVolumePermission and confirming the Forensics account id
+# is on it. That proves the share was REQUESTED. It does not prove it worked.
+#
+# The difference is not academic. A share can be requested against an account
+# id that is wrong, or that no longer exists, or that is in a different
+# partition; a snapshot can be shared and then made unusable by a KMS key
+# policy that does not admit the far account, which is the common failure and
+# produces exactly no error on the sharing side. In every one of those cases
+# the source account reports success and the evidence is not there.
+#
+# So the exercise assumes this role and asks the Forensics account what it can
+# actually see. That is the question the auditor is really asking.
+#
+# ---------------------------------------------------------------------------
+# Read-only, deliberately and permanently
+# ---------------------------------------------------------------------------
+# This role can describe snapshots and nothing else. The Forensics account
+# holds preserved evidence from real incidents; a role reachable from another
+# account should never be able to alter or remove any of it, and the exercise
+# has no reason to want to. If a future need appears to write here, it should
+# be a different role with its own argument, not an extension of this one.
+
+Parameters:
+
+  ExerciseRoleArn:
+    Type: String
+    Description: >-
+      The Audit-account role that drives the exercise. Exactly one principal,
+      named in full — not an account root, which would make every present and
+      future principal in Audit a reader of the forensics account.
+    AllowedPattern: '^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$'
+
+Resources:
+
+  ForensicsReaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformForensicsReader
+      Description: >-
+        Read-only. Lets the scheduled containment exercise confirm that
+        preserved evidence is visible from the Forensics account.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Ref ExerciseRoleArn }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SeeWhatArrived
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DescribeSharedSnapshots
+                Effect: Allow
+                # Describe only. No CopySnapshot, no CreateVolume, no
+                # DeleteSnapshot — the exercise needs to know the evidence is
+                # visible, not to do anything with it.
+                Action:
+                  - 'ec2:DescribeSnapshots'
+                  - 'ec2:DescribeSnapshotAttribute'
+                Resource: '*'
+
+Outputs:
+  ForensicsReaderRoleArn:
+    Description: >-
+      Assumed by the exercise to confirm evidence is visible from this side.
+    Value: !GetAtt ForensicsReaderRole.Arn

@@ -84,17 +84,33 @@ done
 # The platform's own accounts. They run production infrastructure regardless of
 # what tier the tenants they serve are at, so a finding in one of them pages.
 #
-# Listed by name through SSM rather than hardcoded, per the CLAUDE.md rule that
-# nothing hardcodes an account id.
-# Named exactly as registered. `altdig-log-archive` was wrong here first time
-# and the loop skipped it without a word, which would have left the log archive
-# account absent from the map and therefore treated as prod — the right answer
-# by luck, from a bug. A missing name is now loud.
-for name in altdig-security-audit altdig-security-logarchive altdig-infra-tooling; do
-  ID="$(get_param "/org/account/${name}")" || true
+# DISCOVERED from SSM, not listed here.
+#
+# This was a hand-written list of three names, and creating the Forensics
+# account proved the shape wrong: a new platform account simply was not in the
+# map, and the router treated it as prod — which pages. The right answer by
+# luck, from an omission, and the luck runs out the first time a new account is
+# meant to be anything else.
+#
+# Every platform account is registered under /platform/org/account/<alias> by
+# scripts/create-platform-account.sh, so that prefix IS the list. Accounts that
+# already picked up a tier from a deployed stack set above are skipped, which
+# is what keeps the sandbox and exercise accounts at dev rather than being
+# overwritten to prod here.
+#
+# Same lesson as B-060: derive the list from the thing that creates the
+# entries, rather than maintaining a second copy of it by hand.
+PLATFORM_IDS="$(aws ssm get-parameters-by-path \
+  --path "${PLATFORM_SSM_PREFIX}/org/account" \
+  --query 'Parameters[].Value' --output text 2>/dev/null | no_cr | tr '\t' '\n')"
+
+for ID in ${PLATFORM_IDS}; do
   if [[ -z "${ID}" || "${ID}" == "None" ]]; then
-    warn "${name} is not registered in SSM; it will be absent from the map and"
-    log  "      therefore treated as prod by the router, which pages."
+    continue
+  fi
+  # Already tiered by a deployed stack set — that answer is better than this
+  # one, because it reflects how the account is actually instrumented.
+  if printf '%s' "${MAP}" | grep -q "\"${ID}\""; then
     continue
   fi
   MAP="$("${PY}" -c "

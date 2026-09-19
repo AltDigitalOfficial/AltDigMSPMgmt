@@ -4,10 +4,11 @@
 #
 #   scripts/publish-containment.sh [--dry-run]
 #
-# One package, four handlers: declare.py creates the incident, contain.py runs
-# the sequence, readout.py assembles the dossier and clock.py counts the
-# notification deadlines. All four read or write the same append-only incident
-# record, so they are deployed together and cannot drift apart.
+# One package, five handlers: declare.py creates the incident, contain.py runs
+# the sequence, readout.py assembles the dossier, clock.py counts the
+# notification deadlines, and exercise.py drills the whole thing monthly. All
+# five read or write the same append-only incident record, so they are
+# deployed together and cannot drift apart.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -32,7 +33,7 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 > "${BUILD}/.sources"
-for MODULE in contain declare readout clock; do
+for MODULE in contain declare readout clock exercise; do
   cp "${REPO_ROOT}/containment/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
   printf '%s\n' "$(win_path "${REPO_ROOT}/containment/src/${MODULE}.py")" \
     >> "${BUILD}/.sources"
@@ -43,9 +44,12 @@ done
 # failure left readout.py and clock.py out of the archive while the stack had
 # already been deployed with Lambdas pointing at them -- functions that would
 # have failed at invocation with "Unable to import module", during an incident.
-info "Checking every handler the template references is packaged"
-for HANDLER in $(grep -oE '^      Handler: [a-z]+\.handler' \
-                   "${REPO_ROOT}/containment/10-containment.yaml" \
+# EVERY containment template, not one of them. Reading 10-containment.yaml
+# alone reproduced the same shape of gap as the hand-maintained module list it
+# replaced: exercise.handler is declared in 40-exercise.yaml and went unchecked.
+info "Checking every handler the templates reference is packaged"
+for HANDLER in $(grep -hoE '^      Handler: [a-z]+\.handler' \
+                   "${REPO_ROOT}"/containment/*.yaml \
                  | awk '{print $2}' | cut -d. -f1 | sort -u); do
   [[ -f "${BUILD}/${HANDLER}.py" ]] \
     || die "the template declares handler ${HANDLER}.handler but

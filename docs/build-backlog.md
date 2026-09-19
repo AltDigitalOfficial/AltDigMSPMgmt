@@ -2037,3 +2037,125 @@ single call needed it inline.
 Compounding it, the call had `2>/dev/null` on it and reported "Could not read
 the registry table" — which points at the table name and at permissions, and
 the cause was neither. The error is now captured and printed.
+
+---
+
+## B-062 · Auto-deployment has no ordering between stack sets
+
+**Open** — 2026-09-19, found creating the exercise account.
+
+A new account landing in a targeted OU receives every service-managed stack set
+concurrently. Three of them failed on first deploy, and all three failures were
+ordering:
+
+| Stack set | Failure |
+|---|---|
+| `platform-kms-secrets` | `NoAvailableConfigurationRecorder` — a Config rule created before `platform-config` had created the recorder |
+| `platform-instrumentation` | "The specified KMS key does not exist" — a log group created before `platform-log-data-protection` had created `alias/platform-logs` |
+| `platform-canary-smoke` | "You do not have access to the bucket" — the canary's artifact bucket is in another account |
+
+The first two are genuinely transient and a retry fixed both. That is the
+problem: nothing retries. The stack instances sit at `OUTDATED` indefinitely,
+the account looks provisioned, and the missing pieces are exactly the ones that
+make it monitored — instrumentation is how alarms get created at all.
+
+This matters far more at vesting than it did here. Prompt 12.5's verification
+sweep is supposed to fail closed on a half-provisioned account, and it checks
+outcomes rather than stack-instance status, so it would catch the consequence.
+But a member account that silently comes up without instrumentation between
+provisioning and the sweep is a window where the platform believes it is
+watching something it is not.
+
+Two candidate fixes, neither built: give the dependent stack sets an explicit
+retry after the account settles, or make each one tolerate its dependency being
+absent and converge on a later update. The second is more work and much more
+robust, because it removes the ordering assumption rather than sequencing
+around it.
+
+**Revisit when** — prompt 12.x builds the provisioning saga, which is where
+"an account is fully baselined" becomes a state somebody asserts rather than
+assumes.
+
+---
+
+## B-063 · Isolation is verified at the control plane, not by reachability
+
+**Open** — 2026-09-19.
+
+The containment exercise asserts isolation three ways: the isolation security
+group is attached to every interface, the group has no ingress rules at all,
+and the instance is still running. All three are control-plane facts.
+
+What it does not do is try to reach the instance and fail. A route table, a
+NACL, or a VPC endpoint could in principle leave a path open that the security
+group alone does not describe, and the drill would pass.
+
+Doing it properly needs a prober — something inside the VPC that attempts a
+connection and reports the refusal — which is the same in-VPC executor problem
+as B-044, and would be the same piece of work. The drill target is also a bare
+instance with no listening service, so "cannot connect" would currently prove
+very little without first putting something on it to connect to.
+
+Worth stating plainly: the current check proves the isolation group is applied
+and is itself restrictive. It does not prove unreachability.
+
+**Revisit when** — B-044's in-VPC executor exists, since the two share a
+mechanism.
+
+---
+
+## B-064 · `sync-account-tiers.sh` kept a hand-written list of platform accounts
+
+**Fixed** — 2026-09-19, found creating the Forensics account.
+
+The script derived tenant account tiers from deployed stack set parameters —
+correctly, and with a good comment explaining why the stack set is more
+truthful than the account name. It then added the platform's own accounts from
+a list written out in the script:
+
+    for name in altdig-security-audit altdig-security-logarchive altdig-infra-tooling
+
+Creating the Forensics account left it absent from the map, and the router
+treats an absent account as `prod`, which pages. The right answer arrived by
+omission rather than by design, and it would not have been the right answer for
+the exercise account, which is `dev` and was also briefly absent.
+
+Now discovered from `/platform/org/account/`, which is where
+`create-platform-account.sh` registers every platform account — so the thing
+that creates the entries is the thing the list is read from. Accounts that
+already took a tier from a deployed stack set are skipped, which keeps the
+sandbox and exercise accounts at `dev` rather than being overwritten.
+
+Same lesson as B-060, four days apart and in a different file: a list
+maintained by hand alongside the thing that generates its entries will
+eventually disagree with it, and the disagreement is silent.
+
+---
+
+## B-065 · V3 is confirmed, and now has evidence
+
+**Closed** — 2026-09-19.
+
+open-items.md V3: "Member account with full local admin cannot block the
+containment role. Test: Phase 7 blast-radius verification."
+
+design 07 calls the assumption load-bearing. It has now been tested, twice, by
+the scheduled exercise against a role in the exercise account that IAM grants
+the exact rights to disable containment:
+
+    tag_the_containment_role                         blocked  AccessDenied
+    attach_a_deny_policy_to_the_containment_role     blocked  AccessDenied
+
+Both denied by `DenyPlatformRoleModification` in
+`policies/scp/03-protect-platform-identity.json`. The test isolates its
+variable deliberately: because IAM grants the actions, a denial can only have
+come from the SCP.
+
+Confirmed further by what the drill did NOT leave behind — the containment role
+carries no tags afterwards, because the probe that would have applied one never
+succeeded.
+
+**This is now checked monthly** and its result is carried in the exercise
+evidence. It is worth noting what that changes: V3 moves from an assumption
+somebody wrote down to a control with a date on it, which is the difference an
+auditor is asking about.

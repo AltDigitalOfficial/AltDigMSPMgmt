@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the exercise account's side of the scheduled
+  containment drill (prompt 7.4). Deploys to altdig-sandbox-exercise ONLY.
+  Creates the harness that plants a drill target, and the deliberately
+  over-permissioned principal that proves a member account cannot block
+  containment.
+
+# ---------------------------------------------------------------------------
+# Why this is not part of the member baseline
+# ---------------------------------------------------------------------------
+# Everything in here can create and destroy things. It is deployed to exactly
+# one account — the purpose-built exercise account — with
+# scripts/deploy-to-account.sh, not as a StackSet to the Sandbox OU.
+#
+# That distinction is the whole safety argument. If this were a baseline
+# stack it would place instance-creation and instance-termination rights into
+# the canary account and, later, into every member account in the OU. The
+# exercise needs an account where creating and destroying things is the point;
+# nowhere else should have a principal that can.
+#
+# design 07: "a scheduled exercise fires the REAL automation against a
+# purpose-built target in an isolated account."
+#
+# ---------------------------------------------------------------------------
+# Yes, this template terminates instances
+# ---------------------------------------------------------------------------
+# CLAUDE.md's hard rule is about REMEDIATION: automation must never destroy a
+# resource in response to a finding, because the resource is evidence and the
+# finding may be wrong. Nothing here responds to a finding. The harness creates
+# a throwaway instance so that containment has something to contain, and then
+# removes the instance it just made.
+#
+# The same provenance discipline recovery/src/teardown.py uses applies, and for
+# the same reason: every delete permission below is conditioned on a tag that
+# only this harness applies, so the role cannot express a request against
+# anything it did not create. A drill that could terminate an arbitrary
+# instance would be a worse thing than no drill.
+
+Parameters:
+
+  ExerciseRoleArn:
+    Type: String
+    Description: >-
+      The Audit-account role that drives the exercise — the state machine's
+      Lambda role from containment/40-exercise.yaml. Exactly one principal,
+      named in full, for the same reason the responder role names exactly one.
+    AllowedPattern: '^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$'
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # The harness: plants a target, then removes it
+  # -------------------------------------------------------------------------
+  ExerciseHarnessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformExerciseHarness
+      Description: >-
+        Creates and removes containment drill targets in the exercise account.
+        Every destructive permission is conditioned on a tag this harness
+        applies at creation.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Ref ExerciseRoleArn }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PlantAndRemoveDrillTargets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: LookAround
+                Effect: Allow
+                Action:
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeImages'
+                  - 'ec2:DescribeSubnets'
+                  - 'ec2:DescribeSecurityGroups'
+                  - 'ec2:DescribeVpcs'
+                  - 'ec2:DescribeSnapshots'
+                  - 'ec2:DescribeTags'
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource: '*'
+              - Sid: PlantTheTarget
+                Effect: Allow
+                # RunInstances must be unconditioned on the tag, because the
+                # tag does not exist until the instance does. What narrows it
+                # is the instance TYPE condition below and the fact that this
+                # role exists in one throwaway account.
+                Action: 'ec2:RunInstances'
+                Resource: '*'
+              - Sid: OnlySmallInstances
+                Effect: Deny
+                # A bug that launches a fleet of large instances in a drill
+                # account is a bill nobody notices until the month closes. The
+                # drill needs a machine that boots; it does not need a big one.
+                Action: 'ec2:RunInstances'
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:*:*:instance/*'
+                Condition:
+                  StringNotEquals:
+                    'ec2:InstanceType': ['t3.micro', 't3.nano', 't2.micro']
+              - Sid: TagWhatItCreates
+                Effect: Allow
+                Action: 'ec2:CreateTags'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'ec2:CreateAction': 'RunInstances'
+              - Sid: RemoveOnlyWhatItCreated
+                Effect: Allow
+                # THE control. Terminating an instance is permitted only where
+                # the instance carries the exercise tag, which only this
+                # harness applies and only at creation. An instance that
+                # belongs to somebody else is outside the reach of these
+                # credentials entirely — not merely outside the code path.
+                Action: 'ec2:TerminateInstances'
+                Resource: '*'
+                Condition:
+                  StringLike:
+                    # LITERAL, not a parameter reference. An IAM condition KEY
+                    # cannot be a !Sub — CloudFormation reports "Unhashable
+                    # type", which names the YAML construct and not the rule.
+                    #
+                    # The tag key was a parameter and is now hardcoded in both
+                    # halves, which is better anyway: a tag key configured in
+                    # one place and applied in another is two values that must
+                    # agree, and the failure when they do not is that teardown
+                    # silently cannot touch what it created.
+                    'aws:ResourceTag/platform-exercise-id': '*'
+
+              - Sid: PlantAndRemoveTheDrillPrincipal
+                Effect: Allow
+                # Name-gated rather than tag-gated: IAM role creation and
+                # deletion do not support a resource-tag condition the way EC2
+                # does, so the boundary is the path and the name prefix. The
+                # prefix is deliberately nothing like `Platform*`, so this can
+                # never reach a platform role even by accident.
+                Action:
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:GetRole'
+                  - 'iam:TagRole'
+                  - 'iam:PutRolePolicy'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:ListRolePolicies'
+                  - 'iam:ListAttachedRolePolicies'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ExerciseDrillPrincipal*'
+
+  # -------------------------------------------------------------------------
+  # The blast-radius test subject (open-items.md V3)
+  # -------------------------------------------------------------------------
+  # design 07: "If an attacker holds admin in the member account, the response
+  # capability must still function. This assumption is load-bearing and must be
+  # tested — verify periodically that a member account with full local admin
+  # cannot block the containment role."
+  #
+  # This role is the "member account with full local admin", narrowed to the
+  # exact question being asked.
+  #
+  # It does NOT carry AdministratorAccess, and that is a deliberate improvement
+  # on a literal reading. With AdministratorAccess, a denial proves the SCP
+  # works but so would a dozen other things; with a policy that grants EXACTLY
+  # the IAM actions the SCP is supposed to block, a denial can only have come
+  # from the SCP. The test isolates its variable.
+  #
+  # It also keeps the blast radius of a standing permissive role down to: can
+  # modify Platform* roles in one empty drill account, if and only if the SCP
+  # that is supposed to stop it has failed — which is precisely the condition
+  # the exercise exists to detect and report.
+  BlastRadiusSubjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformExerciseLocalAdmin
+      Description: >-
+        Stands in for a compromised member account holding local admin. Used
+        once a month to attempt to disable the containment role and confirm the
+        SCP refuses. Grants IAM rights that an SCP is expected to override.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Ref ExerciseRoleArn }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AttemptToBlockContainment
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EverythingTheScpShouldRefuse
+                Effect: Allow
+                # IAM says yes. The SCP is expected to say no. If the attempt
+                # succeeds, the platform has a critical finding: a member
+                # account can disarm its own containment, and every tenant is
+                # affected, not just this one.
+                Action:
+                  - 'iam:TagRole'
+                  - 'iam:UntagRole'
+                  - 'iam:PutRolePolicy'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:UpdateAssumeRolePolicy'
+                  - 'iam:DeleteRole'
+                  - 'iam:AttachRolePolicy'
+                  - 'iam:DetachRolePolicy'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Platform*'
+              - Sid: ReadBackWhatHappened
+                Effect: Allow
+                Action:
+                  - 'iam:GetRole'
+                  - 'iam:ListRoleTags'
+                  - 'iam:ListRolePolicies'
+                Resource: '*'
+
+Outputs:
+  HarnessRoleArn:
+    Description: 'Assumed by the exercise state machine to plant and remove targets.'
+    Value: !GetAtt ExerciseHarnessRole.Arn
+  BlastRadiusSubjectRoleArn:
+    Description: >-
+      Assumed by the exercise to attempt, and fail, to disable containment.
+    Value: !GetAtt BlastRadiusSubjectRole.Arn
