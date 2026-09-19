@@ -2247,3 +2247,81 @@ finding.
 **Close when** — the service account token is in Secrets Manager and
 reconciliation has compared a real deployment against a real change record.
 That is the last unverified part of 8.2.
+
+---
+
+## B-069 · The change record shape, and the one field it is missing
+
+**Open** — 2026-09-19. Recorded here so it is not lost between sessions; Jamie
+will implement the scheme in Jira separately. This is the platform-side half:
+what the code needs from it, and why.
+
+Jamie's intended change record carries:
+
+| Field | Purpose |
+|---|---|
+| business reason | what the change is meant to accomplish |
+| technical review | who owns saying the change will accomplish it |
+| business review | who confirmed it is requested and the reason is valid |
+| change start time | when the change is approved to begin |
+| change end time | when changes and testing are expected complete |
+| rollout plan | the exact steps |
+| rollback plan | how the previous state is restored |
+| technical testing | how we know the change was implemented well |
+| business testing | how we know the business outcome was achieved |
+
+That is a stronger shape than design 08 assumes, and two of the fields make
+existing code better rather than merely fitting it.
+
+**THE MISSING FIELD: what the change touches.**
+
+Nothing in the list identifies the target — account, environment, or resource.
+Both prompts need it, and they fail differently without it:
+
+- **8.2** currently attributes a change to an account by TIME proximity plus an
+  optional `account-<id>` label, because no target field existed to match on.
+  Time proximity is a heuristic; it will eventually match a deployment to an
+  unrelated change in the same window and report a clean result.
+- **8.3** cannot satisfy design 08's fifth quorum condition at all —
+  *"The approval is for this specific resource and action"*. With no target
+  field, an approval for deleting key A would verify successfully against the
+  deletion of key B. That is not a weak control, it is a defeated one.
+
+A label (`account-754280127660`) is enough and needs no scheme change, which is
+why the engine already reads one. A custom field is better if the scheme is
+being designed anyway.
+
+**Start and end time make design 08's third outcome real.** "Deployment outside
+an approved window" is currently approximated by matching against `created`
+within a configurable number of hours, because there was no window to compare
+to. With real start and end times it becomes the actual check design 08 asks
+for, and `CHANGE_MATCH_WINDOW_HOURS` can stop being a guess.
+
+**Two distinct review roles map onto quorum better than "any two approvers".**
+design 03 requires two approvals with the requester excluded. A scheme that
+names a TECHNICAL reviewer and a BUSINESS reviewer gets that structurally, and
+gets something design 03 does not ask for and probably wants: the two approvals
+come from different perspectives rather than from two people who both read the
+same paragraph.
+
+**Rollback plan is worth surfacing during an incident.** Not used by
+reconciliation, but `customer_caused()` already correlates deployments with
+incidents. When it finds a deployment minutes before an outage, the rollback
+plan for that change is precisely what the responder needs next, and the
+platform will already know which change record it was.
+
+**Two kinds of record, one shape.** Worth separating before the scheme is
+built:
+
+- **Tenant change records** live in the tenant's project and are what 8.2
+  reconciles deployments against. Approvers are the tenant's.
+- **AltDigital quorum requests** live in the ops project (AIINFRA) and are what
+  8.3 verifies before a key deletion, vault lock modification, account removal
+  or CloudTrail disable. Approvers are {Jamie, Wayne, Art} per design 03.
+
+The field list above suits both. The approver sets do not overlap, and 8.3
+must not accept a tenant's approver as a quorum member.
+
+**Close when** — the scheme exists in Jira and the engine is pointed at it.
+Until then 8.2 works on the label convention and 8.3 treats a missing target
+field as a refusal to execute rather than as a pass.
