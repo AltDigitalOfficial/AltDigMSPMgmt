@@ -2513,3 +2513,59 @@ announces itself in the routing record.
 **Note for the operator** — a real PagerDuty incident was raised by this and
 carries dedup key `b87cad4b1cfa3716d69e8d97792f4869`. It is a true finding
 about a genuine unapproved deployment, just at the wrong urgency.
+
+---
+
+## B-074 · A platform deployment was reported as the tenant's unapproved change
+
+**Fixed** — 2026-09-19, found by Jamie asking whether the platform can file
+change records.
+
+The first real reconciliation finding said a deployment in account
+754280127660 had no change record. True, but attributed to the wrong party. The
+captured principal was:
+
+    arn:aws:sts::754280127660:assumed-role/OrganizationAccountAccessRole/platform-deploy
+
+That is ALTDIGITAL deploying a stack, not the tenant deploying an application.
+The engine reconciled it against the tenant's change project and reported the
+tenant as having failed to file a change they were never party to.
+
+design 08 draws this line explicitly and the first version did not read it.
+"The control point" describes AppDeployer and tenant deployments. A separate
+section, "The platform's own pipeline", describes AltDigital's — "the most
+privileged thing AltDigital owns. It can modify every member account" — with
+its own approval model, currently Jamie as sole approver for baseline changes.
+Two kinds of change, two sets of records, two approvers.
+
+**Why it matters more than an attribution quibble.** Every StackSet rollout,
+every baseline update and every platform stack deployment lands in a member
+account. Once there are real tenants, each one would have produced an
+unapproved-change finding against that tenant. Hundreds of false accusations,
+in the control whose entire value is that the tenant trusts its findings.
+
+**Fixed by classifying the deployer**, three ways:
+
+| Principal | Class | Reconciled against |
+|---|---|---|
+| `PlatformAppDeployer-*` | tenant | the tenant's change project |
+| `OrganizationAccountAccessRole`, `stacksets-exec-*`, `Platform*` | platform | AltDigital's ops project |
+| anything else | **unknown** | the tenant's, and said loudly |
+
+The third row is the one worth having. design 08's premise is that AppDeployer
+is the ONLY path a tenant deploys through, so a deployment by neither
+AppDeployer nor a platform role came from a credential nobody has accounted
+for. The finding now says that rather than leading with the missing paperwork —
+somebody deploying with local static credentials is a finding about the control
+point itself, and strictly more interesting than a missing ticket.
+
+**What this leaves open.** AltDigital's own deployments are now reconciled
+against the ops project, where they will be reported as having no change
+record — because the platform does not file change records for its own
+deployments. That is design 08's "Interim: Jamie is sole approver for baseline
+changes" showing up as a daily finding rather than as a process. It will need
+either platform change records (12.3 drains `platform-jira-intents` and could
+file them) or an explicit, recorded exclusion for platform-managed deployments.
+
+Not decided here. Flagged because the alternative is a finding nobody can
+action, and those are how a rotation learns to ignore a queue.

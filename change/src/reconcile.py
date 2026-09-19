@@ -55,6 +55,13 @@ CHANGE_TABLE = os.environ.get("CHANGE_TABLE", "")
 ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
 CHANGE_ISSUETYPE = os.environ.get("JIRA_CHANGE_ISSUETYPE", "Change")
 DEFAULT_CHANGE_PROJECT = os.environ.get("JIRA_DEFAULT_CHANGE_PROJECT", "")
+# AltDigital's OWN operations project. design 08 treats the platform's pipeline
+# as a separate thing from a tenant's -- "The platform's own pipeline [...] the
+# most privileged thing AltDigital owns" -- with its own approver. A baseline
+# rollout is a change, but it is not the TENANT's change, and reconciling it
+# against the tenant's records would report the tenant as having failed to file
+# something they were never party to.
+OPS_CHANGE_PROJECT = os.environ.get("JIRA_OPS_PROJECT", "")
 TENANT_FACTS_PARAM = os.environ.get("TENANT_FACTS_PARAM",
                                     "/platform/change/tenant-facts")
 
@@ -159,6 +166,34 @@ DEPLOYMENT_EVENTS = {
 }
 
 
+# Who deployed, which decides WHOSE change record should cover it.
+#
+# design 08 draws this line and the first version of this engine did not. The
+# very first captured deployment was made by OrganizationAccountAccessRole --
+# AltDigital deploying a stack by hand -- and was reported as the TENANT having
+# deployed without a change record. B-074.
+PLATFORM_PRINCIPALS = ("OrganizationAccountAccessRole", "stacksets-exec-",
+                       "AWSCloudFormationStackSetExecutionRole", "Platform")
+
+
+def deployer_class(principal_arn):
+    """tenant | platform | unknown.
+
+    `unknown` is the most interesting of the three and deserves its own
+    attention: design 08's premise is that AppDeployer is the ONLY path a
+    tenant deploys through. A deployment by neither AppDeployer nor a platform
+    role came from a credential nobody has accounted for, which is a finding
+    about the control point itself rather than about paperwork.
+    """
+    arn = str(principal_arn or "")
+    if "PlatformAppDeployer" in arn:
+        return "tenant"
+    for marker in PLATFORM_PRINCIPALS:
+        if marker in arn:
+            return "platform"
+    return "unknown"
+
+
 def classify_event(event):
     detail = event.get("detail") or {}
     name = detail.get("eventName")
@@ -192,6 +227,7 @@ def classify_event(event):
         "error_code": detail.get("errorCode"),
         "event_id": detail.get("eventID"),
         "via_appdeployer": "PlatformAppDeployer" in arn,
+        "deployer": deployer_class(arn),
     }
 
 
@@ -424,9 +460,28 @@ def reconcile(event, context=None):
         by_account.setdefault(d.get("account_id"), []).append(d)
 
     results = []
+    # Split by WHOSE change it is before choosing a change source. A platform
+    # deployment and a tenant deployment in the same account are answerable to
+    # different records and different approvers.
+    regrouped = {}
     for account_id, account_deployments in by_account.items():
+        for d in account_deployments:
+            regrouped.setdefault(
+                (account_id, d.get("deployer") or "unknown"), []).append(d)
+
+    for (account_id, deployer), account_deployments in regrouped.items():
         facts = tenant_facts(account_id)
-        project = facts["project"]
+        if deployer == "platform":
+            project = OPS_CHANGE_PROJECT or facts["project"]
+            facts = dict(facts, project=project, source=(
+                "AltDigital's own operations project — this was a PLATFORM "
+                "deployment, not a tenant one, and design 08 treats the "
+                "platform's pipeline as separate"
+                if OPS_CHANGE_PROJECT else
+                "no ops project configured; fell back to the tenant's, which "
+                "is wrong for a platform deployment"))
+        else:
+            project = facts["project"]
 
         if not project:
             results.append(_unavailable(account_id, account_deployments,
@@ -584,12 +639,19 @@ def emit_finding(result):
     change = result.get("change") or {}
     summaries = {
         "no_change_record": (
-            "Deployment with NO change record. "
-            f"{deployment.get('kind')} on {deployment.get('resource')} at "
-            f"{deployment.get('occurred_at')}"
-            + ("" if deployment.get("via_appdeployer") else
-               " -- and NOT through the AppDeployer role, so it did not come "
-               "through the control point at all")),
+            {"tenant": "Tenant deployment with NO change record. ",
+             "platform": "PLATFORM deployment with no change record in "
+                         "AltDigital's own operations project. ",
+             "unknown": "Deployment by an UNRECOGNISED principal, and with no "
+                        "change record. This came through neither the "
+                        "AppDeployer control point nor any platform role -- "
+                        "somebody deployed with credentials nobody has "
+                        "accounted for, which matters more than the missing "
+                        "paperwork. "}.get(deployment.get("deployer"),
+                                           "Deployment with NO change record. ")
+            + f"{deployment.get('kind')} on {deployment.get('resource')} at "
+            f"{deployment.get('occurred_at')}, by "
+            f"{deployment.get('principal_arn')}"),
         "outside_approved_window": (
             f"Deployment outside an approved window. {result.get('problem')}"),
         "change_without_deployment": (

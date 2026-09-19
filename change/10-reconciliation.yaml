@@ -89,6 +89,20 @@ Parameters:
       issues, and an engine that trusted that would report every deployment as
       unapproved. open-items.md B9 settles the correct value.
 
+  JiraOpsProject:
+    Type: String
+    Default: ''
+    Description: >-
+      AltDigital's OWN operations project. design 08 treats the platform's
+      pipeline as a separate thing from a tenant's — "The platform's own
+      pipeline [...] the most privileged thing AltDigital owns" — with its own
+      approver.
+
+      A baseline rollout IS a change, but it is not the TENANT's change.
+      Reconciling it against their records reports them as having failed to
+      file something they were never party to, which is both wrong and the
+      kind of wrong that erodes trust in every other finding.
+
   JiraDefaultChangeProject:
     Type: String
     Default: ''
@@ -285,6 +299,7 @@ Resources:
           JIRA_SECRET_NAME: !Ref JiraSecretName
           JIRA_CHANGE_ISSUETYPE: !Ref JiraChangeIssueType
           JIRA_DEFAULT_CHANGE_PROJECT: !Ref JiraDefaultChangeProject
+          JIRA_OPS_PROJECT: !Ref JiraOpsProject
           RECONCILE_LOOKBACK_HOURS: !Ref LookbackHours
           JIRA_TOKEN_EXPIRES: !Ref JiraTokenExpires
 
