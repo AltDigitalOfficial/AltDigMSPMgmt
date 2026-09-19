@@ -304,6 +304,82 @@ Resources:
           JIRA_TOKEN_EXPIRES: !Ref JiraTokenExpires
 
   # -------------------------------------------------------------------------
+  # The filer (prompt 8.2's write half)
+  # -------------------------------------------------------------------------
+  # A SEPARATE function and a SEPARATE role from reconciliation, because one
+  # reads and one writes and the whole quorum argument rests on those being
+  # different things.
+  #
+  # What this does not buy, stated so nobody reads more into it than is there:
+  # real separation needs two Atlassian accounts and there is one. The account
+  # behind the shared credential can write whichever module reads the secret,
+  # and it currently belongs to a human who is also an approver. B-070 carries
+  # the fix; this is the code-level half of a separation the credential does
+  # not have yet.
+  FilerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformChangeFiler
+      Description: >-
+        Files change records in AltDigital's operations project. Writes to
+        Jira; reads nothing the platform verifies against.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: FileChangeRecords
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTheJiraCredential
+                Effect: Allow
+                Action: 'secretsmanager:GetSecretValue'
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${JiraSecretName}-*'
+              # No DynamoDB. The filer cannot touch the deployment evidence it
+              # is filing records about, which keeps the two halves of the
+              # control genuinely independent inside AWS even while they share
+              # a Jira credential.
+
+  FilerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-change-filer
+      # Seven years. This log is the record of every change record the platform
+      # itself raised, which is evidence in the same class as the deployments.
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  FilerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: FilerLogGroup
+    Properties:
+      FunctionName: platform-change-filer
+      Runtime: python3.12
+      Handler: filer.handler
+      Role: !GetAtt FilerRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          JIRA_SITE: !Ref JiraSite
+          JIRA_SECRET_NAME: !Ref JiraSecretName
+          JIRA_OPS_PROJECT: !Ref JiraOpsProject
+          JIRA_CHANGE_ISSUETYPE: !Ref JiraChangeIssueType
+
+  # -------------------------------------------------------------------------
   # Capture
   # -------------------------------------------------------------------------
   # design 08's six deployment event types arrive as CloudTrail events
@@ -478,6 +554,8 @@ Outputs:
     Value: !Ref ReconcileFunction
   ChangeTableName:
     Value: !Ref ChangeTable
+  FilerFunctionName:
+    Value: !Ref FilerFunction
   CorrelationInvocation:
     Description: >-
       The SLA exclusion query, prompt 8.2's first-class function. Returns

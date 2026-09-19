@@ -260,6 +260,16 @@ def field_requirements(project_key, issue_type_id):
             "name": f.get("name"),
             "required": bool(f.get("required")),
             "type": ((f.get("schema") or {}).get("type")),
+            # The CUSTOM type, not just "string".
+            #
+            # `schema.type` reports both a plain text field and a rich text one
+            # as "string", and the two take different payloads: rich text needs
+            # ADF and rejects a string with HTTP 400. The custom type is what
+            # tells them apart, so anything filing an issue can decide from the
+            # metadata rather than from a hand-maintained list of field names
+            # that goes stale the moment somebody adds a field -- which is what
+            # happened within an hour of the first record being filed.
+            "custom": ((f.get("schema") or {}).get("custom")),
             # The VALUES, not just whether there are any. A dropdown field
             # rejects anything outside its option set, and the rejection names
             # the custom field id rather than the label -- so knowing the
@@ -269,6 +279,30 @@ def field_requirements(project_key, issue_type_id):
                 (a.get("value") or a.get("name") or a.get("label"))
                 for a in allowed][:25],
         })
+    return out
+
+
+def site_fields(name_contains=""):
+    """Every field defined on the SITE, optionally filtered by name.
+
+    Distinguishes two things that look identical from createmeta: a field that
+    does not exist, and a field that exists but is not on the create screen.
+    Only the second is a screen configuration problem, and only the first means
+    the name is wrong -- but createmeta reports both as simply absent.
+
+    Added after "Business Test Plan" was created in Jira and did not appear in
+    the change record's create metadata. Guessing which of the two it was would
+    have sent somebody to the wrong configuration page.
+    """
+    data = _get("/rest/api/3/field")
+    want = (name_contains or "").lower()
+    out = []
+    for f in (data if isinstance(data, list) else []):
+        if want and want not in (f.get("name") or "").lower():
+            continue
+        out.append({"id": f.get("id"), "name": f.get("name"),
+                    "custom": ((f.get("schema") or {}).get("custom")),
+                    "type": ((f.get("schema") or {}).get("type"))})
     return out
 
 

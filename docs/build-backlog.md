@@ -2569,3 +2569,81 @@ file them) or an explicit, recorded exclusion for platform-managed deployments.
 
 Not decided here. Flagged because the alternative is a finding nobody can
 action, and those are how a rotation learns to ignore a queue.
+
+## B-075 · `schema.type: "string"` does not mean the field takes a string
+
+**Fixed** — 2026-09-19, found by filing the first real change record.
+
+The first filing attempt was rejected:
+
+    HTTP 400
+    customfield_10063: The field value is not valid Atlassian Document Format
+    customfield_10060: The field value is not valid Atlassian Document Format
+    customfield_10059: The field value is not valid Atlassian Document Format
+
+Those are Test plan, Backout plan and Implementation plan. `filer.py` already
+had an `_adf()` helper and already used it for `description`; it sent the three
+plan fields as plain strings because the create metadata reports all four as:
+
+    "schema": {"type": "string"}
+
+**That is the trap.** `schema.type` does not distinguish a plain text field
+from a rich text one. Both are `string`. The discriminator is `schema.custom`,
+which the client was discarding:
+
+    ...customfieldtypes:textarea      takes ADF
+    ...customfieldtypes:textfield     takes a string
+
+The error names custom field ids, not labels, and says nothing about which of
+the three plausible causes it is — wrong format, wrong value, or field not on
+the screen. Without the raw response body kept whole by `_post`, the message
+would have been unactionable.
+
+**Fixed by deriving the shape from the metadata** rather than from a list of
+field names in the code. `jira.py` now returns `custom`; `filer.py`'s `put()`
+wraps a string in ADF when the field's custom type is a textarea, or when it is
+a rich text system field (`description`, `environment`), and otherwise passes
+the value through untouched.
+
+**Why derived and not a list of three names.** Within the hour, Jamie added a
+fourth rich text field — Business Test Plan — to the change record. A
+hand-maintained list would have been wrong immediately and would have failed
+the same way, on the next filing, with the same opaque error. This is B-060 and
+B-064's rule for the third time: derive from the source of truth, do not keep a
+second copy of it. The unit test asserts the negative case too, because a
+wrapper applied too broadly would corrupt the option and datetime fields rather
+than fail loudly.
+
+## B-076 · Business Test Plan exists but cannot be set when the record is created
+
+**Open** — needs a Jira screen configuration change. Not blocking.
+
+Jamie added "Business Test Plan" to the change record. It does not appear in
+the create metadata, so the platform cannot populate it when it files a record.
+
+The field is real:
+
+    customfield_10079 | Business Test Plan | textarea | NOT on create screen
+    customfield_10063 | Test plan          | textarea | on create screen
+
+**Two causes look identical from `createmeta` and need different fixes.** A
+field missing from create metadata is either not on the site at all (the name
+is wrong) or on the site but absent from this issue type's CREATE screen (a
+screen configuration). createmeta reports both as simply absent, so
+`find_field` was added — read-only, listing site fields and marking which are
+creatable — rather than guessing and sending somebody to the wrong page.
+
+**The fix is in Jira, not in code:** add Business Test Plan to the create
+screen for `[System] Change` in AMI. Project settings → Screens → the Change
+issue type's create screen.
+
+**Until then nothing breaks.** `put()` sets a field only if the project exposes
+it, so the record files without it and `fields_unavailable` names it in the
+output. That tolerance is deliberate and load-bearing for tenant projects,
+which will not all carry the same fields — but it does mean a field silently
+going missing looks the same as one deliberately absent, which is why the
+filer reports the list rather than only logging it.
+
+The filer already accepts the value: `business_test_plan` in the event, or any
+field name at all via `extra`. It starts being populated the moment the screen
+carries it, with no code change.

@@ -30,7 +30,7 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 > "${BUILD}/.sources"
-for MODULE in reconcile jira; do
+for MODULE in reconcile jira filer; do
   cp "${REPO_ROOT}/change/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
   printf '%s\n' "$(win_path "${REPO_ROOT}/change/src/${MODULE}.py")" \
     >> "${BUILD}/.sources"
@@ -97,6 +97,43 @@ print(f"  {len(definitions)} function(s), none write-shaped")
 READONLYEOF
 [[ $? -eq 0 ]] || die "jira.py is not safe to publish."
 ok "jira client is read-only"
+
+# filer.py is ALLOWED to write -- that is its job. The line it may not cross is
+# approving: filing a change and approving one are different acts, and if the
+# platform could do both, the record it files would prove nothing.
+info "Checking the filer cannot approve anything"
+"${PY}" - "$(win_path "${REPO_ROOT}/change/src/filer.py")" <<'NOAPPROVEEOF'
+import re
+import sys
+
+# API PATHS, not English.
+#
+# The first version searched for the word "approve" anywhere in the file and
+# matched the docstring explaining why approving is forbidden. That is the
+# third time in this session a guard has fired on prose describing itself --
+# jira.py's read-only check twice, and now this. The rule that finally
+# generalises: a guard must match the CONSTRUCT it forbids, never a word that
+# describes it.
+#
+# What the filer must never do is issue a request against an approval or
+# transition endpoint, so the thing to examine is the set of API paths it
+# names. Every one goes to _post or _get as a literal beginning "/rest/".
+nl = chr(10)
+source = open(sys.argv[1], encoding="utf-8").read()
+paths = re.findall(r'["\'](/rest/[^"\']*)["\']', source)
+bad = [p for p in paths
+       if "approval" in p or "/transitions" in p or "servicedeskapi" in p]
+if bad:
+    sys.exit("filer.py calls an approval or transition endpoint: "
+             + ", ".join(bad) + nl
+             + "      The platform may FILE a change and may not APPROVE one."
+             + nl
+             + "      A component that can do both proves nothing by doing"
+             + nl + "      either.")
+print(f"  {len(paths)} API path(s), none approval or transition")
+NOAPPROVEEOF
+[[ $? -eq 0 ]] || die "filer.py is not safe to publish."
+ok "filer cannot approve"
 
 info "Packaging"
 zip_deterministic "${BUILD}"

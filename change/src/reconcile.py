@@ -865,9 +865,39 @@ def change_fields(event=None, context=None):
     return out
 
 
+def find_field(event=None, context=None):
+    """Where does a named field live, and is it on the create screen?
+
+    A field absent from `change_fields` has two very different causes and the
+    fix is a different configuration page for each:
+
+        not on the site at all   -> the name is wrong, or it was never created
+        on the site, not on the  -> it exists but the change record's CREATE
+        create screen               screen does not carry it, so nothing can
+                                    set it at creation time
+
+    createmeta cannot tell these apart -- both are simply absent from it.
+    """
+    project = (event or {}).get("project") or OPS_CHANGE_PROJECT         or DEFAULT_CHANGE_PROJECT
+    wanted = (event or {}).get("name") or ""
+    on_site = jira.site_fields(wanted)
+    creatable = {}
+    id_to_name = jira.project_issue_type_map(project)
+    type_id = {v: k for k, v in id_to_name.items()}.get(CHANGE_ISSUETYPE)
+    if type_id:
+        creatable = {f["id"]: f for f in jira.field_requirements(project,
+                                                                 type_id)}
+    out = {"searched_for": wanted, "project": project,
+           "issue_type": CHANGE_ISSUETYPE,
+           "matches": [{**f, "on_create_screen": f["id"] in creatable}
+                       for f in on_site]}
+    print(json.dumps(out, default=str))
+    return out
+
+
 HANDLERS = {"capture": capture, "reconcile": reconcile,
             "customer_caused": customer_caused, "health": health,
-            "change_fields": change_fields}
+            "change_fields": change_fields, "find_field": find_field}
 
 
 def handler(event, context):
