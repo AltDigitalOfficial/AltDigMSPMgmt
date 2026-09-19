@@ -895,9 +895,72 @@ def find_field(event=None, context=None):
     return out
 
 
+def approval_shape(event=None, context=None):
+    """What does an approval on this site actually look like?
+
+    Pure discovery, and it exists because the quorum verifier (8.3) is about to
+    depend on the shape of this response. Every field it reads -- the decider's
+    accountId, the decision, the timestamp -- has to be confirmed against one
+    real approval before any of it is trusted. B-068.
+    """
+    key = (event or {}).get("issue")
+    if not key:
+        return {"error": "pass an issue key"}
+    try:
+        raw = jira.approvals(key)
+    except jira.JiraUnavailable as exc:
+        return {"issue": key, "readable": False, "error": str(exc)}
+    out = {"issue": key, "readable": True, "count": len(raw), "raw": raw}
+    print(json.dumps(out, default=str))
+    return out
+
+
+def request_type_map(event=None, context=None):
+    """Service desks and their request types, with the issue type behind each.
+
+    Needed because a JSM issue created through the plain REST API is not a
+    "request": it has no Request Type (vp-origin), and every servicedeskapi
+    endpoint -- including approvals -- returns 404 for it. The request type id
+    is what turns a Change issue into a Change REQUEST.
+    """
+    want = (event or {}).get("project") or OPS_CHANGE_PROJECT         or DEFAULT_CHANGE_PROJECT
+    out = {"project": want, "desks": []}
+    for desk in jira.service_desks():
+        if want and desk.get("project_key") != want:
+            continue
+        types = []
+        for rt in jira.request_types(desk["id"]):
+            types.append(rt)
+        out["desks"].append({**desk, "request_types": types})
+    print(json.dumps(out, default=str))
+    return out
+
+
+def request_form(event=None, context=None):
+    """What the change request FORM accepts. Discovery for the filer."""
+    project = (event or {}).get("project") or OPS_CHANGE_PROJECT         or DEFAULT_CHANGE_PROJECT
+    want_name = (event or {}).get("request_type") or "Request a change"
+    for desk in jira.service_desks():
+        if desk.get("project_key") != project:
+            continue
+        for rt in jira.request_types(desk["id"]):
+            if (rt.get("name") or "").lower() == want_name.lower():
+                out = {"project": project, "service_desk_id": desk["id"],
+                       "request_type_id": rt["id"],
+                       "request_type_name": rt["name"],
+                       "issue_type_id": rt.get("issue_type_id")}
+                out.update(jira.request_type_fields(desk["id"], rt["id"]))
+                print(json.dumps(out, default=str))
+                return out
+    return {"error": f"no request type named '{want_name}' in {project}"}
+
+
 HANDLERS = {"capture": capture, "reconcile": reconcile,
             "customer_caused": customer_caused, "health": health,
-            "change_fields": change_fields, "find_field": find_field}
+            "change_fields": change_fields, "find_field": find_field,
+            "approval_shape": approval_shape,
+            "request_type_map": request_type_map,
+            "request_form": request_form}
 
 
 def handler(event, context):

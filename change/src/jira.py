@@ -227,6 +227,37 @@ def request_types(service_desk_id):
             for r in (data.get("values") or [])]
 
 
+def request_type_fields(service_desk_id, request_type_id):
+    """The fields a JSM request FORM accepts, which is not the create screen.
+
+    A request type exposes its own subset of fields, and
+    /rest/servicedeskapi/request rejects anything outside it. That set is
+    narrower than createmeta's: createmeta describes what the ISSUE type can
+    carry, this describes what the REQUEST form will take.
+
+    Asked rather than assumed, for the same reason as createmeta -- the
+    rejection names a custom field id and not a label, and a field silently
+    absent from a form is indistinguishable from one the caller got wrong.
+    """
+    data = _get(
+        f"/rest/servicedeskapi/servicedesk/{urllib.parse.quote(str(service_desk_id))}"
+        f"/requesttype/{urllib.parse.quote(str(request_type_id))}/field")
+    out = []
+    for f in (data.get("requestTypeFields") or []):
+        out.append({"id": f.get("fieldId"), "name": f.get("name"),
+                    "required": bool(f.get("required")),
+                    "type": ((f.get("jiraSchema") or {}).get("type")),
+                    "custom": ((f.get("jiraSchema") or {}).get("custom"))})
+    return {"fields": out,
+            # JSM can forbid raising a request on behalf of somebody else, and
+            # the platform's credential is not the requester in the human
+            # sense. Worth knowing before a 403 says so.
+            "can_raise_on_behalf_of":
+                bool(data.get("canRaiseOnBehalfOf")),
+            "can_add_request_participants":
+                bool(data.get("canAddRequestParticipants"))}
+
+
 def project_issue_type_map(project_key):
     """Issue type id -> name, so a request type can be resolved to one."""
     data = _get(f"/rest/api/3/project/{urllib.parse.quote(project_key)}")
@@ -323,6 +354,32 @@ def search(jql, fields=None, max_results=100):
     }
     data = _get("/rest/api/3/search/jql", params)
     return data.get("issues") or []
+
+
+def approvals(issue_key):
+    """JSM approval records for an issue. The PRIMARY evidence for quorum.
+
+    Not the status field, and design 08 is emphatic about why:
+
+        The pipeline validates rather than trusting the ticket's status field
+        alone. Jira permissions are easy to get subtly wrong.
+
+    A status of "Approved" is a workflow position. It says a transition
+    happened; it does not say who approved, whether they were authorised,
+    whether there were two of them, or whether one of them was the person who
+    asked. A project admin can move an issue into Approved directly, and a
+    post-function or automation rule can do it with nobody's consent at all.
+
+    The approval records carry the decision, the decider's accountId and the
+    time. That is what the five conditions are actually checkable against.
+
+    Returns the raw list. The caller decides what it means, because "approved"
+    here is a JSM state machine's word and the quorum rules are AltDigital's.
+    """
+    data = _get(
+        f"/rest/servicedeskapi/request/{urllib.parse.quote(issue_key)}"
+        "/approval", {"limit": 50})
+    return data.get("values") or []
 
 
 def issue_with_changelog(issue_key):

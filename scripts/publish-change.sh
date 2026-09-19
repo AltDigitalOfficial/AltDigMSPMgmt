@@ -121,8 +121,21 @@ import sys
 nl = chr(10)
 source = open(sys.argv[1], encoding="utf-8").read()
 paths = re.findall(r'["\'](/rest/[^"\']*)["\']', source)
+#
+# The first version also banned the whole servicedeskapi NAMESPACE, which
+# was the same over-matching in a new costume: creating a JSM request and
+# approving one both live under servicedeskapi, and banning the namespace
+# banned the filer's actual job. A change record created through the plain
+# issue API is not a JSM request at all -- no Request Type, so every
+# servicedeskapi endpoint including approvals returns 404 for it -- which
+# made the records unverifiable. That is the opposite of what this guard
+# is for.
+#
+# Match the ACT, not the address space. Approving and transitioning are the
+# forbidden acts. Creating is not.
 bad = [p for p in paths
-       if "approval" in p or "/transitions" in p or "servicedeskapi" in p]
+       if "approval" in p or "/transitions" in p
+       or p.rstrip("/").endswith(("/approve", "/decline"))]
 if bad:
     sys.exit("filer.py calls an approval or transition endpoint: "
              + ", ".join(bad) + nl

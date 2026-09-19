@@ -2647,3 +2647,98 @@ filer reports the list rather than only logging it.
 The filer already accepts the value: `business_test_plan` in the event, or any
 field name at all via `extra`. It starts being populated the moment the screen
 carries it, with no code change.
+
+## B-077 · The change records the platform filed could not carry an approval
+
+**Fixed** — 2026-09-19, found while starting 8.3.
+
+Asking AMI-1 for its approvals returned:
+
+    404  Either you don't have access to this request type, or it doesn't exist
+         i18nKey: sd.customerview.error.vpOriginMissing
+
+Not a permissions problem. An issue created through `/rest/api/3/issue` is a
+valid Change issue and is **not a JSM request**: it has no Request Type, which
+JSM calls `vp-origin` and stores in `customfield_10010`. Every servicedeskapi
+endpoint returns 404 for such an issue, the approval endpoint included. The
+error names the missing thing — *vpOriginMissing* — which is the only reason
+this took minutes rather than an afternoon.
+
+**Why it is worse than cosmetic.** Quorum verification (8.3) reads approvals as
+its primary evidence, deliberately, because design 08 says not to trust the
+status field. A record that cannot carry an approval cannot be verified at all.
+The platform was filing records that were structurally unverifiable by the
+control being built to verify them.
+
+**Fixed by raising records as requests.** Where the project is a service desk
+with a matching request type — resolved by NAME, `Request a change`, because the
+id differs per site — the filer posts to `/rest/servicedeskapi/request`. Where
+it is not, the issue API is used and the output says `approvable: false` with
+the reason, rather than leaving it to be discovered as a 404 during a quorum
+check. Tenant projects will not all be JSM.
+
+**Two things this dragged in.**
+
+*The request form is not the create screen.* A request type exposes a narrower
+field set than the issue type can carry, and `/rest/servicedeskapi/request`
+rejects anything outside it. Asked, not assumed, via the request type's own
+field endpoint. Labels are not on it.
+
+*Labels are load-bearing.* Reconciliation reads `account-<id>` labels to decide
+which deployments a change record covers. Losing them silently would mean the
+record matches nothing and every deployment in that account is reported as
+unapproved — a false accusation produced by a half-successful filing. So labels
+are set by a follow-up edit and **a failure there is fatal**, naming the issue
+key and the labels to add by hand. The edit happens before any approval exists,
+so it cannot disturb design 08's condition 4.
+
+*And the same shape trap in mirror image.* The issue API takes rich text as
+ADF; the request API takes it as a plain string. Values are now held raw and
+rendered per path. Building the payload once and sending it to whichever
+endpoint answered is precisely how this would send ADF where it is rejected.
+
+**The publish guard had to be narrowed, and it was over-broad rather than
+wrong.** It banned the whole `servicedeskapi` namespace to stop the filer
+approving anything. But creating a request and approving one both live there,
+so the ban blocked the filer's actual job and forced the unverifiable records
+above. It now matches the forbidden ACTS — approval and transition endpoints —
+not the address space. Fourth instance this session of a guard matching a word
+rather than a construct.
+
+## B-078 · Nothing can be approved: the change workflow has no approval step
+
+**Open** — needs a Jira configuration change. **Blocks quorum verification.**
+
+With B-077 fixed, approvals are readable. AMI-3, raised as a proper request:
+
+    {"issue": "AMI-3", "readable": true, "count": 0, "raw": []}
+
+Readable, and empty. The `Request a change` workflow in AMI has no approval
+step, so no approval can ever be recorded against it.
+
+**Why this blocks 8.3 rather than merely delaying a test.** design 03 puts four
+actions behind two approvals from {Jamie, Wayne, Art} — `kms:ScheduleKeyDeletion`,
+backup vault deletion or lock modification, account removal from the
+Organization, disabling CloudTrail or the Config recorder. design 08 requires
+the pipeline to verify five conditions against those approvals at execution
+time. With no approval step, there are no approvals, so the pipeline correctly
+refuses every request forever. The control is safe but inert.
+
+**What needs configuring in Jira:** an approval step on the `Request a change`
+workflow, with an approver set of at least two, and a minimum approval count of
+two. Project settings → Workflows → the change workflow → the status that
+precedes implementation.
+
+**The distinction the verifier must preserve.** An empty approval list has two
+causes:
+
+    no approval step configured   -> approval is IMPOSSIBLE here. A finding
+                                     about the platform's own configuration.
+    step exists, nobody has acted -> approval is PENDING. A normal state.
+
+Both look like `count: 0`. Reporting the first as "not approved" would be the
+fourth repetition of B-042/B-054 — an unreadable or unconfigured source
+reported as a negative result — and the consequence here is that a genuine
+misconfiguration reads as an ordinary refusal, so nobody fixes it. The verifier
+must say which, and an unapprovable request type is an exception record, not a
+denial.
