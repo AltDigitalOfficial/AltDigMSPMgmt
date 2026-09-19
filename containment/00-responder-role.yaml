@@ -1,0 +1,327 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the role security containment assumes INTO a
+  member account (prompt 7.1). Part of the member baseline. Deliberately holds
+  no destructive permission of any kind.
+
+# ---------------------------------------------------------------------------
+# Why this role exists in the member account at all
+# ---------------------------------------------------------------------------
+# design/07-response-automation.md: "Containment automation executes from the
+# platform account via a role that member accounts cannot modify, deny or
+# delete. If an attacker holds admin in the member account, the response
+# capability must still function."
+#
+# That is two halves. This template is the member half: a role the platform
+# assumes to act inside the account. The Audit half — the state machine and the
+# principal that assumes this — is containment/10-containment.yaml.
+#
+# What stops a compromised member account simply deleting this role is NOT
+# anything in this file. It is `DenyPlatformRoleModification` in
+# policies/scp/03-protect-platform-identity.json, which denies IAM write actions
+# against `arn:aws:iam::*:role/Platform*` for every principal in every member
+# account. THE NAME IS LOAD-BEARING: rename this role to something outside the
+# `Platform*` prefix and it silently becomes deletable by the very account it
+# exists to contain.
+#
+# open-items.md V3 — "Containment role cannot be blocked by a compromised member
+# account" — is the scheduled test of that assumption, built by prompt 7.4.
+#
+# ---------------------------------------------------------------------------
+# The permission list is the whole control
+# ---------------------------------------------------------------------------
+# CLAUDE.md: "Never write code that terminates, deletes, deregisters, rolls back
+# or purges a resource as part of automated remediation. Security automation
+# isolates and preserves."
+#
+# design 07 says the same thing harder: "Terminate. Delete. Deregister. Roll
+# back. Purge." are what automation may NEVER do, because terminating a
+# compromised instance destroys the evidence needed to understand what happened.
+#
+# So the rule is enforced here, in IAM, rather than left to the code to honour.
+# There is no ec2:TerminateInstances, no ec2:DeleteSnapshot, no
+# ec2:DeleteVolume, no iam:DeleteRole, no iam:DeleteUser, no
+# rds:DeleteDBInstance, and no s3:DeleteObject in this role. A bug in the
+# containment Lambda cannot destroy evidence, because the credentials it holds
+# cannot express the request.
+#
+# Every grant below is additive (create a snapshot, attach a policy) or
+# reversible (change which security group an instance uses). Read the list with
+# that test in mind before adding to it.
+
+Parameters:
+
+  ContainmentRoleArn:
+    Type: String
+    Description: >-
+      The Audit-account role that may assume this one — the state machine's
+      execution role from containment/10-containment.yaml. Exactly one
+      principal, named in full.
+
+      NOT a wildcard and not an account root. `:root` would let ANY principal in
+      the Audit account assume a role that can isolate production instances and
+      revoke credentials across the estate, which is a far larger blast radius
+      than it looks: it would make every future Lambda in that account a
+      containment-capable principal by default.
+    AllowedPattern: '^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$'
+
+  ForensicsAccountId:
+    Type: String
+    Default: ''
+    Description: >-
+      Where preserved evidence is shared to. Snapshots are created in THIS
+      account and then shared with Forensics — AWS has no "create a snapshot
+      directly into another account" operation, so preservation is always two
+      steps, and the second one is what puts the evidence beyond the reach of
+      an attacker holding admin here.
+    AllowedPattern: '^([0-9]{12})?$'
+
+  ExternalId:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >-
+      Optional sts:ExternalId. Belt and braces on top of the exact-principal
+      trust above; the confused-deputy problem this defends against does not
+      really apply within a single organization, so it is off by default rather
+      than being ceremony everybody copies.
+
+Conditions:
+  HasForensics: !Not [!Equals [!Ref ForensicsAccountId, '']]
+  HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
+
+Resources:
+
+  SecurityResponderRole:
+    Type: AWS::IAM::Role
+    # Retain on delete. If this stack is removed from an account — by a
+    # StackSet operation, a mistake, or an attacker with enough access to
+    # deregister the instance — the containment capability should not leave
+    # with it. A stale role that can only preserve and isolate is a far better
+    # failure than an account that has quietly become uncontainable.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # `Platform` prefix, not decorative. See the header: the SCP that stops a
+      # compromised account deleting this role matches on this exact prefix.
+      RoleName: PlatformSecurityResponder
+      Description: >-
+        Security incident containment. Assumed by the platform from the Audit
+        account. Preserves evidence and isolates; holds no permission to
+        terminate, delete or purge anything.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref ContainmentRoleArn
+            Action: sts:AssumeRole
+            Condition: !If
+              - HasExternalId
+              - StringEquals:
+                  'sts:ExternalId': !Ref ExternalId
+              - !Ref AWS::NoValue
+      Policies:
+
+        # -------------------------------------------------------------------
+        # Stage 1 — Preserve. Nothing destructive happens before this completes.
+        # -------------------------------------------------------------------
+        - PolicyName: Preserve
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadWhatIsThere
+                Effect: Allow
+                # Describes only. The readout (prompt 7.2) is built from these,
+                # and so is the decision about what to isolate — containment
+                # that cannot see the instance cannot safely act on it.
+                Action:
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeInstanceAttribute'
+                  - 'ec2:DescribeVolumes'
+                  - 'ec2:DescribeSnapshots'
+                  - 'ec2:DescribeSecurityGroups'
+                  - 'ec2:DescribeNetworkInterfaces'
+                  - 'ec2:DescribeVpcs'
+                  - 'ec2:DescribeSubnets'
+                  - 'ec2:DescribeTags'
+                Resource: '*'
+              - Sid: SnapshotVolumes
+                Effect: Allow
+                # CreateSnapshots (plural) captures every volume attached to an
+                # instance in ONE crash-consistent set. Taking them one at a
+                # time gives a set of snapshots from different moments, which
+                # for a multi-volume database is evidence that never existed in
+                # that combination on the running machine.
+                Action:
+                  - 'ec2:CreateSnapshot'
+                  - 'ec2:CreateSnapshots'
+                Resource: '*'
+              - Sid: TagEvidence
+                Effect: Allow
+                # The incident id goes onto every artifact at creation. Without
+                # it, a year later nobody can say which snapshot belonged to
+                # which incident, and evidence nobody can attribute is not
+                # evidence.
+                Action: 'ec2:CreateTags'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'ec2:CreateAction': ['CreateSnapshot', 'CreateSnapshots']
+              - Sid: ShareEvidenceWithForensics
+                Effect: Allow
+                # ModifySnapshotAttribute is how a snapshot reaches the
+                # Forensics account. It ADDS a permission; it cannot remove the
+                # snapshot. Note this is the only path evidence takes out of a
+                # possibly-compromised account, which is why the Forensics
+                # account exists at all.
+                Action: 'ec2:ModifySnapshotAttribute'
+                Resource: '*'
+              - Sid: ReadWhereEvidenceGoes
+                Effect: Allow
+                # Without this the Forensics lookup is DENIED, the denial gets
+                # swallowed into "no Forensics account configured", and
+                # evidence silently stays in the account being contained. That
+                # is B-042 exactly -- a missing describe permission swallowed
+                # into "cannot tell" -- and it was reproduced here on the first
+                # live containment despite the parameter existing with the
+                # right value. B-054.
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/security/*'
+              - Sid: ReadCloudTrailForTheReadout
+                Effect: Allow
+                # "What the principal did in the preceding 24 hours" — design
+                # 07's readout. Read-only, and it reads the account's own trail.
+                Action:
+                  - 'cloudtrail:LookupEvents'
+                  - 'cloudtrail:DescribeTrails'
+                  - 'cloudtrail:GetTrailStatus'
+                Resource: '*'
+
+        # -------------------------------------------------------------------
+        # Stage 2 — Isolate. The instance STAYS RUNNING.
+        # -------------------------------------------------------------------
+        - PolicyName: Isolate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SwapSecurityGroups
+                Effect: Allow
+                # ModifyInstanceAttribute changes which security groups an ENI
+                # uses. It does not stop, reboot or terminate anything — the
+                # instance keeps running and only its reachability changes,
+                # which is design 07's explicit requirement and the reason the
+                # evidence survives.
+                #
+                # ModifyNetworkInterfaceAttribute is the same operation for an
+                # instance with several interfaces; isolating one interface and
+                # leaving another reachable is a half-isolated instance, which
+                # design doc 02 calls out as worse than either extreme.
+                Action:
+                  - 'ec2:ModifyInstanceAttribute'
+                  - 'ec2:ModifyNetworkInterfaceAttribute'
+                Resource: '*'
+              # No ec2:AuthorizeSecurityGroup* and no ec2:RevokeSecurityGroup*.
+              # The isolation group is PRE-STAGED by
+              # baseline/40-network.yaml and applied as-is. Letting containment
+              # edit security group rules during an incident would let a bug
+              # open a path rather than close one, and the group it would be
+              # editing is the one thing that must be known-good.
+
+        # -------------------------------------------------------------------
+        # Stage 3 and 4 — Revoke, and contain blast radius.
+        # -------------------------------------------------------------------
+        - PolicyName: RevokeWithoutDeleting
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadPrincipals
+                Effect: Allow
+                Action:
+                  - 'iam:GetRole'
+                  - 'iam:GetUser'
+                  - 'iam:ListAttachedRolePolicies'
+                  - 'iam:ListAttachedUserPolicies'
+                  - 'iam:ListRolePolicies'
+                  - 'iam:ListUserPolicies'
+                  - 'iam:GetRolePolicy'
+                  - 'iam:GetUserPolicy'
+                  - 'iam:ListAccessKeys'
+                Resource: '*'
+              - Sid: AttachDenyPolicies
+                Effect: Allow
+                # PutRolePolicy / PutUserPolicy ADD an inline policy. They are
+                # how both stage 3 (deny-all) and stage 4 (session revocation by
+                # token issue time) are applied, and neither removes anything:
+                # the principal keeps its identity, its trust policy and its
+                # audit trail, and simply stops being able to do anything.
+                #
+                # design 07: "Attach a deny-all policy to the compromised
+                # principal — do not delete it. Deletion loses the audit trail
+                # and breaks attribution."
+                #
+                # DeleteRolePolicy and DeleteUserPolicy are deliberately ABSENT.
+                # Containment can apply a deny and cannot lift it; standing the
+                # incident down is a human action taken with human credentials.
+                # An automation that can un-contain is an automation an attacker
+                # can use to un-contain.
+                Action:
+                  - 'iam:PutRolePolicy'
+                  - 'iam:PutUserPolicy'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:user/*'
+              - Sid: NeverContainThePlatformItself
+                Effect: Deny
+                # The one that stops containment eating its own hands.
+                #
+                # Without this, a finding naming a `Platform*` principal — a
+                # compromised-looking instrumentation Lambda, or this very role
+                # — would have containment attach a deny-all to the platform's
+                # own machinery. In the worst ordering it revokes the role it is
+                # currently using, mid-sequence, leaving the account isolated,
+                # the evidence half-copied and no way back in.
+                #
+                # Containing a platform principal is a real scenario and it must
+                # be a human decision with human credentials, not something the
+                # automation does to itself at 3am.
+                Action:
+                  - 'iam:PutRolePolicy'
+                  - 'iam:PutUserPolicy'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Platform*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/stacksets-exec-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/OrganizationAccountAccessRole'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AWSReservedSSO*'
+
+  # -------------------------------------------------------------------------
+  # Where evidence is allowed to go
+  # -------------------------------------------------------------------------
+  # Published so the containment automation does not have to be told, per
+  # account, where Forensics is. It reads it from the account it is acting on,
+  # which means an account onboarded before Forensics existed starts working the
+  # moment this parameter is filled in rather than needing the automation
+  # redeployed.
+  ForensicsAccountParameter:
+    Type: AWS::SSM::Parameter
+    Condition: HasForensics
+    Properties:
+      Name: /platform/security/forensics-account
+      Type: String
+      Value: !Ref ForensicsAccountId
+      Description: >-
+        Account that preserved evidence is shared with during containment.
+
+Outputs:
+  ResponderRoleArn:
+    Description: >-
+      Assumed by the containment state machine in Audit.
+    Value: !GetAtt SecurityResponderRole.Arn
+  ForensicsConfigured:
+    Description: >-
+      "none" means preservation creates snapshots locally and cannot move them
+      out of the account — which is reported as a finding on every incident
+      rather than passing silently.
+    Value: !If [HasForensics, !Ref ForensicsAccountId, 'none']

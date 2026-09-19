@@ -497,7 +497,11 @@ def decide(norm):
                 f"emitter declared '{declared}'; tier {tier} would have given "
                 f"'{default}'. Honoured as a downgrade")
 
-        return default, f"response engine escalation, tier {tier}"
+        # Named by SOURCE. There are three dossier emitters now, and this
+        # string is the answer to "why was I not paged about this" — attributing
+        # a security containment to the response engine sends whoever is reading
+        # it to the wrong component.
+        return default, f"{norm.get('source') or 'dossier'} escalation, tier {tier}"
 
     # Findings. No routing decision travels with them, so the tier default
     # applies — and the tier is now LOOKED UP rather than assumed. It used to

@@ -861,3 +861,95 @@ which CLAUDE.md puts out of scope for this build.
 
 **Close when** — the questionnaire carries the field, the vesting schema
 implements it, and the router reads it.
+
+---
+
+## D-014 · Containment runs from Audit, not from a Shared Services account
+
+**Design position** — [07-response-automation.md](../design/07-response-automation.md)
+requires that "Containment automation executes from the **platform account** via
+a role that member accounts cannot modify, deny or delete."
+[02-platform-architecture.md](../design/02-platform-architecture.md) names the
+account for platform automation as **Shared Services**, in the Infrastructure
+OU.
+
+**Actual** — containment runs from **Audit** (692869638531), in the Security OU.
+Shared Services has not been created.
+
+**Reason.** The requirement design 07 actually states is that containment runs
+from *outside the account it acts on*, by a principal that account cannot
+block. Audit satisfies that completely, and is a better fit than Shared
+Services on the merits:
+
+- it is already the delegated administrator for Security Hub, GuardDuty and
+  Config, which are the sources containment declares on
+- it already hosts the organization event bus and the routing layer, so the
+  findings arrive there anyway and the summary is published back onto the same
+  bus without crossing an account boundary
+- containment is a security function, and the Security OU is where security
+  functions live
+
+Standing up a seventh platform account to hold one state machine and two Lambda
+functions is ceremony. CLAUDE.md makes the same argument about StackSets for a
+population of one.
+
+**What is NOT weakened by this.** The protection that matters is
+`DenyPlatformRoleModification` in
+[policies/scp/03-protect-platform-identity.json](../policies/scp/03-protect-platform-identity.json),
+which denies every member principal the ability to modify or delete
+`role/Platform*`. That applies to `PlatformSecurityResponder` regardless of
+which account assumes it, so the load-bearing assumption — open-items.md V3,
+"containment role cannot be blocked by a compromised member account" — is
+unaffected by this deviation. Prompt 7.4 tests it.
+
+**Reconsider if** — Shared Services is created for other reasons, or Audit
+acquires tenant-facing functions. The thing to protect is the property that
+containment does not execute from an account a tenant can reach.
+
+---
+
+## D-015 · UAT follows production in the containment confidence table
+
+**Design position** — [07-response-automation.md](../design/07-response-automation.md)
+gives confidence thresholds for two environments:
+
+| Environment | High-confidence | Medium-confidence |
+|---|---|---|
+| Production | Auto-contain | Gather and page |
+| Test / Dev | Auto-contain | Auto-contain |
+
+UAT does not appear. It has to, because UAT accounts exist and findings arrive
+from them.
+
+**Actual** — UAT follows the Production row. A medium-confidence finding in UAT
+gathers evidence and pages rather than auto-containing.
+
+**Reason.** [14-environment-tiers.md](../design/14-environment-tiers.md) splits
+UAT along two axes: **production-equivalent data handling, non-production
+resilience.** Containment is a data-protection control, not a resilience one,
+and design 14 is explicit that regulated data in UAT is "**expected**, not a
+scope-change finding".
+
+The cost the Production row exists to avoid is a false-positive isolation of
+something people are depending on — "isolating a healthy production service on
+a false positive is its own incident". In UAT that cost is a customer's test
+team losing their afternoon during acceptance testing, often against a
+deadline. That is much closer to the production cost than to the dev one, where
+isolating a developer's sandbox instance costs nothing.
+
+Following the Test/Dev row instead would auto-contain UAT on medium confidence,
+which is the more aggressive choice in the environment most likely to hold real
+customer data AND real customer attention.
+
+**Note the asymmetry with [D-013](#d-013--a-restore-duration-breach-does-not-page-in-uat).**
+There, UAT follows design 14's non-production routing and does NOT page on a
+restore duration breach. Here it follows production and does not auto-contain.
+Both defer to the same principle rather than to the same row: UAT gets
+production's CAUTION and non-production's URGENCY. Slow restores in UAT are not
+worth waking someone for; isolating UAT on a maybe is not worth doing
+automatically.
+
+**Close when** — design 07 gains a UAT row, or D-013's per-tenant UAT
+sensitivity field (B-052) is built and this becomes a second consumer of it.
+The two questions are the same question asked of different controls, and they
+should be answered together.

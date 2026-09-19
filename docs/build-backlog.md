@@ -1734,3 +1734,178 @@ the routing behaviour.
 
 **Revisit when** — the first tenant opts into UAT, or the questionnaire is next
 revised.
+
+---
+
+## B-053 · Memory is not captured during preservation
+
+**Open** — 2026-09-19.
+
+design 07's preserve stage asks for four things: snapshot volumes, capture
+instance metadata and running configuration, copy logs to Forensics, and
+**"where feasible, capture memory"**.
+
+Three are implemented. Memory is not, and it is not feasible from where
+containment runs. Capturing memory requires executing inside the guest — an
+agent plus a capture tool, driven by SSM Run Command — and the responder role
+holds no `ssm:SendCommand`, deliberately: a containment role that can run
+arbitrary commands on a tenant instance is a much larger thing than one that
+can change a security group.
+
+Reported on every incident as `memory_capture: {attempted: false, reason: ...}`
+rather than silently skipped, so a readout cannot imply memory was considered
+and found unnecessary.
+
+Note the ORDERING problem this creates, which is why it is not simply deferred
+and forgotten: isolation cuts the network path a memory capture would travel
+over. If memory capture is ever built it has to run inside stage 1, before
+isolation, and retrofitting it after the fact means revisiting the sequence
+rather than adding a step.
+
+**Revisit when** — there is a real incident where volatile state matters, or
+design 04 (Security Controls and Evidence) arrives and specifies the agent.
+
+---
+
+## B-054 · The responder role could not read where evidence goes — B-042 again
+
+**Fixed** — 2026-09-19, found on the first live containment.
+
+The first end-to-end drill preserved evidence correctly, isolated the instance
+correctly, revoked correctly — and left every snapshot sitting in the account
+being contained. `describe-snapshot-attribute` showed no share.
+
+The cause: `PlatformSecurityResponder` granted no `ssm:GetParameter`, so
+reading `/platform/security/forensics-account` was denied. The helper caught
+every exception and returned `None`, which the calling code read as "no
+Forensics account is configured" — and wrote exactly that into the incident
+record. The parameter existed, in the right account, with the correct value.
+
+**This is B-042 with different nouns.** That item is three weeks old and says
+so in its own words: two describe calls denied by a missing permission,
+swallowed into "cannot tell", producing alarms that were never created in any
+account. The same mistake was made again here, in new code, by the same author,
+having read the backlog entry.
+
+What makes it worse than a missing permission: the record BLAMED THE
+CONFIGURATION. An operator reading that incident would have gone looking for an
+unset parameter rather than a missing policy, and the evidence would have
+stayed reachable by whoever compromised the account.
+
+Both halves fixed. The role grants `ssm:GetParameter` on
+`/platform/security/*`, and `_forensics_account` now returns `(value, problem)`
+and distinguishes `ParameterNotFound` — genuinely unconfigured — from anything
+else, which is reported as a PLATFORM FAULT in the incident record.
+
+**The general shape, stated for the third time:** a bare `except: return None`
+around an AWS call converts "I was denied" into "the answer is no". Those are
+different answers and only one of them is actionable. If a helper swallows an
+exception, it must return the reason alongside the absence.
+
+---
+
+## B-055 · The router's else had a hole, and a security incident fell through it
+
+**Fixed** — 2026-09-19, found deploying prompt 7.1.
+
+Containment emitted its summary as `platform.security`. Nothing routed it. No
+page, no ticket, no review-queue entry, no routing-decision log line — a
+complete security incident, correctly contained, and no record anywhere that
+anyone should be told.
+
+`alerting/20-router.yaml` has four rules. `DossierRule` is the only one that
+filters on SOURCE as well as detail-type. `UnmatchedRule` — the catch-all whose
+whole job is "an event nobody planned for becomes visible instead of vanishing"
+— excludes by DETAIL-TYPE alone:
+
+    detail-type: [anything-but: [..., 'Platform Incident Dossier']]
+
+So a dossier from an unlisted source matched neither. Not `DossierRule`,
+because the source was not in its list; not `UnmatchedRule`, because the
+detail-type was in its exclusion list. EventBridge discarded it silently, which
+is what a bus does with an event no rule matches.
+
+Fixed by `UnmatchedDossierRule`, which matches the dossier detail-type with
+`source: anything-but` the three known emitters.
+
+**Worth generalising.** An "else" written as `anything-but` over ONE field is
+only an else for that field. Any rule that narrows on a second field creates a
+gap the catch-all cannot see, and the gap is invisible precisely because
+nothing arrives to report it. Every future rule that filters on source, detail,
+or account needs its own matching escape hatch — or the catch-all has to be
+written over the same fields.
+
+The immediate trigger was mundane — the router had not been redeployed after
+`platform.security` was added to its rule — but the deploy order was not the
+bug. The bug is that getting the deploy order wrong produced SILENCE rather
+than a review-queue entry saying "unrecognised dossier source".
+
+---
+
+## B-056 · A compliance control finding declared a security incident
+
+**Fixed** — 2026-09-19, found on the first live declaration.
+
+The declaration recogniser for Security Hub matched design 07's four conditions
+by keyword, and then fell back to declaring on any `CRITICAL` or `HIGH` severity
+label when no keyword matched. The first live run declared an incident for:
+
+    SSM.7 SSM documents should have the block public sharing setting enabled
+
+An AWS Foundational Security Best Practices control. Rated CRITICAL. Describing
+a configuration default that has never been touched.
+
+It was harmless on the day only because the finding named an ACCOUNT
+(`AWS::::Account:754280127660`) and no instance, so containment had nothing to
+preserve, isolate or revoke and completed with a shrug.
+
+**The dangerous version is one line away.** `EC2.8 instances should use IMDSv2`
+is the same family, the same severity, and names an EC2 INSTANCE. In a
+production account at high confidence that would have isolated a healthy
+running server — cutting it off from the network — because of a metadata
+service setting. design 07 names that exact outcome as the thing to avoid:
+"Isolating a healthy production service on a false positive is its own
+incident."
+
+Fixed in three parts:
+
+  * findings whose `Types` begin `Software and Configuration Checks` are never
+    declarations — that is the compliance family, and compliance drift is the
+    alerting layer's business
+  * the attack families ARE declarations: `TTPs`, `Effects`,
+    `Unusual Behaviors`, which describe observed adversary behaviour rather
+    than configuration state
+  * severity NEVER decides declaration on its own. It modulates confidence,
+    which is a different question
+
+**What this says about "bias toward over-declaration".** design 07's instruction
+is about not DEBATING — declaring is cheap, standing down is fine. It is not a
+licence to treat every highly-rated finding as a breach. The cost of declaring
+is bounded by what containment then does, and containment acts on production, so
+the filter has to sit at declaration where it can still be reasoned about.
+
+---
+
+## B-057 · Step Functions fails a state whose Parameters name a missing path
+
+**Fixed** — 2026-09-19, found deploying prompt 7.1.
+
+`Finalise` reads `$.error`, `$.isolate`, `$.revoke` and `$.blast_radius` so that
+one state can report every outcome. None of them exist on every path: `$.error`
+is written only by a Catch, and the gather-and-page route skips isolation
+entirely. Step Functions does not treat a missing JSONPath in `Parameters` as
+null — it fails the state:
+
+    The JSONPath '$.error' specified for the field 'error.$' could not be found
+
+Both the happy path and the gather path died at the LAST state, after
+containment had already preserved, isolated and revoked. That is the worst
+possible place for it: the actions had happened and the record of them had not.
+
+Fixed with an `Initialise` Pass state that seeds every optional field as null
+before `Triage`, so `Finalise` has one shape for every route.
+
+**Worth remembering for any future state machine** — `recovery/10-restore-
+workflow.yaml` avoided this only by accident, because its record step reads the
+whole state object (`state.$: "$"`) rather than naming individual fields. Naming
+fields is better for readability and strictly more fragile.

@@ -384,7 +384,11 @@ Resources:
         # Listed explicitly rather than matched on the detail-type alone,
         # because the pattern is also the list of things allowed to raise an
         # incident on this platform's pager, and that list should be readable.
-        source: ['platform.response', 'platform.recovery']
+        # platform.security is containment (prompt 7.1). Unlike the other two
+        # it runs IN this account and puts straight onto this bus, so it never
+        # passes through baseline/70-event-forwarding.yaml — which is why that
+        # template's matching rule lists only the two member-side sources.
+        source: ['platform.response', 'platform.recovery', 'platform.security']
         detail-type: ['Platform Incident Dossier']
       State: ENABLED
       Targets:
@@ -395,6 +399,38 @@ Resources:
           RetryPolicy:
             MaximumRetryAttempts: 4
             MaximumEventAgeInSeconds: 3600
+
+  # A dossier from a source this template does not know about.
+  #
+  # This closes a hole in the else below, found by deploying prompt 7.1. The
+  # UnmatchedRule excludes by DETAIL-TYPE alone, and DossierRule is the only
+  # rule that also filters on SOURCE — so a "Platform Incident Dossier" from an
+  # unrecognised source matched neither: not DossierRule, because the source
+  # was not listed, and not UnmatchedRule, because the detail-type was. It went
+  # nowhere at all, silently, which is the exact failure the else exists to
+  # prevent.
+  #
+  # It surfaced when containment began emitting as platform.security before
+  # this template had been redeployed to expect it: a full security incident,
+  # contained correctly, and no routing decision recorded anywhere.
+  UnmatchedDossierRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-route-unmatched-dossiers
+      EventBusName: !Ref PlatformBus
+      EventPattern:
+        detail-type: ['Platform Incident Dossier']
+        source:
+          - anything-but:
+              - platform.response
+              - platform.recovery
+              - platform.security
+      State: ENABLED
+      Targets:
+        - Id: router
+          Arn: !GetAtt RouterFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt RouterDlq.Arn
 
   # Everything else on the bus. Not a no-op: it is how an event nobody planned
   # for becomes visible instead of vanishing, which is the same else rule the

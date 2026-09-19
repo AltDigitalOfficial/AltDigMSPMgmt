@@ -1,0 +1,745 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — declaration and containment (prompt 7.1).
+  Deploys to the Audit account. Declares security incidents without debate on
+  design 07's defined conditions, then runs preserve, isolate, revoke and blast
+  radius against the member account through a role that account cannot deny.
+
+# ---------------------------------------------------------------------------
+# Why this runs in Audit and not in the member account
+# ---------------------------------------------------------------------------
+# design/07-response-automation.md: "Containment automation executes from the
+# platform account via a role that member accounts cannot modify, deny or
+# delete. If an attacker holds admin in the member account, the response
+# capability must still function."
+#
+# Response automation for OPERATIONAL incidents (baseline/60-response.yaml)
+# runs inside each member account, and that is correct for it: an operational
+# runbook acts on a healthy account and the blast radius of a bug is one
+# tenant. Security containment cannot work that way. The account it acts on is
+# by definition the one that may be under someone else's control, and an
+# attacker with local admin would simply disable the thing coming for them.
+#
+# design 02 names "Shared Services (platform automation)" as the account for
+# platform automation, and it does not exist. Audit is used instead: it is
+# already the delegated administrator for Security Hub, GuardDuty and Config,
+# it already hosts the routing layer and the organization event bus, and
+# containment is a security function reading security findings. Standing up a
+# seventh account to hold one state machine is ceremony. Recorded as a
+# deviation.
+#
+# ---------------------------------------------------------------------------
+# discovery_time is immutable by SHAPE, not by discipline
+# ---------------------------------------------------------------------------
+# design 07: "discovery_time is legally significant. It is set by the system at
+# detection and is never editable."
+#
+# Code cannot credibly promise that about itself. So the incident table is
+# APPEND ONLY and the guarantee is made three times over:
+#
+#   * the header item carrying discovery_time is written with
+#     ConditionExpression attribute_not_exists(PK), so a second write fails
+#   * everything that happens afterwards is a separate event item under its own
+#     sort key, so nothing ever needs to update the header
+#   * the IAM policies below grant NO dynamodb:UpdateItem and NO
+#     dynamodb:DeleteItem on the table, to any principal in this stack
+#
+# Rewriting a discovery_time is therefore not a matter of nobody choosing to.
+# There is no API call available to these functions that would do it.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+    Description: Artifact bucket in Platform Tooling holding the containment package.
+
+  ArtifactKey:
+    Type: String
+    Description: Content-addressed package key.
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+    Description: >-
+      The organization event bus from alerting/20-router.yaml. Declaration
+      rules are attached to it, and the containment summary is published back
+      onto it so the ONE routing layer decides who is woken.
+
+  IncidentTableName:
+    Type: String
+    Default: platform-security-incidents
+    Description: Append-only incident record.
+
+  ResponderRoleName:
+    Type: String
+    Default: PlatformSecurityResponder
+    Description: >-
+      The member-side role from containment/00-responder-role.yaml. The name is
+      load-bearing in both templates: the SCP that stops a compromised account
+      deleting it matches on the `Platform*` prefix.
+
+  ResponderExternalId:
+    Type: String
+    Default: ''
+    NoEcho: true
+
+  ExerciseAccountId:
+    Type: String
+    Default: ''
+    Description: >-
+      The isolated account prompt 7.4's scheduled exercise fires against. EMPTY
+      UNTIL 7.4 BUILDS IT, and exercise mode refuses to run rather than falling
+      back to the account named in the finding — a drill that reaches a real
+      account is worse than a drill that does not run.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+    Description: >-
+      REQUIRED IN PRACTICE, despite the empty default. The fallback is
+      alias/platform-logs, which is created by baseline/20-log-data-protection
+      .yaml — the MEMBER baseline, which does not reach platform accounts. This
+      stack deploys to Audit, where that alias does not exist, and leaving this
+      empty fails every log group with "The specified KMS key does not exist or
+      is not allowed to be used", an AccessDenied that names the log group and
+      not the missing alias.
+
+      Pass the alerts key from alerting/10-alert-topic.yaml. Its policy already
+      admits the regional CloudWatch Logs service principal for any log group
+      in the account, which is why the router's own log group works.
+
+      The empty default is kept rather than made required so that the same
+      template can be deployed to a member account, where the alias does exist.
+
+  AlertTopicArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Where this stack's OWN failures go, by the direct SNS path rather than
+      through the router. A containment engine that is broken cannot report
+      that it is broken through the layer it publishes to.
+
+Conditions:
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # The incident record
+  # -------------------------------------------------------------------------
+  IncidentTable:
+    Type: AWS::DynamoDB::Table
+    # Retain on both. This table holds discovery_time, which is legally
+    # significant and cannot be reconstructed from anything else — CloudTrail
+    # expires, GuardDuty findings archive, and the whole point of the field is
+    # that it is the record of when the platform knew. A stack delete that took
+    # it would destroy the evidence a regulator asks for first.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref IncidentTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-purpose, Value: security-incident-record }
+
+  # -------------------------------------------------------------------------
+  # Declaration
+  # -------------------------------------------------------------------------
+  DeclarationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformIncidentDeclaration
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: Declare
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppendOnlyIncidentRecord
+                Effect: Allow
+                # PutItem and nothing else that writes. No UpdateItem and no
+                # DeleteItem anywhere in this stack — that absence IS the
+                # immutability guarantee for discovery_time, and adding either
+                # one here would quietly remove it.
+                Action: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:Query']
+                Resource: !GetAtt IncidentTable.Arn
+              - Sid: StartContainment
+                Effect: Allow
+                Action: 'states:StartExecution'
+                Resource: !Ref ContainmentStateMachine
+              - Sid: ReadAccountTiers
+                Effect: Allow
+                # The same map the router reads. The tier is the input to
+                # design 07's confidence table, so it decides whether a
+                # production service gets isolated; reading it from a second
+                # source is how the two answers start disagreeing (B-041).
+                Action: 'ssm:GetParameter'
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/routing/*'
+
+  DeclarationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-incident-declaration
+      # Seven years. This log is the contemporaneous record of what the
+      # platform saw and when it decided it was an incident, which is the same
+      # class of evidence as the change records in baseline/60-response.yaml.
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  DeclarationFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DeclarationLogGroup
+    Properties:
+      FunctionName: platform-incident-declaration
+      Runtime: python3.12
+      Handler: declare.handler
+      Role: !GetAtt DeclarationRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          INCIDENT_TABLE: !Ref IncidentTable
+          CONTAINMENT_STATE_MACHINE_ARN: !Ref ContainmentStateMachine
+
+  # design 07's declaration conditions. One rule per family rather than one
+  # catch-all, so a source that stops producing is visibly a rule with no
+  # invocations rather than a share of one rule's traffic nobody can pick apart
+  # — the same reasoning as baseline/70-event-forwarding.yaml.
+  #
+  # Note these sit ALONGSIDE the router's own rules on the same bus. The router
+  # decides who is paged; this decides whether an incident exists and whether
+  # anything is contained. Both must see the finding.
+  GuardDutyDeclarationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-declare-guardduty
+      EventBusName: !Ref AlertBusName
+      Description: 'GuardDuty finding at high severity (design 07).'
+      EventPattern:
+        detail-type: ['GuardDuty Finding']
+      State: ENABLED
+      Targets:
+        - Id: declare
+          Arn: !GetAtt DeclarationFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt DeclarationDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 4
+            MaximumEventAgeInSeconds: 3600
+
+  SecurityHubDeclarationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-declare-securityhub
+      EventBusName: !Ref AlertBusName
+      Description: >-
+        Credential exposure, unexpected egress, unauthorised data store access
+        and ransomware indicators all reach us as Security Hub findings.
+      EventPattern:
+        detail-type: ['Security Hub Findings - Imported']
+      State: ENABLED
+      Targets:
+        - Id: declare
+          Arn: !GetAtt DeclarationFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt DeclarationDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 4
+            MaximumEventAgeInSeconds: 3600
+
+  # "Any ScheduleKeyDeletion, CloudTrail disable, or vault lock modification
+  # attempt." Successful or DENIED — a denied attempt is either confusion or
+  # something worse, and both are worth a record.
+  ProtectedActionDeclarationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-declare-protected-actions
+      EventBusName: !Ref AlertBusName
+      Description: 'Key deletion, trail tampering, vault lock modification.'
+      EventPattern:
+        detail-type: ['AWS API Call via CloudTrail']
+        detail:
+          eventName:
+            - ScheduleKeyDeletion
+            - DisableKey
+            - StopLogging
+            - DeleteTrail
+            - UpdateTrail
+            - PutBackupVaultLockConfiguration
+            - DeleteBackupVaultLockConfiguration
+            - DeleteBackupVault
+            - DeleteRecoveryPoint
+      State: ENABLED
+      Targets:
+        - Id: declare
+          Arn: !GetAtt DeclarationFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt DeclarationDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 4
+            MaximumEventAgeInSeconds: 3600
+
+  # "Plus manual declaration by any engineer." An engineer who believes
+  # something is wrong must not have to wait for a detector to agree.
+  ManualDeclarationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-declare-manual
+      EventBusName: !Ref AlertBusName
+      Description: >-
+        Manual declaration. Put an event with detail-type "Platform Manual
+        Declaration" onto the bus; see docs/runbooks.md.
+      EventPattern:
+        detail-type: ['Platform Manual Declaration']
+      State: ENABLED
+      Targets:
+        - Id: declare
+          Arn: !GetAtt DeclarationFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt DeclarationDlq.Arn
+
+  DeclarationDlq:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: platform-declaration-dlq
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  DeclarationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DeclarationFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # -------------------------------------------------------------------------
+  # Containment
+  # -------------------------------------------------------------------------
+  ContainmentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformContainment
+      Description: >-
+        Assumes PlatformSecurityResponder in member accounts. Holds no
+        destructive permission of its own and gains none by assuming - see
+        containment/00-responder-role.yaml.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: Contain
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AssumeTheResponderRoleAnywhereInTheOrg
+                Effect: Allow
+                # Wildcard ACCOUNT, exact ROLE NAME. The account cannot be
+                # enumerated here — member accounts are created continuously by
+                # the vesting pipeline and a fixed list would mean every new
+                # tenant is uncontainable until somebody remembers to redeploy
+                # this stack.
+                #
+                # What narrows it is the far side: each PlatformSecurityResponder
+                # trusts THIS role by full ARN and nothing else, so this grant
+                # can only reach roles that have already chosen to accept it.
+                Action: 'sts:AssumeRole'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${ResponderRoleName}'
+              - Sid: AppendOnlyIncidentRecord
+                Effect: Allow
+                Action: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:Query']
+                Resource: !GetAtt IncidentTable.Arn
+              - Sid: PublishTheSummaryToTheOneRoutingLayer
+                Effect: Allow
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  ContainmentLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-containment
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ContainmentFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ContainmentLogGroup
+    Properties:
+      FunctionName: platform-containment
+      Runtime: python3.12
+      Handler: contain.handler
+      Role: !GetAtt ContainmentRole.Arn
+      # Snapshot creation returns as soon as the snapshots are REQUESTED, so no
+      # stage here waits on data movement. Five minutes is generous for the
+      # slowest stage, which is preserve describing a large instance.
+      Timeout: 300
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      # No ReservedConcurrentExecutions. The Audit account's total concurrency
+      # is 10 and reserving any amount is refused outright — B-040, which also
+      # carries the quota increase. Worth noting the consequence HERE
+      # specifically: a broad compromise declaring many incidents at once is
+      # exactly when this must not throttle.
+      Environment:
+        Variables:
+          INCIDENT_TABLE: !Ref IncidentTable
+          RESPONDER_ROLE_NAME: !Ref ResponderRoleName
+          RESPONDER_EXTERNAL_ID: !Ref ResponderExternalId
+          EXERCISE_ACCOUNT_ID: !Ref ExerciseAccountId
+          ALERT_BUS_NAME: !Ref AlertBusName
+
+  # -------------------------------------------------------------------------
+  # The sequence
+  # -------------------------------------------------------------------------
+  ContainmentStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformContainmentStateMachine
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeStages
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'lambda:InvokeFunction'
+                Resource: !GetAtt ContainmentFunction.Arn
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogDelivery'
+                  - 'logs:GetLogDelivery'
+                  - 'logs:UpdateLogDelivery'
+                  - 'logs:DeleteLogDelivery'
+                  - 'logs:ListLogDeliveries'
+                  - 'logs:PutResourcePolicy'
+                  - 'logs:DescribeResourcePolicies'
+                  - 'logs:DescribeLogGroups'
+                Resource: '*'
+
+  ContainmentStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/vendedlogs/states/platform-containment
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ContainmentStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: platform-containment
+      RoleArn: !GetAtt ContainmentStateMachineRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        # The execution data is the incident: instance ids, principal ARNs,
+        # finding text. It is already written to the append-only table with a
+        # seven-year retention and a KMS key; duplicating it into the state
+        # machine log doubles the places it has to be protected for no gain.
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt ContainmentStateMachineLogGroup.Arn
+      DefinitionSubstitutions:
+        ContainArn: !GetAtt ContainmentFunction.Arn
+      # The sequence design 07 calls non-negotiable, written out so an auditor
+      # and whoever is on call at 3am read the same thing.
+      #
+      # PRESERVE RUNS BEFORE THE CONTAIN DECISION IS ACTED ON. That ordering is
+      # the whole point: "Stage 1 — Gather (always runs, always safe)", and
+      # "nothing destructive happens before preservation completes". A
+      # medium-confidence finding in production is preserved and then left
+      # alone, so that when a human decides twenty minutes later to contain it,
+      # the evidence from twenty minutes ago still exists.
+      DefinitionString: |
+        {
+          "Comment": "Prompt 7.1. Preserve, then isolate, then revoke, then blast radius. Mode parameter per P4: incident and exercise differ only in target.",
+          "StartAt": "Initialise",
+          "States": {
+
+            "Initialise": {
+              "Type": "Pass",
+              "Comment": "Seeds every field Finalise reads. Step Functions FAILS a state whose Parameters reference a JSONPath that is not present, and most of these exist only on some paths: the gather-and-page route never isolates or revokes, and $.error exists only when a Catch fired. Without this, the happy path and the gather path both died at the last step, after containment had already acted -- the one place a failure destroys the record of what was done. Found by deploying.",
+              "Parameters": {
+                "mode.$": "$.mode",
+                "incident.$": "$.incident",
+                "triage": null,
+                "preserve": null,
+                "isolate": null,
+                "revoke": null,
+                "blast_radius": null,
+                "error": null
+              },
+              "Next": "Triage"
+            },
+
+            "Triage": {
+              "Type": "Task",
+              "Comment": "design 07's confidence-by-environment table. Decides CONTAIN or GATHER_AND_PAGE before anything touches the account, and records why.",
+              "Resource": "${ContainArn}",
+              "Parameters": {
+                "step": "triage",
+                "started_at.$": "$$.Execution.StartTime",
+                "mode.$": "$.mode",
+                "incident.$": "$.incident"
+              },
+              "ResultPath": "$.triage",
+              "Retry": [
+                { "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Finalise" }
+              ],
+              "Next": "Preserve"
+            },
+
+            "Preserve": {
+              "Type": "Task",
+              "Comment": "Stage 1. ALWAYS runs, for every declared incident, including the ones that will not be contained. Evidence is perishable and the decision to contain may be a human's, taken later.",
+              "Resource": "${ContainArn}",
+              "Parameters": {
+                "step": "preserve",
+                "started_at.$": "$$.Execution.StartTime",
+                "mode.$": "$.mode",
+                "incident.$": "$.incident",
+                "triage.$": "$.triage"
+              },
+              "ResultPath": "$.preserve",
+              "Retry": [
+                { "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Finalise" }
+              ],
+              "Next": "ShouldContain"
+            },
+
+            "ShouldContain": {
+              "Type": "Choice",
+              "Comment": "Not a mode branch. This is design 07's confidence table: production plus a medium-confidence finding gathers and pages, because isolating a healthy production service on a false positive is its own incident.",
+              "Choices": [
+                { "Variable": "$.triage.decision", "StringEquals": "contain", "Next": "Isolate" }
+              ],
+              "Default": "Finalise"
+            },
+
+            "Isolate": {
+              "Type": "Task",
+              "Comment": "Stage 2. Applies the pre-staged isolation group to every interface. The instance STAYS RUNNING; only reachability changes.",
+              "Resource": "${ContainArn}",
+              "Parameters": {
+                "step": "isolate",
+                "started_at.$": "$$.Execution.StartTime",
+                "mode.$": "$.mode",
+                "incident.$": "$.incident",
+                "triage.$": "$.triage"
+              },
+              "ResultPath": "$.isolate",
+              "Retry": [
+                { "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Finalise" }
+              ],
+              "Next": "Revoke"
+            },
+
+            "Revoke": {
+              "Type": "Task",
+              "Comment": "Stage 3. Deny-all inline policy on the principal. It is NOT deleted: deletion loses the audit trail and breaks attribution.",
+              "Resource": "${ContainArn}",
+              "Parameters": {
+                "step": "revoke",
+                "started_at.$": "$$.Execution.StartTime",
+                "mode.$": "$.mode",
+                "incident.$": "$.incident",
+                "triage.$": "$.triage"
+              },
+              "ResultPath": "$.revoke",
+              "Retry": [
+                { "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Finalise" }
+              ],
+              "Next": "BlastRadius"
+            },
+
+            "BlastRadius": {
+              "Type": "Task",
+              "Comment": "Stage 4. Session revocation by token issue time -- required, not optional. Disabling a principal does not invalidate sessions already issued, and this is the step most often missed.",
+              "Resource": "${ContainArn}",
+              "Parameters": {
+                "step": "blast_radius",
+                "started_at.$": "$$.Execution.StartTime",
+                "mode.$": "$.mode",
+                "incident.$": "$.incident",
+                "triage.$": "$.triage"
+              },
+              "ResultPath": "$.blast_radius",
+              "Retry": [
+                { "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Finalise" }
+              ],
+              "Next": "Finalise"
+            },
+
+            "Finalise": {
+              "Type": "Task",
+              "Comment": "What was done, what was deliberately NOT done, and how long it took from discovery_time. Every path arrives here, including every Catch -- P5: automation that cannot complete an action produces an exception record, never silence.",
+              "Resource": "${ContainArn}",
+              "Parameters": {
+                "step": "finalise",
+                "started_at.$": "$$.Execution.StartTime",
+                "mode.$": "$.mode",
+                "incident.$": "$.incident",
+                "triage.$": "$.triage",
+                "preserve.$": "$.preserve",
+                "isolate.$": "$.isolate",
+                "revoke.$": "$.revoke",
+                "blast_radius.$": "$.blast_radius",
+                "error.$": "$.error"
+              },
+              "ResultPath": "$.summary",
+              "Retry": [
+                { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.finaliseError", "Next": "RecordingFailed" }
+              ],
+              "Next": "Done"
+            },
+
+            "RecordingFailed": {
+              "Type": "Fail",
+              "Comment": "Containment may have acted and failed to write down that it did. That is the one outcome nothing downstream can see, so the execution is marked failed to make it visible in the console next to the incident.",
+              "Error": "ContainmentRecordingFailed",
+              "Cause": "The containment engine could not write its own summary. Check the incident table and the isolation state of the named resource by hand."
+            },
+
+            "Done": { "Type": "Succeed" }
+          }
+        }
+
+  # -------------------------------------------------------------------------
+  # Watching the watcher
+  # -------------------------------------------------------------------------
+  # These publish to SNS directly rather than through the router. A containment
+  # engine that is broken cannot credibly report that it is broken through the
+  # layer it publishes into -- the same fallback reasoning that kept the
+  # CloudWatch subscription in alerting/10-alert-topic.yaml.
+  ContainmentFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerting
+    Properties:
+      AlarmName: platform-containment-execution-failed
+      AlarmDescription: >-
+        A containment execution failed. A security incident was declared and
+        the automation did not complete the sequence — check the incident table
+        for what stage it reached and what state the named resource is in.
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref ContainmentStateMachine
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+  DeclarationDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlerting
+    Properties:
+      AlarmName: platform-declaration-dlq-not-empty
+      AlarmDescription: >-
+        A finding that should have been considered for declaration never
+        reached the declaration function. Silence here looks exactly like a
+        quiet week.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt DeclarationDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+Outputs:
+  ContainmentRoleArn:
+    Description: >-
+      Pass to containment/00-responder-role.yaml as ContainmentRoleArn. The
+      member-side role trusts this ARN and nothing else.
+    Value: !GetAtt ContainmentRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ContainmentRoleArn'
+  StateMachineArn:
+    Value: !Ref ContainmentStateMachine
+  IncidentTableName:
+    Value: !Ref IncidentTable
+  ExerciseConfigured:
+    Description: >-
+      "none" until prompt 7.4. Exercise mode refuses to run while unset.
+    Value: !Ref ExerciseAccountId
