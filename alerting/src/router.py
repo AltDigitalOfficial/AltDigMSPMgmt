@@ -460,7 +460,26 @@ def decide(norm):
         # The response engine only emits a dossier when it has decided a human
         # is needed, so the routing class is not in question — what varies is
         # urgency, and that is the tier's business below.
-        tier = norm.get("environment_tier") or "prod"
+        # LOOK THE TIER UP before falling back to prod.
+        #
+        # This defaulted straight to "prod" when a dossier carried no tier of
+        # its own, and the consequence arrived the first time an emitter other
+        # than the response engine sent one: a change-reconciliation finding
+        # about a DEV sandbox deployment raised a real PagerDuty incident,
+        # because the dossier had an account_id and no environment_tier.
+        #
+        # The response engine always sets the tier, so the gap was invisible
+        # for two phases. Every later emitter has to remember to, and
+        # "remember to" is what the shared account-tier map exists to remove --
+        # the finding path below has looked the tier up all along.
+        #
+        # account_tier() still answers "prod" for an account genuinely absent
+        # from the map, which pages, and that remains the right way to fail.
+        tier = norm.get("environment_tier")
+        if not tier:
+            tier, note = account_tier(norm.get("account_id"))
+            if note:
+                norm["tier_note"] = note
         default = "pagerduty" if tier in ("uat", "prod") else "digest_and_jira"
 
         # An emitter may DOWNGRADE its own dossier, and may never escalate one.

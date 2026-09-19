@@ -54,9 +54,15 @@ MSYS_NO_PATHCONV=1 aws lambda invoke \
   "$(win_path "${OUT}")" --query '[StatusCode,FunctionError]' --output text \
   | no_cr
 
+# The check reports what the DEPLOYED FUNCTION is configured with, which is the
+# right thing to test and a confusing thing to read. Editing config/platform.env
+# does not reach a running Lambda -- the project key is a stack parameter baked
+# into its environment -- so the two drift the moment somebody changes the file
+# and has not redeployed yet. That happened within an hour of this script
+# existing. The comparison below is what stops it happening twice.
 PY="$(command -v python || command -v python3)"
-"${PY}" - "$(win_path "${OUT}")" <<'REPORTEOF'
-import json, sys
+LOCAL_SITE="${PLATFORM_JIRA_SITE:-}" LOCAL_PROJECT="${PLATFORM_JIRA_DEFAULT_CHANGE_PROJECT:-}" LOCAL_ISSUETYPE="${PLATFORM_JIRA_CHANGE_ISSUETYPE:-}" "${PY}" - "$(win_path "${OUT}")" <<'REPORTEOF'
+import json, os, sys
 
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 if d.get("errorMessage"):
@@ -96,7 +102,11 @@ if d.get("suggested_issue_type"):
               f" is backed by issue type '{c['backed_by_issue_type']}'")
     print("")
     print("  Set in config/platform.env:")
-    print(f"    PLATFORM_JIRA_CHANGE_ISSUETYPE={d['suggested_issue_type']}")
+    # QUOTED. JSM issue type names contain spaces and brackets, and
+    # config/platform.env is sourced by every script in scripts/ -- an
+    # unquoted value would set the variable to "[System]" and then try to
+    # execute "Change".
+    print(f'    PLATFORM_JIRA_CHANGE_ISSUETYPE="{d["suggested_issue_type"]}"')
 if d.get("request_type_error"):
     print("")
     print("  REQUEST TYPE LOOKUP FAILED: " + d["request_type_error"][:300])
@@ -106,6 +116,37 @@ if d.get("warning"):
 if d.get("project_error"):
     print("")
     print("  PROJECT ERROR: " + d["project_error"])
+# Deployed configuration vs config/platform.env.
+drift = []
+for label, local, deployed in (
+        ("site", (os.environ.get("LOCAL_SITE") or "").rstrip("/"),
+         (detail.get("site") or "")),
+        ("change project", os.environ.get("LOCAL_PROJECT") or "",
+         d.get("default_change_project") or ""),
+        ("issue type", os.environ.get("LOCAL_ISSUETYPE") or "",
+         d.get("expected_issue_type") or "")):
+    if local and local != deployed:
+        drift.append((label, local, deployed))
+
+if drift:
+    print("")
+    print("  CONFIG DRIFT -- the deployed function does not match "
+          "config/platform.env:")
+    for label, local, deployed in drift:
+        print(f"    {label:<15} file: {local!r}   deployed: {deployed!r}")
+    print("")
+    print("  Everything above describes the DEPLOYED value. Editing")
+    print("  config/platform.env does not reach a running Lambda; the values")
+    print("  are stack parameters. Redeploy to apply them:")
+    print("")
+    print("    source config/platform.env && scripts/deploy-to-account.sh \\")
+    print("      --account altdig-security-audit \\")
+    print("      --template change/10-reconciliation.yaml --stack platform-change \\")
+    print("      ArtifactBucket=<bucket> ArtifactKey=<key> \\")
+    print("      \"JiraSite=${PLATFORM_JIRA_SITE}\" \\")
+    print("      \"JiraDefaultChangeProject=${PLATFORM_JIRA_DEFAULT_CHANGE_PROJECT}\" \\")
+    print("      \"JiraChangeIssueType=${PLATFORM_JIRA_CHANGE_ISSUETYPE}\"")
+
 print("")
-sys.exit(0 if ok else 1)
+sys.exit(0 if ok and not drift else 1)
 REPORTEOF

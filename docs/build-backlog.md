@@ -2466,3 +2466,50 @@ approved — becomes a fallback for non-JSM projects rather than the main path.
 change project), then set `PLATFORM_JIRA_CHANGE_ISSUETYPE` to whatever the
 request type is actually called. Jamie is implementing the scheme in a separate
 session; this is the input for it.
+
+---
+
+## B-073 · A dev sandbox finding raised a real PagerDuty incident
+
+**Fixed** — 2026-09-19, found on the first successful end-to-end reconciliation.
+
+The first real change-reconciliation finding — a deployment in the DEV sandbox
+with no change record — routed to PagerDuty and raised an incident:
+
+    routed : platform-change-no-change-record -> pagerduty
+    why    : platform.change escalation, tier prod
+    sent   : {"pagerduty": {"status": 202, ...}, "jira": {"sent": true}}
+
+Account 754280127660 is `dev` in `/platform/routing/account-tiers`. The router
+had it available and did not look.
+
+**The cause.** `decide()`'s dossier branch read the tier off the dossier and
+fell back to `"prod"` when absent:
+
+    tier = norm.get("environment_tier") or "prod"
+
+The response engine has always set `environment_tier`, so for two phases the
+fallback was never exercised. The restore workflow set it too. Change
+reconciliation does not — it knows the account but not the tier — and the
+moment a third emitter appeared, the default fired.
+
+**The fix is the one the code already used elsewhere.** The FINDING path in the
+same function has always called `account_tier()` to resolve an account to a
+tier from the shared map. The dossier path now does the same, falling back to
+`prod` only for an account genuinely absent from the map — which still pages,
+and is still the right way to fail.
+
+**Why this is B-041's family.** Not identical: B-041 was a five-valued decision
+reduced to a boolean. This is a tier lookup replaced by an optimistic default.
+Both share the shape that matters — a routing decision made from an assumption
+rather than from the map that exists to answer it, failing silently in the
+direction of waking somebody.
+
+**The general rule, now applied in both places:** if the platform has a map
+that answers a question, no code path may answer it by assumption. The map's
+own fallback is the only permitted default, because it is the one that
+announces itself in the routing record.
+
+**Note for the operator** — a real PagerDuty incident was raised by this and
+carries dedup key `b87cad4b1cfa3716d69e8d97792f4869`. It is a true finding
+about a genuine unapproved deployment, just at the wrong urgency.
