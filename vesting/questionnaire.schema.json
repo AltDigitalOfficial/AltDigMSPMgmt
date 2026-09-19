@@ -175,6 +175,7 @@
       "properties": {
         "cicd_tooling":         { "type": "string", "minLength": 1, "description": "8.1 — OIDC federation for the AppDeployer role." },
         "deployment_frequency": { "enum": ["multiple-daily", "daily", "weekly", "monthly", "rarely"], "description": "8.2 — reconciliation tuning." },
+        "jira_change_project": { "type": ["string", "null"], "description": "8.2 — Jira project key holding THIS tenant's change records. Per tenant, not global: design 08 routes an unapproved deployment to the tenant's change approver (1.7), and tenants must not see each other's change records. Null means the tenant keeps change records outside AltDigital's Jira, which design 08 explicitly allows — reconciliation then reports the change source as UNAVAILABLE rather than reporting every deployment as unapproved." },
         "customer_escalation_contacts": { "type": "array", "items": { "$ref": "#/$defs/contact" }, "description": "8.4 — customer-side PagerDuty escalation." }
       }
     },
