@@ -20,14 +20,29 @@
 # ---------------------------------------------------------------------------
 # What this credential can do, which is a lot
 # ---------------------------------------------------------------------------
-# The reconciliation engine (8.2) only READS issues. The quorum pipeline (8.3)
-# reads issues and their changelogs to verify approvals. Neither needs write
-# access, and the service account should be scoped accordingly in Jira.
+# This credential both reads and WRITES, and the write half is not optional.
 #
-# Scope it read-only if the Jira role model allows it. The failure this guards
-# against is not the platform misusing the token — it is that a credential able
-# to edit issues could be used to manufacture the approval it then verifies,
-# which would make the whole quorum control circular.
+#   reconciliation (8.2)   reads issues
+#   quorum (8.3)           reads issues, changelogs and approvals
+#   the filer (8.2)        raises change requests and edits them
+#
+# An earlier version of this header said to scope the account read-only. That
+# was true when only reconciliation used it and is now wrong: the filer raises
+# a JSM request and then edits it, because Labels and Approver groups are not
+# on the request type's form and both are load-bearing. In JSM terms that means
+# AGENT access to the change project, not customer access - a customer can
+# raise a request and cannot edit one.
+#
+# So the circularity the old text worried about cannot be handled by scoping.
+# It is handled in code and in Jira instead:
+#
+#   code   jira.py has no write method and publish-change.sh refuses to
+#          package it if one appears. filer.py may write but may not call an
+#          approval or transition endpoint.
+#   Jira   this account MUST NOT be a member of any approver group. A
+#          credential that can edit issues and also approve them can
+#          manufacture the approval the quorum pipeline then verifies, and the
+#          control is circular however the code is arranged.
 #
 # ---------------------------------------------------------------------------
 # Never on a command line
