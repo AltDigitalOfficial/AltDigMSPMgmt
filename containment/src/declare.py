@@ -264,7 +264,46 @@ _CLOUDTRAIL_TRIGGERS = {
     "DeleteBackupVaultLockConfiguration": "vault-lock-modification-attempt",
     "DeleteBackupVault": "vault-deletion-attempt",
     "DeleteRecoveryPoint": "recovery-point-deletion-attempt",
+    # design 03's quorum list names four actions. These three were missing,
+    # so two of the four were not being declared at all: removal of a member
+    # account from the Organization, and disabling the Config recorder.
+    #
+    # The list was built from design 07's prose ("key deletion, CloudTrail
+    # disable, or vault lock modification"), which is a summary rather than the
+    # enumeration. design 03 has the enumeration. B-083.
+    "RemoveAccountFromOrganization": "account-removal-attempt",
+    "StopConfigurationRecorder": "config-recorder-disable-attempt",
+    "DeleteConfigurationRecorder": "config-recorder-disable-attempt",
 }
+
+# The quorum pipeline's role. An action performed through it is still declared
+# -- design 03 is explicit that ANY attempt pages, approved or not, because
+# these are rare enough that a human should hear about every one. But the page
+# should say so.
+QUORUM_EXECUTOR_ROLE = os.environ.get("QUORUM_EXECUTOR_ROLE",
+                                      "PlatformQuorumExecutor")
+
+
+def _quorum_authorisation(principal_arn):
+    """The change record this action was performed under, if any.
+
+    execute.py sets the assumed-role session name to `quorum-<issue-key>`, and
+    the executor role's trust policy requires that shape, so CloudTrail carries
+    the authorising record on the principal ARN:
+
+        arn:aws:sts::...:assumed-role/PlatformQuorumExecutor/quorum-AMI-9
+
+    Used to LABEL the declaration, never to suppress it. The difference matters
+    at 3am: "ScheduleKeyDeletion by an unrecognised principal" and
+    "ScheduleKeyDeletion under approved change AMI-9" warrant very different
+    first moves, and without this every approved deletion reads as the first
+    one.
+    """
+    arn = principal_arn or ""
+    if f":assumed-role/{QUORUM_EXECUTOR_ROLE}/" not in arn:
+        return None
+    session = arn.rsplit("/", 1)[-1]
+    return session[len("quorum-"):] if session.startswith("quorum-") else None
 
 
 def _from_cloudtrail(event):
@@ -280,12 +319,26 @@ def _from_cloudtrail(event):
     # anyway, because design 07 says "any attempt", but the responder role
     # cannot revoke a Platform* principal, so this can only ever produce a
     # record and a page for those.
+    #
+    # The quorum pipeline is the one case where the platform is SUPPOSED to be
+    # doing this, and the record says which change authorised it. Still
+    # declared -- design 03 wants the page -- but the page leads with the
+    # authorisation instead of making somebody go and find it.
+    authorised_by = _quorum_authorisation(principal)
+    if authorised_by:
+        title = (f"{name} performed by the quorum pipeline under approved "
+                 f"change {authorised_by}")
+    else:
+        title = (f"{name} attempted by "
+                 f"{identity.get('arn') or identity.get('type')}")
     return {
         "trigger": trigger,
-        "title": f"{name} attempted by {identity.get('arn') or identity.get('type')}",
+        "title": title,
+        "quorum_authorised_by": authorised_by,
         "description": json.dumps({
             "errorCode": d.get("errorCode"),
             "requestParameters": d.get("requestParameters"),
+            "quorum_change_record": authorised_by,
         }, default=str)[:2000],
         "account_id": d.get("recipientAccountId") or event.get("account"),
         "region": d.get("awsRegion") or event.get("region"),

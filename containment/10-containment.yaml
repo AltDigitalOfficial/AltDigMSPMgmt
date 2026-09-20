@@ -340,6 +340,14 @@ Resources:
             - DeleteBackupVaultLockConfiguration
             - DeleteBackupVault
             - DeleteRecoveryPoint
+            # design 03's quorum list has four actions; these complete it.
+            # The original list came from design 07's prose summary, which
+            # names key deletion, CloudTrail disable and vault lock
+            # modification but not account removal or the Config recorder.
+            # Two of the four were going undeclared. B-083.
+            - RemoveAccountFromOrganization
+            - StopConfigurationRecorder
+            - DeleteConfigurationRecorder
       State: ENABLED
       Targets:
         - Id: declare

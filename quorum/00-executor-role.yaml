@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the role the quorum pipeline assumes to perform
+  a two-party-approved action (prompt 8.3). The only permitted path to the
+  actions design 03 denies everywhere else.
+
+# ---------------------------------------------------------------------------
+# This role is the exception to the rule, and that is the point
+# ---------------------------------------------------------------------------
+# CLAUDE.md: "Never write code that terminates, deletes, deregisters, rolls back
+# or purges a resource as part of automated remediation. Security automation
+# isolates and preserves."
+#
+# containment/00-responder-role.yaml honours that by holding NO destructive
+# permission at all. This role is its opposite: it exists precisely to delete a
+# KMS key, delete a backup vault, remove an account from the Organization, or
+# stop a trail.
+#
+# The rule is not being bent. It says "as part of automated remediation" —
+# automation deciding, on its own, to destroy something. Nothing here decides.
+# A person requests the action, two DIFFERENT people approve it, and the
+# pipeline carries out the specific thing they approved. design 03:
+#
+#     These are denied outright in the relevant resource policies and SCPs. The
+#     only execution path is a platform pipeline that verifies two recorded
+#     approvals before assuming a permitted role.
+#
+# The alternative — a human holding standing permission to delete keys — is
+# strictly worse: no verification, no evidence, and a credential that can do it
+# at any time for any reason.
+#
+# ---------------------------------------------------------------------------
+# Why the permission list is NOT the control here, and what is
+# ---------------------------------------------------------------------------
+# For the containment role, the absence of destructive permission is the whole
+# control. That argument is unavailable to this role. Three things replace it:
+#
+# 1. WHO CAN ASSUME IT. Exactly one principal: the quorum state machine's
+#    execution role, named in full. Not an account, not a wildcard, not a path.
+#
+# 2. A SESSION POLICY, PER CALL. The pipeline assumes this role passing an
+#    inline session policy scoped to the ONE resource ARN that was approved.
+#    Effective permission is the intersection, so the credentials handed to
+#    execute.py cannot express a request against any other resource. A bug that
+#    passed the wrong key ARN gets AccessDenied rather than deleting it. This
+#    is the containment role's argument reconstructed at session scope: make
+#    the wrong action inexpressible rather than merely un-attempted.
+#
+# 3. THE SESSION NAME CARRIES THE JIRA KEY. CloudTrail records the assumed-role
+#    session name on every call, so every action taken through this role is
+#    tied in CloudTrail to the change record that authorised it, without
+#    trusting anything the pipeline says about itself. That is what makes the
+#    reverse reconciliation in quorum/src/reverse.py cheap: a ScheduleKeyDeletion
+#    whose session name does not name an approved change is, on its face, a
+#    deletion that did not come through here.
+#
+# The name is load-bearing for the same reason the containment role's is:
+# `DenyPlatformRoleModification` in policies/scp/03-protect-platform-identity.json
+# protects `arn:aws:iam::*:role/Platform*`. Rename this outside that prefix and
+# a member account can delete the role that governs its own key deletions.
+
+Parameters:
+
+  QuorumPipelineRoleArn:
+    Type: String
+    AllowedPattern: '^arn:aws:iam::\d{12}:role/.+$'
+    Description: >-
+      The Audit-account role permitted to assume this one — the quorum state
+      machine's execution role. Exactly one principal, named in full. An
+      account-root principal here would let anything in Audit assume it.
+
+  Scope:
+    Type: String
+    Default: member
+    AllowedValues: [member, management]
+    Description: >-
+      Which set of quorum actions this instance grants.
+
+      design 03 lists four, and they do not all live in the same account.
+      KMS keys, backup vaults, CloudTrail and Config are member-account
+      resources. Removing an account from the Organization is an action ONLY
+      the management account can perform, against the Organization rather than
+      against anything inside the member.
+
+      One template with a scope parameter rather than two near-identical files,
+      so the trust policy, naming and boundary cannot drift apart between them.
+
+Conditions:
+
+  IsMember: !Equals [!Ref Scope, member]
+  IsManagement: !Equals [!Ref Scope, management]
+
+Resources:
+
+  QuorumExecutorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformQuorumExecutor
+      Description: >-
+        Performs a two-party-approved quorum action. Assumable only by the
+        quorum pipeline, and only ever with a session policy narrowing it to
+        the single approved resource.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OnlyTheQuorumPipeline
+            Effect: Allow
+            Principal:
+              AWS: !Ref QuorumPipelineRoleArn
+            Action: sts:AssumeRole
+            Condition:
+              # The session name must name a Jira issue. Two reasons, and the
+              # second is the important one:
+              #
+              #   it forces the caller to declare which change record it is
+              #   acting under, at the moment of assuming the role
+              #
+              #   CloudTrail then carries that declaration on every subsequent
+              #   call, so the evidence is produced by AWS rather than by the
+              #   component being audited
+              #
+              # A pipeline that assumed this role without naming a record would
+              # produce CloudTrail entries indistinguishable from a human with
+              # standing access, which is the thing this whole phase exists to
+              # make impossible.
+              StringLike:
+                sts:RoleSessionName: 'quorum-*'
+      Tags:
+        - Key: platform:component
+          Value: quorum
+        - Key: platform:managed-by
+          Value: altdigital
+        - Key: platform:destructive
+          # Findable. Anything auditing "which roles in this estate can destroy
+          # something" should surface this one immediately rather than having
+          # to read policy documents to discover it.
+          Value: 'true'
+
+  # Attached as separate policy resources rather than inline under the role.
+  #
+  # Inline `Policies` entries wrapped in an !If are opaque to cfn-guard: it
+  # cannot traverse Policies[*].PolicyDocument.Statement[*] through the
+  # intrinsic, and reports the statements as MISSING rather than as compliant.
+  # A policy the guardrail cannot read is a policy the guardrail is not
+  # checking, which on the one role in the estate that can delete a KMS key is
+  # not a trade worth making for tidier YAML.
+  #
+  # Conditions on the RESOURCE achieve the same scoping and stay readable to
+  # both cfn-guard and whoever is reading this at 3am.
+
+  QuorumMemberActionsPolicy:
+    Type: AWS::IAM::Policy
+    Condition: IsMember
+    Properties:
+      PolicyName: QuorumControlledMemberActions
+      Roles:
+        - !Ref QuorumExecutorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+
+          # design 03: kms:ScheduleKeyDeletion.
+          #
+          # Note what is NOT here: kms:DisableKey. Disabling is reversible and
+          # is not quorum-controlled, so it does not belong on the only role
+          # that can delete. Somebody reaching for this role to disable a key
+          # is reaching for the wrong tool.
+          #
+          # Resource is '*' and cannot be otherwise: the key to be deleted is
+          # not known until a request is approved, which is months after this
+          # template is deployed. The narrowing happens per call, in the
+          # session policy the pipeline passes when it assumes this role. See
+          # the header.
+          - Sid: ScheduleKeyDeletion
+            Effect: Allow
+            Action:
+              - kms:ScheduleKeyDeletion
+              - kms:DescribeKey
+            Resource: '*'
+
+          # design 03: backup vault deletion or vault lock modification.
+          #
+          # Vault lock in COMPLIANCE mode cannot be removed by anybody,
+          # including the account root and including this role, once its
+          # cooling-off period has elapsed. That is the feature working, not a
+          # gap. This grant covers governance-mode locks and the cooling-off
+          # window; a compliance lock past its window fails here, correctly.
+          - Sid: BackupVaultAndLock
+            Effect: Allow
+            Action:
+              - backup:DeleteBackupVault
+              - backup:PutBackupVaultLockConfiguration
+              - backup:DeleteBackupVaultLockConfiguration
+              - backup:DescribeBackupVault
+            Resource: '*'
+
+          # design 03: disabling CloudTrail or the Config recorder.
+          - Sid: DisableAuditSources
+            Effect: Allow
+            Action:
+              - cloudtrail:StopLogging
+              - cloudtrail:DeleteTrail
+              - cloudtrail:DescribeTrails
+              - config:StopConfigurationRecorder
+              - config:DeleteConfigurationRecorder
+              - config:DescribeConfigurationRecorders
+            Resource: '*'
+
+  QuorumOrganizationActionsPolicy:
+    Type: AWS::IAM::Policy
+    Condition: IsManagement
+    Properties:
+      PolicyName: QuorumControlledOrganizationActions
+      Roles:
+        - !Ref QuorumExecutorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # design 03: removal of a member account from the Organization.
+          #
+          # Only the management account can do this, which is why this scope
+          # exists at all. Removing an account does not delete it -- it becomes
+          # standalone -- but it leaves the Organization's SCPs, consolidated
+          # billing and every guardrail this platform applies. Reversible in
+          # principle; in practice a removed account needs its own payment
+          # method before it can be re-invited.
+          - Sid: RemoveAccountFromOrganization
+            Effect: Allow
+            Action:
+              - organizations:RemoveAccountFromOrganization
+              - organizations:DescribeAccount
+            Resource: '*'
+
+Outputs:
+
+  QuorumExecutorRoleArn:
+    Description: The role the quorum pipeline assumes to perform an approved action.
+    Value: !GetAtt QuorumExecutorRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-QuorumExecutorRoleArn'
+
+  Scope:
+    Description: Which quorum actions this instance grants.
+    Value: !Ref Scope

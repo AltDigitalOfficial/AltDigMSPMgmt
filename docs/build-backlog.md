@@ -2940,3 +2940,81 @@ looking for.
 
 The evidence string itself was kept, under `approval_evidence`, because which
 source answered is genuinely useful to whoever assesses the finding.
+
+## B-083 · Two of design 03's four quorum actions were never declared
+
+**Fixed** — 2026-09-19, found while checking 8.3 would not build a second
+alarm path.
+
+design 07 says any attempt against a quorum-controlled action pages
+immediately. `containment/10-containment.yaml` and `declare.py` implement that,
+and the list of event names they watch was built from design 07's prose:
+
+    Any ScheduleKeyDeletion, CloudTrail disable, or vault lock modification
+    attempt.
+
+That is a summary. The enumeration is in design 03, and it has **four** items:
+
+| design 03 action | was declared |
+|---|---|
+| `kms:ScheduleKeyDeletion` | yes |
+| Backup vault deletion or lock modification | yes |
+| Disabling CloudTrail **or the Config recorder** | CloudTrail only |
+| **Removal of a member account from the Organization** | no |
+
+So removing an account from the Organization — which strips it of every SCP,
+every guardrail and the whole platform baseline in one call — produced no
+declaration and no page. Neither did stopping the Config recorder, which
+silently ends configuration history for an account.
+
+**The mechanism of the error is worth more than the fix.** Two documents
+describe the same control at different resolutions, prose and enumeration, and
+the implementation was written against the prose. Nothing was wrong in either
+document. Where a design summarises elsewhere, the enumeration is the source
+and the summary is a reminder that one exists.
+
+Fixed by adding `RemoveAccountFromOrganization`, `StopConfigurationRecorder`
+and `DeleteConfigurationRecorder` to both the EventBridge rule and the trigger
+map, and by testing all four of design 03's actions by name rather than
+testing that "the list works".
+
+## B-084 · Every approved key deletion would have paged as an unexplained one
+
+**Fixed** — 2026-09-19, found in the same read, before it could fire.
+
+`_from_cloudtrail` declares a security incident for any quorum action and
+titles it `<Action> attempted by <principal>`. With 8.3 built, the quorum
+pipeline becomes a legitimate performer of exactly those actions — so the first
+approved key deletion would have paged somebody at 3am with a title
+indistinguishable from an attacker deleting a key.
+
+**Not fixed by suppressing it.** design 03 is explicit:
+
+    Any attempt against these actions — successful or denied — pages
+    immediately.
+
+An approved deletion is still a deletion, and these are rare enough that a
+human should hear about every one. Suppressing the page for actions the
+platform itself performed would also mean a compromised pipeline pages for
+nothing, which is precisely backwards.
+
+Fixed by making the page *legible*. execute.py sets the assumed-role session
+name to `quorum-<issue-key>`, the executor role's trust policy requires that
+shape, and CloudTrail therefore carries the authorising change record on the
+principal ARN. The declaration reads it back:
+
+    ScheduleKeyDeletion performed by the quorum pipeline under approved
+    change AMI-9
+
+versus, for anything else:
+
+    ScheduleKeyDeletion attempted by arn:aws:sts::...:assumed-role/...
+
+Same page, same urgency, different first move for whoever answers it. The
+evidence comes from AWS rather than from the pipeline describing its own
+behaviour, which is the only reason it is worth anything — a compromised
+pipeline would describe itself favourably.
+
+A session name that does not match `quorum-*` is NOT treated as authorised even
+when the role name matches, because the trust policy forbids that combination
+and seeing it would mean the trust policy had been changed.
