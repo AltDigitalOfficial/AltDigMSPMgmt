@@ -34,9 +34,19 @@ for f in "${FILES[@]}"; do
 
   # Policy type is derived from the directory, so a policy cannot be validated
   # against the wrong type by accident.
+  #
+  # `*policies/` and not `*/policies/`. The pre-commit hook passes REPO-RELATIVE
+  # paths -- `policies/scp/04-require-tags.json` -- and the leading `*/` form
+  # requires a path segment before `policies`, so every staged policy fell
+  # through to the skip branch. The hook then printed "all policy documents
+  # valid" having validated none of them.
+  #
+  # A validator that reports success while checking nothing is the same shape
+  # as B-086 and B-089, and it was found the same way: by noticing that a
+  # newly added file produced a warning nobody had seen before.
   case "${f}" in
-    */policies/scp/*) ptype=SERVICE_CONTROL_POLICY ;;
-    */policies/rcp/*) ptype=RESOURCE_CONTROL_POLICY ;;
+    *policies/scp/*) ptype=SERVICE_CONTROL_POLICY ;;
+    *policies/rcp/*) ptype=RESOURCE_CONTROL_POLICY ;;
     *) warn "${name}: cannot infer policy type from path — skipped"; continue ;;
   esac
 

@@ -3357,3 +3357,55 @@ store design 04 wants auditors reading.
 **Trigger:** before the guardrail harness runs on any schedule, or before a
 tenant account is vested — whichever first. A harness run by hand occasionally
 is tolerable; one running nightly would bury real incidents under its own.
+
+## B-092 · The pre-commit policy validator validated nothing and said all was well
+
+**Fixed** — 2026-09-20, found in the output of an unrelated commit.
+
+`scripts/validate-policies.sh` derives a policy's type from its directory:
+
+```bash
+case "${f}" in
+  */policies/scp/*) ptype=SERVICE_CONTROL_POLICY ;;
+```
+
+Run with no arguments it globs absolute paths and works. The **pre-commit hook**
+passes staged files, which are repo-relative — `policies/scp/04-require-tags.json`
+— and `*/policies/` requires a path segment before `policies`. Every staged
+policy fell through to the skip branch:
+
+```
+warn  04-require-tags.json: cannot infer policy type from path — skipped
+  ok  all policy documents valid
+```
+
+Both lines are from the same run. The hook validated nothing and reported
+success.
+
+**How long it had been wrong is unknowable and probably always.** Policies
+00–03 were committed before the hook existed or in commits that also ran the
+full sweep, so nothing ever surfaced it. It took adding the first new policy in
+months for the warning to appear next to a file somebody was looking at.
+
+**The failure mode is the session's recurring one**, now in a fourth place:
+
+| | reported | actually did |
+|---|---|---|
+| B-086 | clean estate | swept zero accounts |
+| B-089 | pipeline healthy | collected zero events |
+| B-091 | policy 04 over-broad | subject was contained |
+| B-092 | all policies valid | validated zero policies |
+
+Every one of them is a component that cannot distinguish "checked and fine"
+from "did not check". The pattern is now frequent enough to be worth stating as
+a rule rather than a list of incidents:
+
+> **A check that can pass without doing anything must report what it examined,
+> not only what it concluded.**
+
+`validate-policies.sh` already prints a line per file, which is why this was
+findable at all — the absence of `04` from a list of `ok` lines was visible.
+The scripts that failed silently were the ones reporting only a verdict.
+
+Fixed with `*policies/scp/*`. The skip branch stays: a genuinely unknown path
+should still be refused rather than guessed at.
