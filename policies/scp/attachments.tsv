@@ -27,3 +27,10 @@
 01-protect-detective-controls.json	sandbox,members,security,infra
 02-protect-data-protection.json	sandbox,members,security,infra
 03-protect-platform-identity.json	sandbox,members,security,infra
+
+# 04 is sandbox-only until a tenant exists to negotiate it with. It is the
+# only policy in this set that denies ordinary CREATION rather than
+# tampering with a control, so it is the only one that can stop a
+# developer working. Widening it to members is a conversation, not a
+# deployment.
+04-require-tags.json	sandbox

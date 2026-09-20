@@ -243,3 +243,100 @@ Phase 9.2 cost allocation, and any Resource Control Policy — the type is enabl
    pipeline runs
 4. Remember SCPs never apply to the management account. It is not protected by
    any of this, and cannot be
+
+
+---
+
+## 04 — Required tags, and why there are only four
+
+Prompt 9.2 and design 10's "Tagging standard". Added 2026-09-20.
+
+design 10 is unusually blunt about this one:
+
+> AWS permits 50 tags per resource. **Comprehensive tagging is a trap** — tags
+> are applied by whoever creates the resource, and dev teams will not maintain
+> twenty of them. They will type garbage to satisfy the check.
+>
+> [...] Enforced by SCP denying resource creation without them. **Beyond four,
+> quality collapses.**
+
+So this policy enforces three tags and validates a fourth value set. That is
+the entire scheme, and the restraint is the design rather than an unfinished
+first pass.
+
+| Tag | Enforced | Why |
+|---|---|---|
+| `Owner` | required | Who to ask. The only question an on-call engineer has at 3am. |
+| `Application` | required | The one grouping the account boundary does not already give |
+| `DataClassification` | required, **and constrained** to public / internal / confidential / regulated | Drives handling. A free-text value here is worse than no value, because it looks like an answer |
+| `CostCenter` | **not enforced** | design 10 marks it *optional, where the tenant requires internal chargeback*. Enforcing an optional tag is how a scheme grows to twenty |
+
+### What is NOT enforced, and why that is the point
+
+Tenant, environment, service model, compliance scope, retention tier, egress
+profile and region are all absent — deliberately. design 10:
+
+> These are properties of the *account*. They live in **Cost Categories** and
+> the platform account registry, derived automatically. **This is what keeps
+> the enforced set small enough to hold.**
+
+Every one of those is answered by `scripts/sync-cost-categories.sh` without a
+resource tag existing. Adding any of them here would make the platform ask a
+developer for a fact it already knows, and get a worse answer than the one it
+has.
+
+### `DataClassificationMustBeOneOfFour`
+
+The value check uses `StringNotEqualsIfExists`, not `StringNotEquals`. With the
+plain form, a request carrying no `DataClassification` at all would fail this
+statement as well as the required-tag one — two denials for one mistake, and
+the error the caller sees is whichever AWS reports first. `IfExists` means this
+statement only judges a value that was actually supplied, so "you forgot the
+tag" and "that is not a valid classification" stay distinguishable.
+
+### `ProtectPlatformManagedTags`
+
+design 10's third category — `platform-managed`, `AlarmTier`, `BackupPolicy`,
+`PatchGroup`, `BaselineVersion`, `InstrumentedAt` — applied by automation and
+never by humans. Denied to member principals for the same reason the detective
+controls are: a tenant who can edit `BackupPolicy` can quietly opt out of
+backup, and the platform would keep reporting the account as covered.
+
+### Attached to sandbox only
+
+This is the only policy in this set that denies ordinary resource **creation**
+rather than tampering with a control. Every other one here can be attached
+broadly because a well-behaved account never notices it; this one is felt by
+every developer on every `RunInstances`.
+
+Widening it to `members` is a conversation with a tenant about their pipeline,
+not a deployment. Until then it is proven in the sandbox, where the only person
+it can inconvenience is us.
+
+### It is minified, and that is not laziness
+
+AWS caps an SCP at **5120 bytes**, and the first version of this one was 6113.
+The bulk was repetition: the same principal-exclusion list written out in all
+five statements.
+
+Two compressions, both of which change behaviour slightly and are worth knowing
+about:
+
+**`arn:aws:*:*:*:*role/Platform*` replaces two entries.** The `*role/` matches
+both `iam ... role/Platform*` and `sts ... assumed-role/Platform*/session`,
+halving a list that appears five times. Still not lax — the resource segment
+must contain the literal `role/Platform`, so a role named `NotAPlatformThing`
+does not match.
+
+**The action list came down from thirteen to nine.** elasticache, opensearch,
+SQS and SNS were dropped. They are cheap, they are created constantly, and the
+tag on them answers nothing the account does not already answer — so they were
+pure friction against design 10's own warning that developers "will type
+garbage to satisfy the check".
+
+The file is written with compact separators because the quota counts bytes and
+whitespace buys nothing there. The reasoning lives here instead, where it is
+readable and where JSON could not have carried it anyway.
+
+Regenerate rather than hand-edit: the generator is in the git history for this
+file's commit, and the shape is five statements sharing two constants.

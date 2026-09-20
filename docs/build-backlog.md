@@ -3297,3 +3297,63 @@ commercial decision rather than describe one.
 
 Note that the monthly tenant report built in 9.2 is per TENANT. None of these
 three is, which is why none of them falls out of it for free.
+
+## B-091 · The guardrail harness contains itself, and then fails its own tests
+
+**Partly fixed** — 2026-09-20. Found while testing policy 04.
+
+`scripts/test-guardrails.sh` proves the SCPs hold by attempting the things they
+forbid: `kms:ScheduleKeyDeletion`, `cloudtrail:StopLogging`,
+`backup:DeleteBackupVault`. Each attempt is denied, each check passes.
+
+B-087 — fixed an hour earlier the same day — started forwarding protected-action
+attempts from member accounts to the organization bus, so that design 07's
+"any attempt pages immediately" could work at all. Containment now sees those
+attempts and does exactly what it should:
+
+    incident 20260920-53b0bc05aa
+    trigger      kms-key-deletion-attempt
+    principal    arn:aws:sts::754280127660:assumed-role/GuardrailTestAdmin/gr-test
+
+It isolates the principal. `PlatformIncidentDenyAll` lands on the harness role
+**mid-run**, and every check after the KMS one executes as a contained subject.
+Sixteen such incidents had accumulated before anybody noticed.
+
+**Nothing here is malfunctioning.** The harness performs actions indistinguishable
+from an attack, because that is what a guardrail test IS. Containment reacting
+is the control working. The SCPs denied what they should. The forwarding did
+what it was fixed to do. Three correct components produce a broken outcome
+because none of them knows the others exist.
+
+**How it presented, which is the part worth remembering.** Policy 04's negative
+control — "a correctly tagged resource must still be creatable" — failed, and
+the harness reported:
+
+> correctly tagged creation was BLOCKED — policy 04 is over-broad and would
+> stop every tenant deployment
+
+That diagnosis was confident, specific, actionable, and wrong. The real cause
+was visible only in the raw error, which the harness discards:
+
+    ...with an explicit deny in an IDENTITY-BASED policy
+
+AWS says "service control policy" when an SCP denies. It said identity-based,
+and the harness was not reading that word. A test that explains its own failures
+is worth having; one that explains them wrongly costs more than one that stays
+silent, because the explanation gets believed.
+
+**Fixed for now** by having the harness clear any containment from its own
+subject roles before it runs, and report loudly when it finds some — a contained
+subject means the previous run left one behind, and that is worth knowing rather
+than silently repairing.
+
+**Not fixed, and the real question:** the harness should declare itself an
+exercise so containment can mark the incident and skip isolation. Phase 7.4
+built an exercise path for containment; the guardrail harness predates it and
+does not use it. Until it does, every guardrail run writes real-looking
+incidents into the security incident table, which is evidence pollution in the
+store design 04 wants auditors reading.
+
+**Trigger:** before the guardrail harness runs on any schedule, or before a
+tenant account is vested — whichever first. A harness run by hand occasionally
+is tolerable; one running nightly would bury real incidents under its own.

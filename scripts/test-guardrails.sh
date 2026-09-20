@@ -128,9 +128,35 @@ ensure_role() {
     --policy-arn arn:aws:iam::aws:policy/AdministratorAccess >/dev/null 2>&1 || true
 }
 
+# Clear containment from the harness's own roles before testing.
+#
+# The harness attempts kms:ScheduleKeyDeletion and friends to prove the SCPs
+# deny them. Since B-087 those attempts reach the organization bus, containment
+# declares an incident and isolates the principal -- so the subject gets
+# PlatformIncidentDenyAll partway through its own run, and every later check
+# fails for a reason that has nothing to do with the policy under test. B-091.
+#
+# Reported rather than silently repaired: finding containment here means the
+# PREVIOUS run left it, which is worth saying out loud.
+release_containment() {
+  local role="$1" found=0 pol
+  for pol in $(as_org aws iam list-role-policies --role-name "${role}"                  --query 'PolicyNames' --output text 2>/dev/null | tr -d '
+'); do
+    case "${pol}" in
+      PlatformIncident*)
+        as_org aws iam delete-role-policy --role-name "${role}"           --policy-name "${pol}" >/dev/null 2>&1 && found=1
+        ;;
+    esac
+  done
+  [[ ${found} -eq 1 ]] && warn "${role} was still CONTAINED from a previous run; containment released so the harness can test. B-091."
+  return 0
+}
+
 info "Ensuring harness principals exist"
 ensure_role "${TEST_ROLE}"
 ensure_role "${PROBE_ROLE}"
+release_containment "${TEST_ROLE}"
+release_containment "${PROBE_ROLE}"
 
 # The probe must exist for the differential to mean anything. If policy 03's
 # exclusion for OrganizationAccountAccessRole is wrong, creation fails here and
@@ -289,6 +315,49 @@ log "  region         : ${TEST_REGION}"
 log "  subject        : ${TEST_ROLE}  (admin, matches no exclusion)"
 log "  probe          : ${PROBE_ROLE} (admin, matches Platform* exclusion)"
 hr
+
+# --- 04: required tags (prompt 9.2, design 10's four-tag set) --------------
+#
+# FIRST, deliberately. The 01 and 02 checks attempt kms:ScheduleKeyDeletion and
+# friends, which since B-087 reach the organization bus and get the subject
+# contained mid-run. Anything after them runs as a contained principal and
+# fails for reasons unrelated to the policy under test. B-091.
+#
+# Volumes rather than buckets: cheapest to attempt, no global namespace to
+# collide in, and a denied CreateVolume leaves nothing behind.
+TAGGED='ResourceType=volume,Tags=[{Key=Owner,Value=harness},{Key=Application,Value=guardrail},{Key=DataClassification,Value=internal}]'
+PARTIAL='ResourceType=volume,Tags=[{Key=Owner,Value=harness}]'
+BADCLASS='ResourceType=volume,Tags=[{Key=Owner,Value=harness},{Key=Application,Value=guardrail},{Key=DataClassification,Value=top-secret}]'
+AZ="${TEST_REGION}a"
+
+# THE control that matters, and the one most likely to be skipped. Every deny
+# check below would also pass against a policy that denied ALL creation. Only
+# this proves a correctly tagged resource still gets through.
+#
+# Run first so the volume it creates can serve the platform-tag check, which
+# needs a REAL resource id -- a synthetic one is rejected on validation before
+# authorization is ever consulted, so the check silently tested nothing.
+HARNESS_VOL="$(as_test aws ec2 create-volume --availability-zone "${AZ}"   --size 1 --volume-type gp3 --region "${TEST_REGION}"   --tag-specifications "${TAGGED}"   --query VolumeId --output text 2>/dev/null | tr -d '
+')" || true
+
+if [[ "${HARNESS_VOL}" == vol-* ]]; then
+  emit PASS "ec2:CreateVolume WITH all four tags" "control"     "permitted — the policy denies untagged creation, not creation"
+else
+  emit FAIL "ec2:CreateVolume WITH all four tags" "control"     "correctly tagged creation was BLOCKED. Read the raw error before blaming policy 04: an identity-based deny means the subject is contained (B-091), not that the SCP is over-broad"
+fi
+
+check 04 RequireOwnerTag "ec2:CreateVolume with no tags" yes --   aws ec2 create-volume --availability-zone "${AZ}" --size 1   --volume-type gp3 --region "${TEST_REGION}"
+
+check 04 RequireApplicationTag "ec2:CreateVolume with only Owner" yes --   aws ec2 create-volume --availability-zone "${AZ}" --size 1   --volume-type gp3 --region "${TEST_REGION}"   --tag-specifications "${PARTIAL}"
+
+check 04 DataClassificationMustBeOneOfFour "ec2:CreateVolume, invalid classification" yes --   aws ec2 create-volume --availability-zone "${AZ}" --size 1   --volume-type gp3 --region "${TEST_REGION}"   --tag-specifications "${BADCLASS}"
+
+if [[ "${HARNESS_VOL}" == vol-* ]]; then
+  check 04 ProtectPlatformManagedTags "ec2:CreateTags on a platform tag" yes --     aws ec2 create-tags --region "${TEST_REGION}"     --resources "${HARNESS_VOL}" --tags Key=BackupPolicy,Value=none
+  as_test aws ec2 delete-volume --volume-id "${HARNESS_VOL}"     --region "${TEST_REGION}" >/dev/null 2>&1 ||     warn "Could not delete harness volume ${HARNESS_VOL} — remove it by hand."
+else
+  emit AMBIG "ec2:CreateTags on a platform tag" "04/ProtectPlatformManagedTags"     "no real volume to test against — a synthetic id fails validation before authorization, which tests nothing"
+fi
 
 check 01 ProtectCloudTrail "cloudtrail:StopLogging" yes -- \
   aws cloudtrail stop-logging --name "${NOPE}"

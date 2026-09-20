@@ -39,6 +39,19 @@ ACCOUNTS="$(aws ssm get-parameters-by-path --path /platform/org/account/ \
   --query 'Parameters[].[Name,Value]' --output text 2>/dev/null | no_cr)"
 [[ -n "${ACCOUNTS}" ]] || die "No accounts under /platform/org/account/."
 
+# The management account, which is NOT in that path and never will be.
+#
+# CLAUDE.md keeps it holding "the Organization and nothing else", so it is not
+# a provisioned member and has no /platform/org/account/ entry. It still costs
+# money — Organizations, CloudTrail, the consolidated bill — and the Cost
+# Category sync correctly reported it as `unregistered` on its first run.
+#
+# `unregistered` is the right thing for that check to SAY and the wrong place
+# for the spend to live. Appended explicitly, so its absence from the registry
+# path reads as the reason rather than as an oversight.
+ACCOUNTS="${ACCOUNTS}
+/platform/org/account/altdig-management	${PLATFORM_MGMT_ACCOUNT_ID}"
+
 # Environment per account, from the tier map the alerting layer already
 # maintains in Audit. Derived rather than restated here: two lists of which
 # account is production is one list too many, and the one nobody updates is
