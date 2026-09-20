@@ -9,17 +9,19 @@ document before implementing against it. The build sequence is
 [design/claude-code-prompts.md](design/claude-code-prompts.md).
 
 Note: several documents the package cross-references are **not yet present** —
-04 (Security Controls and Evidence), 05 (Resilience), the Truveon functional
-assumptions, and four of six diagrams. Where a prompt cites a missing document,
-say so rather than inventing its contents.
+05 (Resilience), the Truveon functional assumptions, and four of six diagrams
+(only `account-topology` and `entity-chain` exist). Where a prompt cites a
+missing document, say so rather than inventing its contents.
 
 Supplied 2026-09-17: 01 (Design Principles), 06 (Observability),
 06a (Alarm Specification) and 14 (Environment Tiers). 06a is **authoritative**
 for alarm configuration and is consumed directly by the instrumentation Lambda
 rather than transcribed — see `scripts/publish-instrumentation.sh`.
 
-Supplied 2026-09-19: 08 (Change and Release), 09 (Vulnerability and Patching),
-11 (Developer Access). 08 arrived complete — every section prompts 8.1–8.3 cite
+Supplied 2026-09-19: 04 (Security Controls and Evidence), 08 (Change and
+Release), 09 (Vulnerability and Patching), 11 (Developer Access). 04 carries
+the evidence pipeline's four completeness controls in prose; the
+`evidence-flow` diagram it points at is still absent. 08 arrived complete — every section prompts 8.1–8.3 cite
 is present, including the four-outcome reconciliation table and the five quorum
 conditions, so Phase 8 needed nothing invented.
 

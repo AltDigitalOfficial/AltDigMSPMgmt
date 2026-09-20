@@ -953,3 +953,63 @@ automatically.
 sensitivity field (B-052) is built and this becomes a second consumer of it.
 The two questions are the same question asked of different controls, and they
 should be answered together.
+
+---
+
+## D-016 · The evidence pipeline is built as a SOC 2 control, which design 04 does not say
+
+**Accepted.** Raised by Jamie 2026-09-19 while starting prompt 9.1.
+
+design 04's "Evidence pipeline to Truveon" describes what flows and how
+completeness is assured, and never mentions SOC 2. design 15 does:
+
+| Entity | Scope |
+|---|---|
+| **AltDigital** | Infrastructure operations, platform controls, **evidence pipeline**, incident response, change management. **Holds the reference SOC 2.** |
+
+So the pipeline is not only the thing that carries evidence for other controls —
+it is itself an in-scope control in the report partners rely on through the
+carve-out. design 04 reads as though it were only the former.
+
+### What that changes in the build
+
+**The pipeline's own completeness artefacts are evidence, and are retained.**
+Heartbeats, detected sequence gaps and count-reconciliation results are written
+durably and pushed like any other record, rather than being fired as alerts and
+forgotten. A SOC 2 Type II auditor asks whether a control operated *throughout
+the period*; an alert that fired eight months ago and was acknowledged proves
+nothing about the eleven months around it.
+
+**A detected gap is survivable; an undetected one is not.** This inverts the
+usual emphasis. The pipeline is not built to never drop a record — that is not
+achievable against an external endpoint — it is built so that anything dropped
+is *known*, *bounded* and *explainable by period*. "We lost four hours on the
+3rd, here is the range and here is why" is an audit answer. "Our counts do not
+match and we do not know when" is not.
+
+**Attribution has to survive the carve-out chain.** design 15's chain is three
+deep: AWS is a subservice organisation to AltDigital, AltDigital to the partner,
+the partner to the client. A partner's auditor relying on AltDigital's report
+needs each record to say which entity's control produced it, so tenant AND
+partner travel on every record rather than being inferred from the account id
+at query time.
+
+### What was deliberately NOT done
+
+**Records do not carry Trust Services Criteria references.** Tagging each
+record CC6.1, CC7.2 and so on would put a framework mapping inside the
+transport, where it goes stale silently and has to be maintained separately for
+HIPAA, PCI and anything else a tenant adds. Records carry AltDigital's own
+control reference; Truveon maps that to whichever framework is asking, which is
+what a GRC tool is for.
+
+This is the same rule that produced B-060, B-064 and B-080: derive from the
+source of truth, do not keep a second copy of it.
+
+### Note for design 04
+
+The section would be improved by saying that the pipeline is in scope for the
+reference SOC 2, because the completeness controls read as engineering hygiene
+without it and as audit requirements with it. The difference matters to whoever
+implements it next — it is the reason the heartbeat is persisted rather than
+merely alerted.
