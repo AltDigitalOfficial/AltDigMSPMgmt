@@ -303,7 +303,7 @@ def _event_resource(event):
 def _emit(finding):
     events_client.put_events(Entries=[{
         "EventBusName": ALERT_BUS_NAME,
-        "Source": "altdigital.quorum",
+        "Source": "platform.quorum",
         "DetailType": "quorum-reverse-reconciliation",
         "Detail": json.dumps(finding, default=str),
     }])

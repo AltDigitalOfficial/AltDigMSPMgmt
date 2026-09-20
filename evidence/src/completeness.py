@@ -136,7 +136,7 @@ def tenants():
 def _emit(finding):
     events_client.put_events(Entries=[{
         "EventBusName": ALERT_BUS_NAME,
-        "Source": "altdigital.evidence",
+        "Source": "platform.evidence",
         "DetailType": "evidence-completeness",
         "Detail": json.dumps(finding, default=str),
     }])

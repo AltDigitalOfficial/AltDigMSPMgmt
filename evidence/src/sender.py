@@ -167,7 +167,7 @@ def _mark_delivered(stream_id, sequence):
 def _emit(name, cause, detail, routing="review_queue"):
     events_client.put_events(Entries=[{
         "EventBusName": ALERT_BUS_NAME,
-        "Source": "altdigital.evidence",
+        "Source": "platform.evidence",
         "DetailType": "evidence-completeness",
         "Detail": json.dumps({
             "record_type": "evidence-delivery-finding",

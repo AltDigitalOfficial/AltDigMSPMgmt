@@ -3189,3 +3189,54 @@ Nothing needs re-architecting at that point. The endpoint and credential are
 configuration, and the buffer means evidence produced in the meantime is
 delivered rather than lost — the same property the design asks for against a
 Truveon outage, exercised early by Truveon simply not being built yet.
+
+## B-089 · I invented event source names instead of reading them
+
+**Fixed** — 2026-09-20, found on the first live collection run.
+
+The evidence collector subscribed to `altdigital.change` and
+`altdigital.quorum`. The codebase publishes `platform.change`,
+`platform.security`, `platform.recovery`, `platform.response` and
+`platform.exercise`. So reconciliation emitted five real findings, the
+collector's rule matched none of them, and the ledger held one row — the
+heartbeat, which the pipeline writes itself.
+
+**It looked like it worked.** A heartbeat in the ledger, no errors anywhere,
+every function returning success. Exactly the shape design 04 warns about:
+
+> A silently failed pipeline that looks like a clean month is the failure mode
+> that destroys an audit.
+
+Caught only because the run was checked against what reconciliation reported
+emitting — three findings out, one unrelated row in.
+
+**Two separate mistakes, and the second is the worse one.**
+
+*I guessed at a naming convention rather than reading the emitters.* This is
+B-068's rule — every endpoint needs one real response before it is trusted —
+applied to the platform's own event bus rather than to somebody else's API.
+The bus is the one place it felt safe to assume, being ours.
+
+*I introduced a second convention while doing it.* `quorum/src/reverse.py` and
+all three evidence modules published `altdigital.*` into a codebase that had
+used `platform.*` since Phase 2. Nothing failed, because the router's
+`UnmatchedRule` catches by `anything-but` on detail-type and does not care
+about source — B-055's fix absorbing a bug it was not written for. The quorum
+findings did route. They were simply named differently from everything else,
+and the next person to write a source-matched rule would have found half the
+estate missing from it.
+
+Both renamed to `platform.*`.
+
+**What would have caught this earlier.** Nothing in the test suite: the unit
+tests stub the bus, so the source string is never compared against a real
+emitter. A test asserting that every source in `RECOGNISERS` appears in some
+emitter's `put_events` call would have. Not built, because the honest version
+of that check is "read the emitters", and the emitters are now read.
+
+The collector already reports unrecognised events rather than dropping them
+silently — that is what the `collected: false` branch is for. It did not help
+here, because the events never reached the collector at all: the EventBridge
+rule filtered them out one layer upstream. **A check inside a component cannot
+see what a rule in front of it discarded.** Same shape as B-086, where the
+completeness counter sat downstream of the decision about what to sweep.

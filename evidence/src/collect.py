@@ -69,23 +69,31 @@ _MAP = {}
 # reads shapes fails silently when it does. A detail-type that stops matching
 # produces an UNRECOGNISED event, which is reported.
 RECOGNISERS = (
-    # (detail_type_contains, source_prefix, category, control_ref)
+    # (needle, source_prefix, category, control_ref)
+    #
+    # Sources taken from what the emitters ACTUALLY publish, not from what a
+    # reasonable naming scheme would suggest. The first version of this table
+    # guessed `altdigital.change` and `altdigital.quorum`; the codebase uses
+    # `platform.*` throughout, so five real reconciliation findings were
+    # emitted and none were collected. B-089.
     ("Config Rules Compliance Change", "aws.config",
      "config-compliance", "config-continuous-evaluation"),
     ("Security Hub Findings", "aws.securityhub",
      "security-finding", "security-finding-triage"),
-    ("change-reconciliation", "altdigital.change",
+    ("GuardDuty Finding", "aws.guardduty",
+     "security-finding", "threat-detection"),
+    ("change-reconciliation", "platform.change",
      "change-event", "change-management-reconciliation"),
-    ("quorum-reverse-reconciliation", "altdigital.quorum",
+    ("quorum-reverse", "platform.quorum",
      "change-event", "quorum-two-party-control"),
     ("Platform Incident Dossier", "platform.response",
      "operational", "security-incident-response"),
-    ("restore-test", "platform.recovery",
+    ("Platform Incident Dossier", "platform.security",
+     "operational", "security-incident-response"),
+    ("", "platform.recovery",
      "operational", "backup-restore-verification"),
-    ("Platform Instrumentation", "platform.instrumentation",
-     "operational", "monitoring-coverage"),
-    ("jit-elevation", "platform.identity",
-     "operational", "privileged-access-elevation"),
+    ("", "platform.exercise",
+     "operational", "containment-exercise"),
 )
 
 
@@ -122,7 +130,7 @@ def classify(event):
 def _emit(name, cause, detail, routing="review_queue"):
     events_client.put_events(Entries=[{
         "EventBusName": ALERT_BUS_NAME,
-        "Source": "altdigital.evidence",
+        "Source": "platform.evidence",
         "DetailType": "evidence-completeness",
         "Detail": json.dumps({
             "record_type": "evidence-collection-finding",

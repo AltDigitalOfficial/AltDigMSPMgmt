@@ -342,12 +342,13 @@ Resources:
         source:
           - aws.config
           - aws.securityhub
-          - altdigital.change
-          - altdigital.quorum
+          - aws.guardduty
+          - platform.change
+          - platform.quorum
           - platform.response
+          - platform.security
           - platform.recovery
-          - platform.instrumentation
-          - platform.identity
+          - platform.exercise
       State: ENABLED
       Targets:
         - Id: collect
