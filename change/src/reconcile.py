@@ -96,6 +96,12 @@ MATCH_WINDOW_HOURS = float(os.environ.get("CHANGE_MATCH_WINDOW_HOURS", "24"))
 
 _FACTS = {}
 
+# Approval lookups, keyed by issue key, for the life of one invocation. An
+# issue is checked once per run however many deployments it is compared
+# against, which stops a busy account becoming one API call per deployment per
+# change record.
+_APPROVAL_CACHE = {}
+
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -359,13 +365,18 @@ def approved_changes(project):
             "key": issue.get("key"),
             "summary": f.get("summary"),
             "status": (f.get("status") or {}).get("name"),
-            # design 08 warns not to trust the status field alone for QUORUM
-            # decisions. For reconciliation it is the available signal, and the
-            # consequence of it being wrong is a finding somebody reviews --
-            # not an irreversible action. The distinction is why 8.3 validates
-            # the changelog and 8.2 does not.
-            "approved": status in ("approved", "done", "closed", "resolved",
-                                   "in progress", "implementing"),
+            # A GUESS from the status name, used only when there is no
+            # approval record to read. See is_approved() below.
+            #
+            # The list is a heuristic over workflow names this code does not
+            # control, and it was wrong the first time it met a real workflow:
+            # AMI-4 was approved and sat in "Awaiting implementation", which is
+            # not in this list, so the deployment it covered was reported as
+            # having no change record. Adding that one string would have fixed
+            # this workflow and broken on the next tenant's.
+            "approved_by_status": status in (
+                "approved", "done", "closed", "resolved", "in progress",
+                "implementing", "awaiting implementation"),
             "created": f.get("created"),
             "updated": f.get("updated"),
             "labels": f.get("labels") or [],
@@ -411,13 +422,86 @@ def match(deployment, changes):
         return None, "no change record covers this deployment"
     candidates.sort(key=lambda c: c[0])
     _, change, delta = candidates[0]
-    if not change["approved"]:
+    approved, evidence = is_approved(change)
+    if not approved:
         return change, (f"change {change['key']} covers this deployment but is "
-                        f"in status '{change['status']}', not an approved state")
+                        f"not approved ({evidence}; status "
+                        f"'{change['status']}')")
     if delta < 0:
         return change, (f"change {change['key']} was created AFTER the "
                         "deployment -- a retrospective record, not an approval")
     return change, None
+
+
+def is_approved(change):
+    """Is this change approved? Approval RECORDS first, status name second.
+
+    Returns (approved, evidence) where evidence names which source answered,
+    because the two are not equally trustworthy and the finding should say
+    which one it rests on.
+
+    Why not the status field, which was what this used to use. The status name
+    is a string this code does not control: JSM's change workflow parks an
+    approved record in "Awaiting implementation", tenant workflows will use
+    other words, and a hardcoded list of approved-sounding names is wrong for
+    every project nobody thought of. It was wrong for the very first real one.
+    The failure is not subtle either -- an approved change reads as unapproved
+    and every deployment it covers becomes a finding against the tenant.
+
+    The approval record is the actual evidence and does not depend on anybody
+    naming a status the way this code expects. design 08 says as much for the
+    quorum pipeline; the only reason 8.2 did not read approvals is that they
+    were unreadable until B-077 made the records JSM requests.
+
+    The status heuristic survives as a FALLBACK, for two cases that are not
+    errors:
+      - a record created through the issue API, which cannot carry a JSM
+        approval at all (AMI-1 and AMI-2 are both this)
+      - a tenant project that is plain Jira Software with no approvals
+
+    An unreadable approvals endpoint falls back too rather than concluding
+    "not approved". Same rule as everywhere else in this module: a source that
+    cannot be read has not returned a negative answer.
+    """
+    cached = _APPROVAL_CACHE.get(change["key"])
+    if cached is not None:
+        return cached
+
+    result = None
+    try:
+        approvals = jira.approvals(change["key"])
+    except jira.JiraUnavailable:
+        # 404 here is the normal answer for an issue that is not a JSM
+        # request, not a fault. Fall back quietly.
+        approvals = None
+
+    if approvals:
+        # Any step still awaiting a decision means not yet approved. All steps
+        # final and approved means approved.
+        decided = [(a.get("finalDecision") or "").lower() for a in approvals]
+        if all(d == "approved" for d in decided):
+            result = (True, "JSM approval record")
+        else:
+            result = (False, f"JSM approval record says {sorted(set(decided))}")
+    elif approvals is not None:
+        # Readable and empty: the record has not reached its approval step.
+        # Not a refusal, and not approved either.
+        result = (False, "no approval recorded yet")
+    else:
+        result = (change["approved_by_status"],
+                  "no approval record readable, fell back to the status name")
+
+    # Cached OUTSIDE the change record. It used to be stashed on the dict
+    # itself, which put `"_approved": [true, "fell back to ..."]` into every
+    # emitted finding -- an internal tuple in a record an auditor reads.
+    #
+    # The evidence itself is worth keeping, so it goes in under a name that
+    # means something. Which source answered is exactly what somebody
+    # assessing the finding needs: a status-name guess and a recorded approval
+    # are not equally good grounds for accusing a tenant.
+    _APPROVAL_CACHE[change["key"]] = result
+    change["approval_evidence"] = result[1]
+    return result
 
 
 def token_days_remaining():
@@ -452,6 +536,12 @@ def publish_credential_health():
 
 def reconcile(event, context=None):
     """The scheduled run. Produces design 08's outcomes, plus the fifth."""
+    # Cleared per run. A warm Lambda container lives for hours, and an approval
+    # granted between two runs has to be visible to the second one -- a cache
+    # that outlived the invocation would keep reporting a since-approved change
+    # as unapproved until the container happened to recycle. Same shape as the
+    # cached auth header in jira.py that cost a diagnostic cycle on 2026-09-19.
+    _APPROVAL_CACHE.clear()
     since = _now() - datetime.timedelta(hours=LOOKBACK_HOURS)
     deployments = recent_deployments(since)
 
@@ -511,7 +601,29 @@ def reconcile(event, context=None):
         # design 08's fourth outcome: "Change record with no corresponding
         # deployment -- Review: stale or abandoned."
         for change in changes:
-            if change["key"] in matched_keys or not change["approved"]:
+            # Only an APPROVED record whose window has CLOSED is "stale or
+            # abandoned". Two ways to get this wrong, and the first version
+            # had both:
+            #
+            #   a record still awaiting approval is in flight, not abandoned
+            #   a record approved ten minutes ago has not been abandoned either
+            #
+            # The second one fired on AMI-4 the moment it was approved, while
+            # the work it authorises was actively being done. Left in, this
+            # outcome would raise a finding against every change record in the
+            # gap between approval and implementation -- which is every change
+            # record, for as long as the change takes. A finding that is always
+            # true is noise, and noise is what gets a control muted.
+            if change["key"] in matched_keys:
+                continue
+            if not is_approved(change)[0]:
+                continue
+            created = _parse(change.get("created"))
+            if created is None:
+                continue
+            closes = created + datetime.timedelta(hours=MATCH_WINDOW_HOURS)
+            if _now() < closes:
+                # Still in its window. Nothing to conclude yet.
                 continue
             if change["accounts"] and account_id not in change["accounts"]:
                 continue

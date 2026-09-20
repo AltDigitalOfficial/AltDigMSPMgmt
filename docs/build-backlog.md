@@ -2835,3 +2835,108 @@ reported as a negative result — and the consequence here is that a genuine
 misconfiguration reads as an ordinary refusal, so nobody fixes it. The verifier
 must say which, and an unapprovable request type is an exception record, not a
 denial.
+
+## B-080 · An approved change read as unapproved because of a status NAME
+
+**Fixed** — 2026-09-19, found the moment the platform could read its own
+project again.
+
+Reconciliation decided whether a change record was approved by matching its
+status name against a list in the code:
+
+    approved, done, closed, resolved, in progress, implementing
+
+AMI-4 was approved. Its status was **"Awaiting implementation"**, which is not
+in that list, so the record did not count and the deployment it covered was
+reported `no_change_record`.
+
+**The consequence is a false accusation, not a missed detection.** An approved
+change reading as unapproved means every deployment it covers becomes a finding
+against the tenant who did nothing wrong. design 08's whole argument for
+continuous reconciliation is that auditors accept evidence over claims — and
+the evidence has to be right, because the control's value is that its findings
+are trusted.
+
+**Adding the string would have been the wrong fix.** It repairs this workflow
+and breaks on the next tenant's, whose statuses this code does not choose and
+cannot predict. The list was a guess about words other people pick.
+
+**Fixed by reading the approval RECORD instead**, which is the actual evidence
+and does not depend on anybody naming a status the way this code expects:
+
+    JSM approval record        authoritative
+    status name heuristic      fallback, and only when there is no record
+
+The fallback still matters and is not dead code. Two cases reach it legitimately:
+a record created through the issue API, which cannot carry a JSM approval at all
+(AMI-1 and AMI-2 are both this), and a tenant project on plain Jira Software
+with no approvals configured. An unreadable approvals endpoint falls back too,
+rather than concluding "not approved" — the same rule as everywhere else here.
+
+**Why this was not possible until now.** 8.2 originally used the status field
+because approvals were *unreadable*: the records were not JSM requests (B-077),
+so the endpoint 404'd. The comment in the code said design 08 only demands
+record-level validation for quorum, and that reconciliation findings are
+reviewed by a human rather than being irreversible. Both true, and both beside
+the point once the better evidence became available.
+
+Findings now carry `approval_evidence`, naming which source decided. A status
+guess and a recorded approval are not equally good grounds for accusing a
+tenant, and whoever reads the finding should be able to tell which one it
+rests on.
+
+## B-081 · Every approved change was reported stale the moment it was approved
+
+**Fixed** — 2026-09-19, found in the same run.
+
+design 08's fourth outcome is "Change record with no corresponding deployment
+— Review: stale or abandoned." The implementation reported any approved record
+with no matching deployment, with no notion of *when*.
+
+AMI-4 was approved and immediately reported `change_without_deployment` while
+the work it authorised was actively in progress.
+
+**This fires on every change record, always.** There is necessarily a gap
+between a change being approved and the deployment happening — that gap is the
+entire point of approving changes in advance. So the outcome would be raised
+for every record in the estate, every run, until each one deployed. A finding
+that is always true is noise, and noise is how a control gets muted. B-043 is
+the same failure mode from Phase 6 and this is its second appearance.
+
+**Fixed by waiting for the window to close.** A record is stale only once
+`created + CHANGE_MATCH_WINDOW_HOURS` has passed with nothing deployed — the
+same window used to decide whether a deployment is covered, so the two halves
+of the control agree about what "in time" means rather than each having an
+opinion.
+
+The regression test asserts the record NAME rather than the count. Asserting
+the count alone passes whichever of the two fixtures was reported, which is
+precisely the distinction being fixed — the first version of that test did
+exactly that and would have passed against the bug.
+
+## B-082 · Internal cache state was appearing in the audit record
+
+**Fixed** — 2026-09-19, found by reading an emitted finding rather than the
+code.
+
+The approval lookup cached its answer on the change dict, which is the same
+dict serialised into the emitted finding. Every `change_without_deployment`
+record therefore carried:
+
+    "_approved": [true, "no approval record readable, fell back to the status
+                         name"]
+
+A private tuple, with a leading underscore, in a record retained for audit.
+Not wrong, and not something anybody wants to explain in an audit conversation.
+
+Cached in a module-level dict keyed by issue key instead, cleared at the start
+of each run. **The clear matters more than the move.** A warm Lambda container
+lives for hours and this function runs every six hours, so a cache surviving
+between invocations would keep reporting a since-approved change as unapproved
+until the container happened to recycle — indistinguishable from the approval
+not having worked. That is precisely the cached-auth-header failure in jira.py
+that cost a diagnostic cycle earlier the same day, which is why it was worth
+looking for.
+
+The evidence string itself was kept, under `approval_evidence`, because which
+source answered is genuinely useful to whoever assesses the finding.
