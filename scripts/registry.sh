@@ -102,6 +102,9 @@ while [[ $# -gt 0 ]]; do
     --account-id)       ACCOUNT_ID="$2"; shift 2 ;;
     --env)              ENVIRONMENT="$2"; shift 2 ;;
     --app)              APP="$2"; shift 2 ;;
+    --service-model)    SERVICE_MODEL="$2"; shift 2 ;;
+    --compliance)       COMPLIANCE="$2"; shift 2 ;;
+    --kind)             KIND="$2"; shift 2 ;;
     --baseline-version) VERSION="$2"; shift 2 ;;
     --version)          VERSION="$2"; shift 2 ;;
     --name)             NAME="$2"; shift 2 ;;
@@ -348,10 +351,56 @@ cmd_list_clients() {
   fi
 }
 
+# Two facts design 10 needs and this record did not carry, plus the one that
+# tells them apart.
+#
+# service_model and compliance_scope drive Cost Categories (prompt 9.2) and
+# were simply absent: the record had partner, client, app and environment.
+#
+# `kind` matters more than it looks. design 10:
+#
+#     Log Archive, Audit, Forensics, Platform Tooling and Shared Services
+#     accounts generate real cost that nobody pays a flat fee for.
+#
+# Those accounts have no tenant and never will. Without a way to say so they
+# would either be left out of the registry -- which is how B-064 lost an
+# account and B-086 swept an empty estate -- or filed against a fictional
+# tenant, which would put AltDigital's own overhead on somebody's invoice.
+#
+#   tenant   a client workload account. Billable.
+#   shared   AltDigital's own. Cost is absorbed into the uplift, not allocated,
+#            and B-090 is the report that checks the uplift covers it.
+check_kind() {
+  case "${1}" in
+    tenant|shared) ;;
+    *) die "--kind must be tenant or shared, got '${1}'." ;;
+  esac
+}
+
+# design 10's service models. Unset is allowed and is visible as 'unset' rather
+# than blank, so an account nobody classified is findable instead of looking
+# like a deliberate choice.
+check_service_model() {
+  case "${1}" in
+    unset|managed|co-managed|advisory) ;;
+    *) die "--service-model must be managed, co-managed or advisory." ;;
+  esac
+}
+
 cmd_put_account() {
   [[ -n "${ACCOUNT_ID}" ]]  || die "--account-id is required."
-  [[ -n "${PARTNER}" ]]     || die "--partner is required."
-  [[ -n "${SLUG}" ]]        || die "--client is required (pass with --slug)."
+  check_kind "${KIND:=tenant}"
+  check_service_model "${SERVICE_MODEL:=unset}"
+  if [[ "${KIND}" == "shared" ]]; then
+    # AltDigital's own accounts have no partner and no client. Requiring them
+    # would mean inventing values, and an invented partner is one that shows
+    # up in a billing roll-up.
+    PARTNER="${PARTNER:-altdigital}"
+    SLUG="${SLUG:-platform}"
+  else
+    [[ -n "${PARTNER}" ]]   || die "--partner is required."
+    [[ -n "${SLUG}" ]]      || die "--client is required (pass with --slug)."
+  fi
   [[ -n "${ENVIRONMENT}" ]] || die "--env is required."
   [[ "${ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || die "--account-id must be 12 digits."
   check_state "${STATE:=provisioning}"
@@ -369,6 +418,9 @@ cmd_put_account() {
   "app":              {"S": "${APP:-}"},
   "environment":      {"S": "${ENVIRONMENT}"},
   "state":            {"S": "${STATE}"},
+  "service_model":    {"S": "${SERVICE_MODEL:-unset}"},
+  "compliance_scope": {"S": "${COMPLIANCE:-none}"},
+  "kind":             {"S": "${KIND:-tenant}"},
   "updated_at":       {"S": "$(now_iso)"}
 }
 JSON

@@ -3240,3 +3240,60 @@ here, because the events never reached the collector at all: the EventBridge
 rule filtered them out one layer upstream. **A check inside a component cannot
 see what a rule in front of it discarded.** Same shape as B-086, where the
 completeness counter sat downstream of the decision about what to sweep.
+
+## B-090 · Three cost reports nobody has asked the data for yet
+
+**Deferred with triggers** — 2026-09-20, raised by Jamie while starting 9.2.
+
+Prompt 9.2 builds one report: the **monthly tenant cost report** — raw AWS
+cost, flat fee and percentage uplift shown separately. That is the billing
+artefact, and it is in scope.
+
+Three others were proposed, for three different readers. None is specified in
+design 10 and none is blocking, but they are not equal in cost or in value.
+
+| Report | Reader | Effort | Why |
+|---|---|---|---|
+| Cost by account by tier | Tina (CRO) | low | A Cost Explorer view once Cost Categories exist |
+| ...by AWS service type | Wayne (CIO/CTO) | low | Same, plus the native service dimension |
+| **Shared services cost** | Jamie / Art | **real** | Nothing produces this number today |
+
+**The first two are nearly free and are not free.** Cost Categories give the
+dimensions, so the *analysis* needs no engineering — somebody can open Cost
+Explorer and group by them. What does not exist is a scheduled, formatted,
+delivered artefact. That distinction is worth keeping straight: "the data
+supports it" and "there is a report" are different claims, and conflating them
+is how a commitment gets made on a call.
+
+**The third one is different, and is the one to build first.** design 10:
+
+> Log Archive, Audit, Forensics, Platform Tooling and Shared Services accounts
+> generate real cost that nobody pays a flat fee for. [...] **Position:
+> absorbed into the percentage uplift.**
+>
+> The weakness is that it decouples revenue from effort: a large, quiet
+> workload pays a lot for little management; a small, messy one pays little
+> while consuming the team.
+
+Absorbing shared cost is a BILLING decision. It is not a reason to be unable to
+see the number. Today nothing measures it, so the position "the uplift covers
+it" is an assumption nobody can check — and design 10 names the exact way it
+could be wrong.
+
+The report worth having is therefore not "what did shared services cost", it is
+**shared cost against uplift revenue, over time**. That turns a stated position
+into a testable one, and it is the only one of the three that could change a
+commercial decision rather than describe one.
+
+**Triggers:**
+
+- *Shared services cost:* before the first partner pricing conversation that
+  relies on the uplift covering shared cost. Sooner if the estate grows past a
+  handful of accounts, since the absorbed number scales with account count
+  while revenue scales with workload.
+- *Tina and Wayne's views:* when somebody actually needs one on a recurring
+  basis. Until then Cost Explorer answers the question on demand, and a
+  scheduled report nobody reads is worse than no report.
+
+Note that the monthly tenant report built in 9.2 is per TENANT. None of these
+three is, which is why none of them falls out of it for free.
