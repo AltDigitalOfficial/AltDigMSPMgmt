@@ -3018,3 +3018,128 @@ pipeline would describe itself favourably.
 A session name that does not match `quorum-*` is NOT treated as authorised even
 when the role name matches, because the trust policy forbids that combination
 and seeing it would mean the trust policy had been changed.
+
+## B-085 · This account's Lambda concurrency quota is 10, so nothing can reserve any
+
+**Accepted constraint** — 2026-09-19. Not a defect; recorded because it will be
+hit again.
+
+`ReservedConcurrentExecutions: 1` on the quorum executor failed the stack:
+
+    Specified ReservedConcurrentExecutions for function decreases account's
+    UnreservedConcurrentExecution below its minimum value of [10]
+
+The Audit account's Lambda concurrency limit is **10** — the new-account
+default — and AWS requires at least 10 unreserved. So **no function in this
+account can reserve any concurrency at all** until the quota is raised. That
+applies to every future Lambda here, not just this one.
+
+**The reservation turned out to be the wrong control anyway**, which is worth
+more than the quota note. Reserving 1 would have prevented two destructive
+actions running in PARALLEL. It would have done nothing about the case that
+actually matters: the same approval being executed TWICE in sequence. Nothing
+in the pipeline stopped a state machine execution being started again against
+an already-actioned change record, and every replay would verify perfectly
+because the approval is genuinely still there.
+
+Replaced with a one-approval-one-execution lock: a deterministic row per
+(issue, action, resource) written with a conditional put, so a second attempt
+fails the condition and is refused. DynamoDB's conditional write is atomic, so
+it also covers the parallel case the reservation would have handled — a
+stronger control that does not depend on a service quota.
+
+**Trigger to revisit:** if a quota increase is requested for another reason,
+reconsider whether any function here wants a reservation. Nothing currently
+does.
+
+## B-086 · The reverse sweep swept nothing and reported a clean estate
+
+**Fixed** — 2026-09-19, found on the first live run.
+
+The first reverse reconciliation run returned:
+
+    accounts_swept: 0   events: 0   outcomes: {}   findings: 0
+
+Which is indistinguishable from "the estate is clean" — on the one control in
+this codebase whose entire purpose is to prove a negative.
+
+**Two causes, and both are the same mistake.**
+
+*The account list was read from the wrong account.* `platform_accounts()` read
+`/platform/org/account/`, which is the registry — and the registry lives in the
+MANAGEMENT account. The sweep runs in Audit, where that path is empty. SSM
+parameters are per-account, and nothing about reading an empty path looks like
+an error.
+
+*The member role was the wrong role.* `OrganizationAccountAccessRole` trusts
+`arn:aws:iam::738815759702:root` — the management account only. A sweep running
+from Audit gets AccessDenied against every account in the estate. Fixed with a
+dedicated `PlatformQuorumReader` deployed alongside the executor, holding
+`cloudtrail:LookupEvents` and nothing else. Separate from the executor
+deliberately: the component that checks whether quorum actions were approved
+must not be able to perform one.
+
+**What makes this worth a numbered entry is not the two wrong paths.** It is
+that the failure mode of both was a confident, quiet, wrong answer. The module
+already had an `accounts_unreadable` counter written specifically to keep such
+a gap visible — and the gap happened UPSTREAM of it, in deciding what to sweep
+at all. A check placed one step too late is not a check.
+
+Now: `platform_accounts()` raises rather than returning empty, the summary
+always carries an explicit `swept` flag, and `unreadable_reasons` names the
+cause. That last one was added after "6 unreadable" with no reason forced a
+trip through the alert stream to diagnose the platform's own control.
+
+Current state is honest: 2 accounts swept, 4 reported unreadable because the
+reader role is only deployed to Audit and the sandbox. Rolling it out to the
+rest is a StackSet away and is not pretended to have happened.
+
+## B-087 · design 07's "any attempt pages immediately" was inert for every member account
+
+**Fixed** — 2026-09-19. The most serious finding of the phase, and it was found
+by accident.
+
+design 03 and design 07 both say it plainly:
+
+    Any attempt against these actions — successful or denied — pages
+    immediately. A denied attempt is either confusion or something worse; both
+    warrant knowing within minutes.
+
+`containment/10-containment.yaml` implements it: `ProtectedActionDeclarationRule`
+listens on the organization bus in Audit for `ScheduleKeyDeletion`, `StopLogging`,
+`DeleteBackupVault` and the rest, and declares a security incident for each.
+
+**Nothing put those events on that bus.** `baseline/70-event-forwarding.yaml`
+forwards alarms, Config, deployments, dossiers, GuardDuty and Security Hub from
+member accounts. It did not forward protected actions. The declaration rule
+could only ever have fired for an action taken inside Audit itself — which is
+not where tenant keys, vaults, trails or Config recorders live.
+
+So the control that design 03 describes as absolute had never been able to fire
+where it matters, and there was no signal of that anywhere: the rule existed,
+was ENABLED, and matched nothing.
+
+**How it was found.** A KMS key was deleted in the sandbox as part of testing
+the quorum reverse reconciliation. The reverse sweep reported it as
+`outside_pipeline`, correctly. The declaration path reported nothing — and the
+only reason anybody looked was that the two were expected to agree.
+
+That is the argument for building both directions, demonstrated rather than
+asserted. design 08 says the reverse check is "what makes it a control rather
+than a procedure"; here it was also what made a *different* control's failure
+visible. A single detection path has nothing to disagree with.
+
+**Fixed** with `ProtectedActionForwarding` — a separate rule from
+`DeploymentForwarding`, not more event names added to it. They answer to
+different designs, they page differently, and a shared pattern means every
+future edit to one is an edit to the other: that is how a deployment list
+quietly acquires a security event, or how a narrowing for cost quietly drops a
+page.
+
+Verified live: the same deletion re-attempted after the fix produced
+`kms-key-deletion-attempt`, titled `ScheduleKeyDeletion attempted by
+arn:...OrganizationAccountAccessRole/retest`, with `quorum_authorised_by: None`
+— correctly not claiming an authorisation it did not have.
+
+**Still open:** the forwarding StackSet is deployed to the sandbox OU only. The
+other OUs need the same update before this control is live estate-wide.

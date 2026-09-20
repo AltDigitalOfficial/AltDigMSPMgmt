@@ -58,10 +58,24 @@ ssm = boto3.client("ssm")
 sts = boto3.client("sts")
 
 ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
-ACCOUNT_PREFIX = os.environ.get("ACCOUNT_REGISTRY_PREFIX",
-                                "/platform/org/account/")
-MEMBER_ROLE = os.environ.get("QUORUM_READ_ROLE",
-                             "OrganizationAccountAccessRole")
+# The account list, and WHICH ACCOUNT IT LIVES IN.
+#
+# The obvious source is the registry at /platform/org/account/, and it is the
+# wrong one: SSM parameters are per-account and that registry is in the
+# MANAGEMENT account. This function runs in Audit, where the path is empty.
+#
+# The first version read it anyway, found nothing, swept nothing, and reported
+# `events: 0, findings: 0` -- indistinguishable from a clean estate. B-086.
+#
+# The tier map is synced INTO Audit by the alerting pipeline and carries every
+# account, so it is both available here and maintained by something that would
+# notice if it went stale.
+ACCOUNT_TIER_PARAM = os.environ.get("ACCOUNT_TIER_PARAM",
+                                    "/platform/routing/account-tiers")
+# A dedicated read-only role, not OrganizationAccountAccessRole. That one
+# trusts the management account only, so assuming it from Audit fails for every
+# account in the estate. B-086.
+MEMBER_ROLE = os.environ.get("QUORUM_READ_ROLE", "PlatformQuorumReader")
 LOOKBACK_HOURS = int(os.environ.get("QUORUM_REVERSE_LOOKBACK_HOURS", "26"))
 REGIONS = [r.strip() for r in
            os.environ.get("PLATFORM_ALLOWED_REGIONS",
@@ -101,21 +115,41 @@ def _iso(dt):
     return dt.astimezone(datetime.timezone.utc).isoformat()
 
 
+class SweepImpossible(Exception):
+    """The sweep could not determine what to sweep. Not the same as finding
+    nothing."""
+
+
 def platform_accounts():
-    """Accounts to sweep, from the registry rather than from a list here.
+    """Accounts to sweep, from a map rather than from a list in this file.
 
     B-064: a hand-maintained account list was missing Forensics, so an entire
-    account went unchecked and nothing said so. The registry is the source of
-    truth and is updated by provisioning.
+    account went unchecked and nothing said so.
+
+    Raises rather than returning empty. An empty account list produces a sweep
+    that examines nothing and reports no findings, which reads exactly like a
+    clean estate -- and this is the control whose entire job is to prove a
+    negative. A sweep that proves nothing must not look like one that proved
+    something.
     """
+    try:
+        raw = ssm.get_parameter(Name=ACCOUNT_TIER_PARAM)["Parameter"]["Value"]
+        mapping = json.loads(raw)
+    except Exception as exc:                       # noqa: BLE001
+        raise SweepImpossible(
+            f"could not read {ACCOUNT_TIER_PARAM}: {type(exc).__name__}. "
+            "The list of accounts to sweep is unavailable, so nothing was "
+            "examined. This is NOT a finding that the estate is clean.") from exc
+
     out = {}
-    paginator = ssm.get_paginator("get_parameters_by_path")
-    for page in paginator.paginate(Path=ACCOUNT_PREFIX):
-        for param in page.get("Parameters") or []:
-            alias = param["Name"].rsplit("/", 1)[-1]
-            value = (param.get("Value") or "").strip()
-            if value and value != "None":
-                out[alias] = value
+    for account_id, tier in (mapping or {}).items():
+        if str(account_id).isdigit():
+            out[str(account_id)] = str(account_id)
+    if not out:
+        raise SweepImpossible(
+            f"{ACCOUNT_TIER_PARAM} lists no accounts. Nothing was swept, and "
+            "no conclusion can be drawn about whether a quorum action "
+            "happened without approval.")
     return out
 
 
@@ -278,7 +312,25 @@ def _emit(finding):
 def reverse(event=None, context=None):
     """Sweep CloudTrail for quorum actions and check each against Jira."""
     since = _now() - datetime.timedelta(hours=LOOKBACK_HOURS)
-    accounts = platform_accounts()
+    try:
+        accounts = platform_accounts()
+    except SweepImpossible as exc:
+        # Emitted as a finding about the PLATFORM and returned as a distinct
+        # outcome. The one thing it must never do is return zeros.
+        out = {"record_type": "quorum-reverse-reconciliation",
+               "reconciled_at": _iso(_now()),
+               "swept": False, "reason": str(exc)}
+        _emit({
+            "record_type": "quorum-reverse-sweep-gap",
+            "recorded_at": _iso(_now()),
+            "current_state": "ALARM",
+            "routing": "review_queue",
+            "alarm": {"name": "platform-quorum-sweep-impossible",
+                      "resource_id": ACCOUNT_TIER_PARAM},
+            "assessment": {"probable_cause": str(exc)},
+        })
+        print(json.dumps(out, default=str))
+        return out
     results = []
     unreadable = []
 
@@ -355,6 +407,20 @@ def reverse(event=None, context=None):
         "events": len(results),
         "outcomes": counts,
         "findings": len(findings),
+        # Always present, always explicit. `findings: 0` means something very
+        # different depending on this flag, and a consumer should not have to
+        # infer which it is looking at.
+        "swept": True,
+        # WHY an account could not be swept, not just how many.
+        #
+        # The first version reported a count and sent the reasons only to the
+        # event bus, so the one place somebody looks when running this by hand
+        # said "6 unreadable" and nothing else. Diagnosing the platform's own
+        # control should not require reading the alert stream it feeds.
+        #
+        # Deduplicated: six accounts failing for one reason is one problem, and
+        # six copies of it buries the case where they differ.
+        "unreadable_reasons": sorted({u["problem"] for u in unreadable}),
     }
     print(json.dumps(out, default=str))
     return out

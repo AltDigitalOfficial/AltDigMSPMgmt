@@ -70,6 +70,19 @@ Parameters:
       machine's execution role. Exactly one principal, named in full. An
       account-root principal here would let anything in Audit assume it.
 
+  QuorumReverseRoleArn:
+    Type: String
+    Default: ''
+    Description: >-
+      The Audit-account role that runs the reverse reconciliation sweep. Given
+      a read-only role here so it can call cloudtrail:LookupEvents.
+
+      It cannot use OrganizationAccountAccessRole: that role trusts the
+      MANAGEMENT account only, so a sweep running from Audit gets AccessDenied
+      against every account in the estate. Empty disables the reader entirely,
+      which leaves the sweep reporting that account as unreadable -- visibly,
+      rather than as a clean result.
+
   Scope:
     Type: String
     Default: member
@@ -90,6 +103,7 @@ Conditions:
 
   IsMember: !Equals [!Ref Scope, member]
   IsManagement: !Equals [!Ref Scope, management]
+  HasReverseRole: !Not [!Equals [!Ref QuorumReverseRoleArn, '']]
 
 Resources:
 
@@ -231,6 +245,62 @@ Resources:
             Action:
               - organizations:RemoveAccountFromOrganization
               - organizations:DescribeAccount
+            Resource: '*'
+
+  # -------------------------------------------------------------------------
+  # The reader
+  # -------------------------------------------------------------------------
+  # Separate from the executor, and the separation is not cosmetic. The sweep
+  # that checks whether quorum actions were approved must not be able to
+  # PERFORM one -- a component that could both act and audit its own action is
+  # the same circularity that keeps jira.py read-only and keeps the filer away
+  # from approval endpoints.
+  #
+  # So: two roles, two trust policies, no overlap. The reader can read
+  # CloudTrail and nothing else.
+
+  QuorumReaderRole:
+    Type: AWS::IAM::Role
+    Condition: HasReverseRole
+    Properties:
+      RoleName: PlatformQuorumReader
+      Description: >-
+        Read-only CloudTrail access for the quorum reverse reconciliation.
+        Holds no permission to perform any quorum action.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OnlyTheReverseSweep
+            Effect: Allow
+            Principal:
+              AWS: !Ref QuorumReverseRoleArn
+            Action: sts:AssumeRole
+      Tags:
+        - Key: platform:component
+          Value: quorum
+        - Key: platform:managed-by
+          Value: altdigital
+
+  QuorumReaderPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasReverseRole
+    Properties:
+      PolicyName: ReadCloudTrailOnly
+      Roles:
+        - !Ref QuorumReaderRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # LookupEvents has no resource-level permissions -- the events are
+          # not addressable resources -- so '*' is the only expressible form.
+          # The narrowing that matters is the action list, which is two
+          # read-only calls.
+          - Sid: LookupQuorumActions
+            Effect: Allow
+            Action:
+              - cloudtrail:LookupEvents
+              - cloudtrail:DescribeTrails
             Resource: '*'
 
 Outputs:

@@ -206,6 +206,66 @@ Resources:
   # running CloudFormation in a loop, or an autoscaling group churning launch
   # template versions, could produce thousands — at which point the right
   # answer is a narrower list, not a bigger table.
+  # -------------------------------------------------------------------------
+  # Protected actions
+  # -------------------------------------------------------------------------
+  # design/03-identity-and-access.md, on the quorum-controlled actions:
+  #
+  #     Any attempt against these actions -- successful or denied -- pages
+  #     immediately. A denied attempt is either confusion or something worse;
+  #     both warrant knowing within minutes.
+  #
+  # containment/10-containment.yaml has the rule that declares them, listening
+  # on the organization bus in Audit. Nothing put these events on that bus.
+  #
+  # So the control was inert for every member account in the estate. It could
+  # only ever have fired for an action taken inside Audit itself -- which is
+  # not where tenant keys, vaults or trails live. Found when a key deletion in
+  # the sandbox produced no declaration, while the quorum reverse sweep caught
+  # it. B-087.
+  #
+  # A SEPARATE rule from DeploymentForwarding rather than more event names in
+  # that one. They answer to different designs (08 and 03), they page
+  # differently, and a single pattern means every future edit to one is an edit
+  # to the other -- which is how the deployment list quietly acquires a
+  # security event, or how a narrowing for cost quietly drops a page.
+  ProtectedActionForwarding:
+    Type: AWS::Events::Rule
+    Condition: HasBus
+    Properties:
+      Name: platform-forward-protected-actions
+      Description: >-
+        Quorum-controlled and audit-tampering actions. design 03's four, plus
+        the reversible siblings design 07 wants declared. Successful or denied.
+      EventPattern:
+        source: ['aws.kms', 'aws.cloudtrail', 'aws.backup', 'aws.config',
+                 'aws.organizations']
+        detail-type: ['AWS API Call via CloudTrail']
+        detail:
+          eventName:
+            # design 03's four quorum-controlled actions
+            - ScheduleKeyDeletion
+            - DeleteBackupVault
+            - PutBackupVaultLockConfiguration
+            - DeleteBackupVaultLockConfiguration
+            - RemoveAccountFromOrganization
+            - StopLogging
+            - DeleteTrail
+            - StopConfigurationRecorder
+            - DeleteConfigurationRecorder
+            # Reversible, and declared anyway. design 07 lists these alongside
+            # the destructive ones: disabling a key or editing a trail is how
+            # somebody tests whether anyone is watching before doing the
+            # irreversible version.
+            - DisableKey
+            - UpdateTrail
+            - DeleteRecoveryPoint
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+
   DeploymentForwarding:
     Type: AWS::Events::Rule
     Condition: HasBus

@@ -1,0 +1,711 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — quorum verification and execution (prompt 8.3).
+  Verifies design 08's five conditions against JSM approval records, performs
+  the approved action through a session-scoped role, and reconciles CloudTrail
+  in the opposite direction. Deploys to the Audit account.
+
+# ---------------------------------------------------------------------------
+# What this stack is for
+# ---------------------------------------------------------------------------
+# design/03-identity-and-access.md puts four actions behind two approvals from
+# distinct people: kms:ScheduleKeyDeletion, backup vault deletion or lock
+# modification, removal of a member account from the Organization, and
+# disabling CloudTrail or the Config recorder. It also says:
+#
+#     These are denied outright in the relevant resource policies and SCPs. The
+#     only execution path is a platform pipeline that verifies two recorded
+#     approvals before assuming a permitted role.
+#
+# This is that pipeline.
+#
+# ---------------------------------------------------------------------------
+# Why the state machine has a REFUSE branch and not just a failure
+# ---------------------------------------------------------------------------
+# A refusal is an outcome worth recording, not an error to be retried. Somebody
+# asked for a key to be deleted and the platform declined; that is the control
+# working, and the record of it is evidence the control operated. A state
+# machine that simply failed would leave the reason in an execution history
+# that expires, rather than in the evidence table that does not.
+#
+# The distinction the branch preserves is the one verify.py exists for:
+#
+#     refused          a condition demonstrably failed. Somebody should look at
+#                      the change record.
+#     undeterminable   the question could not be answered. Somebody should look
+#                      at the PLATFORM.
+#
+# Both stop execution. They send different people to different places.
+#
+# ---------------------------------------------------------------------------
+# No second alarm path for the actions themselves
+# ---------------------------------------------------------------------------
+# containment/10-containment.yaml already declares every attempt against these
+# actions, successful or denied, and pages. That is design 07's requirement and
+# it is met. This stack deliberately does NOT add a CloudWatch alarm on the
+# same events — two paths watching one signal is how one of them rots without
+# anybody noticing. What this stack adds is the reverse reconciliation, which
+# asks a question the declaration path cannot: not "did something happen" but
+# "did anybody approve it".
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+    Description: >-
+      The organization event bus. Reverse-reconciliation findings are published
+      here and routed by alerting/src/router.py like any other finding.
+
+  EvidenceTableName:
+    Type: String
+    Default: platform-quorum-evidence
+    Description: Append-only record of every quorum decision and action.
+
+  JiraSite:
+    Type: String
+    Description: e.g. https://altdigitalmsp.atlassian.net
+
+  JiraSecretName:
+    Type: String
+    Default: platform/jira/service-account
+
+  JiraChangeIssueType:
+    Type: String
+    Default: '[System] Change'
+
+  QuorumApproversParam:
+    Type: String
+    Default: /platform/quorum/approvers
+    Description: >-
+      SSM parameter holding the authorised approver accountIds and the minimum
+      count. Written by scripts/sync-quorum-approvers.sh. Not in the repository:
+      an accountId identifies an individual.
+
+  ExecutorRoleName:
+    Type: String
+    Default: PlatformQuorumExecutor
+    Description: >-
+      The role assumed in the target account to perform an approved action.
+      Must stay inside the Platform* prefix protected by
+      policies/scp/03-protect-platform-identity.json.
+
+  MemberReadRoleName:
+    Type: String
+    Default: PlatformQuorumReader
+    Description: >-
+      The role the reverse sweep assumes to read CloudTrail in each account,
+      deployed by quorum/00-executor-role.yaml.
+
+      NOT OrganizationAccountAccessRole, which trusts the management account
+      only -- a sweep running from Audit gets AccessDenied against every
+      account in the estate, and reports six unreadable accounts rather than
+      six clean ones. B-086.
+
+  AccountTierParam:
+    Type: String
+    Default: /platform/routing/account-tiers
+    Description: >-
+      Map of account id to environment tier, synced into this account by the
+      alerting pipeline. Used here as the list of accounts to sweep: it is the
+      one account inventory that exists in Audit.
+
+  AllowedRegions:
+    Type: String
+    Default: 'us-east-1,us-east-2,us-west-2'
+    Description: Regions the reverse sweep looks in.
+
+  ReverseLookbackHours:
+    Type: Number
+    Default: 26
+    Description: >-
+      Wider than the schedule interval, deliberately. A sweep that looked back
+      exactly one interval would lose anything that happened while the previous
+      sweep was running, and nothing would ever revisit it.
+
+  ReverseSchedule:
+    Type: String
+    Default: 'rate(6 hours)'
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Evidence
+  # -------------------------------------------------------------------------
+  # design 08: "Snapshot the approval evidence immutably into Truveon at the
+  # moment of execution, because Jira history can be altered by a project admin
+  # and auditors will ask about that."
+  #
+  # Truveon ingestion is prompt 9.1 and does not exist yet, so this table is
+  # the durable record in the meantime and remains the source 9.1 will push
+  # from. The snapshot is taken at execution time and copies the approver
+  # accountIds into the row, so the evidence stands alone: an auditor reading
+  # it does not have to join against a Jira that may since have been edited,
+  # which is the exact risk design 08 names.
+
+  EvidenceTable:
+    Type: AWS::DynamoDB::Table
+    # Retain, and more strongly than the change table. This is the record that
+    # two named people authorised the destruction of something. It outlives the
+    # stack, the pipeline and probably the platform.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref EvidenceTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: record_type, AttributeType: S }
+      KeySchema:
+        # PK is quorum#<issue-key>, SK is <timestamp>#<record_type>. Every row
+        # for one change record sorts together in the order it happened, which
+        # is how somebody reconstructs a single decision: the attempt, the
+        # verification it rested on, and what came of it.
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        # "Every execution in this period", without knowing the issue keys.
+        - IndexName: by-record-type
+          KeySchema:
+            - { AttributeName: record_type, KeyType: HASH }
+            - { AttributeName: SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: platform:component
+          Value: quorum
+        - Key: platform:evidence
+          Value: 'true'
+
+  # -------------------------------------------------------------------------
+  # Verification
+  # -------------------------------------------------------------------------
+
+  VerifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformQuorumVerify
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: ReadWhatIsNeededToJudge
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The approver list and the Jira credential. Nothing else, and
+              # nothing writable: this role decides and does not act. If it
+              # could write to the evidence table it could record a decision it
+              # did not make.
+              - Sid: ReadApproverList
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${QuorumApproversParam}'
+              - Sid: ReadJiraCredential
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${JiraSecretName}-*'
+
+  VerifyLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-quorum-verify
+      # Seven years. The log of why an action was permitted or refused is
+      # evidence that the control operated, and the period an auditor asks
+      # about is measured in years.
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  VerifyFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: VerifyLogGroup
+    Properties:
+      FunctionName: platform-quorum-verify
+      Runtime: python3.12
+      Handler: verify.handler
+      Role: !GetAtt VerifyRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          JIRA_SITE: !Ref JiraSite
+          JIRA_SECRET_NAME: !Ref JiraSecretName
+          JIRA_CHANGE_ISSUETYPE: !Ref JiraChangeIssueType
+          QUORUM_APPROVERS_PARAM: !Ref QuorumApproversParam
+
+  # -------------------------------------------------------------------------
+  # Execution
+  # -------------------------------------------------------------------------
+
+  ExecuteRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformQuorumExecute
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  ExecutePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: PerformApprovedActions
+      Roles:
+        - !Ref ExecuteRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+
+          # The only way to reach a destructive permission: assume the executor
+          # role in the target account. This role holds no destructive
+          # permission of its own, so a bug here cannot delete anything without
+          # first going through an assume-role that the state machine only
+          # reaches after a verified approval.
+          - Sid: AssumeTheExecutorRole
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${ExecutorRoleName}'
+
+          # PutItem ONLY.
+          #
+          # This is where the evidence table's immutability actually lives. Not
+          # in a comment, not in the writing code, and not in a condition
+          # expression that a future edit could drop -- in the absence of
+          # UpdateItem and DeleteItem from the only role that writes here. A
+          # component that cannot express a rewrite cannot rewrite history
+          # however badly it is later modified.
+          - Sid: AppendEvidenceOnly
+            Effect: Allow
+            Action: dynamodb:PutItem
+            Resource: !GetAtt EvidenceTable.Arn
+
+          - Sid: ReadApproverList
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${QuorumApproversParam}'
+
+          - Sid: ReadJiraCredential
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${JiraSecretName}-*'
+
+  ExecuteLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-quorum-execute
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ExecuteFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ExecuteLogGroup
+    Properties:
+      FunctionName: platform-quorum-execute
+      Runtime: python3.12
+      Handler: execute.handler
+      Role: !GetAtt ExecuteRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      # No ReservedConcurrentExecutions, and the reason is worth stating
+      # because its absence looks like an oversight.
+      #
+      # This account's Lambda concurrency quota is 10 -- the new-account
+      # default -- and AWS refuses any reservation that would leave fewer than
+      # 10 unreserved. So no function here can reserve concurrency at all until
+      # the quota is raised. B-085.
+      #
+      # It matters less than it first appeared. Reserving 1 would have
+      # prevented two destructive actions running in PARALLEL; it would not
+      # have prevented the case that actually matters, which is the same
+      # approval being executed TWICE in sequence. execute.py enforces that
+      # directly with a one-approval-one-execution lock in the evidence table,
+      # which is the stronger control and does not depend on a quota.
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          JIRA_SITE: !Ref JiraSite
+          JIRA_SECRET_NAME: !Ref JiraSecretName
+          JIRA_CHANGE_ISSUETYPE: !Ref JiraChangeIssueType
+          QUORUM_APPROVERS_PARAM: !Ref QuorumApproversParam
+          QUORUM_EVIDENCE_TABLE: !Ref EvidenceTable
+          QUORUM_EXECUTOR_ROLE: !Ref ExecutorRoleName
+
+  # -------------------------------------------------------------------------
+  # Reverse reconciliation
+  # -------------------------------------------------------------------------
+
+  ReverseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformQuorumReverse
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  ReversePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SweepCloudTrailForQuorumActions
+      Roles:
+        - !Ref ReverseRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadMemberCloudTrail
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${MemberReadRoleName}'
+          - Sid: ReadAccountRegistry
+            Effect: Allow
+            Action:
+              - ssm:GetParametersByPath
+              - ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/*'
+          - Sid: ReadJiraCredential
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${JiraSecretName}-*'
+          - Sid: PublishFindings
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  ReverseLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-quorum-reverse
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ReverseFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ReverseLogGroup
+    Properties:
+      FunctionName: platform-quorum-reverse
+      Runtime: python3.12
+      Handler: reverse.handler
+      Role: !GetAtt ReverseRole.Arn
+      # Every account, every allowed region, nine event names each. Slow and
+      # infrequent; the timeout is sized for the sweep rather than for a
+      # typical run that finds nothing.
+      Timeout: 900
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          JIRA_SITE: !Ref JiraSite
+          JIRA_SECRET_NAME: !Ref JiraSecretName
+          JIRA_CHANGE_ISSUETYPE: !Ref JiraChangeIssueType
+          QUORUM_APPROVERS_PARAM: !Ref QuorumApproversParam
+          QUORUM_EXECUTOR_ROLE: !Ref ExecutorRoleName
+          QUORUM_READ_ROLE: !Ref MemberReadRoleName
+          QUORUM_REVERSE_LOOKBACK_HOURS: !Ref ReverseLookbackHours
+          PLATFORM_ALLOWED_REGIONS: !Ref AllowedRegions
+          ALERT_BUS_NAME: !Ref AlertBusName
+          # Which accounts to sweep. The tier map rather than the account
+          # registry, because the registry lives in the MANAGEMENT account and
+          # this function runs in Audit -- reading it here finds nothing and
+          # sweeps nothing. B-086.
+          ACCOUNT_TIER_PARAM: !Ref AccountTierParam
+
+  ReverseScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-quorum-reverse-reconciliation
+      Description: >-
+        Proves the negative: every quorum action in CloudTrail maps to an
+        approved change, or is a finding.
+      ScheduleExpression: !Ref ReverseSchedule
+      State: ENABLED
+      Targets:
+        - Id: reverse
+          Arn: !GetAtt ReverseFunction.Arn
+
+  ReverseScheduleRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ReverseFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReverseScheduleRule.Arn
+
+  # -------------------------------------------------------------------------
+  # The pipeline
+  # -------------------------------------------------------------------------
+
+  QuorumStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformQuorumPipeline
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeTheTwoSteps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeVerifyAndExecute
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt VerifyFunction.Arn
+                  - !GetAtt ExecuteFunction.Arn
+              # Vended logging. Step Functions manages the log delivery itself
+              # and the API requires these on '*' -- a delivery is not an
+              # addressable resource, so there is nothing narrower to name.
+              # Without them the state machine fails to CREATE, with
+              # "The state machine IAM Role is not authorized to access the Log
+              # Destination", which points at the log group rather than at the
+              # missing permissions.
+              - Sid: VendedLogDelivery
+                Effect: Allow
+                Action:
+                  - 'logs:CreateLogDelivery'
+                  - 'logs:GetLogDelivery'
+                  - 'logs:UpdateLogDelivery'
+                  - 'logs:DeleteLogDelivery'
+                  - 'logs:ListLogDeliveries'
+                  - 'logs:PutResourcePolicy'
+                  - 'logs:DescribeResourcePolicies'
+                  - 'logs:DescribeLogGroups'
+                Resource: '*' 
+
+  QuorumStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: platform-quorum
+      RoleArn: !GetAtt QuorumStateMachineRole.Arn
+      # DefinitionSubstitutions, not !Sub.
+      #
+      # The two are mutually exclusive on this resource, and a definition
+      # written with !Sub silently loses every ${} the substitution map would
+      # have filled. Learned in Phase 6 and repeated here because the failure
+      # is a state machine that deploys cleanly and fails at runtime.
+      DefinitionSubstitutions:
+        VerifyFunctionArn: !GetAtt VerifyFunction.Arn
+        ExecuteFunctionArn: !GetAtt ExecuteFunction.Arn
+      DefinitionString: |
+        {
+          "Comment": "Verify two-party approval, then perform the approved action. design 03 and design 08.",
+          "StartAt": "Initialise",
+          "States": {
+
+            "Initialise": {
+              "Comment": "Seeds every optional field the later states reference. Step Functions fails a state whose Parameters name a missing JSONPath, so an absent optional field is a runtime failure rather than a null -- B-057, found the same way in containment.",
+              "Type": "Pass",
+              "Parameters": {
+                "issue.$": "$.issue",
+                "action.$": "$.action",
+                "resource.$": "$.resource",
+                "account_id.$": "$.account_id",
+                "region.$": "$$.Execution.Input.region"
+              },
+              "ResultPath": "$.request",
+              "Next": "Verify"
+            },
+
+            "Verify": {
+              "Type": "Task",
+              "Resource": "${VerifyFunctionArn}",
+              "Parameters": {
+                "action_type": "verify",
+                "issue.$": "$.request.issue",
+                "action.$": "$.request.action",
+                "resource.$": "$.request.resource"
+              },
+              "ResultPath": "$.verification",
+              "Retry": [
+                {
+                  "Comment": "Transient only. A refusal is a RESULT and is not retried -- retrying a refusal is how a control gets worn down until it passes.",
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "Undeterminable"
+                }
+              ],
+              "Next": "Approved?"
+            },
+
+            "Approved?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.verification.verdict",
+                  "StringEquals": "approved",
+                  "Next": "Execute"
+                },
+                {
+                  "Comment": "Undeterminable is NOT refused. Both stop execution; they send different people to different places. One is a question about the change record, the other is a question about the platform.",
+                  "Variable": "$.verification.verdict",
+                  "StringEquals": "undeterminable",
+                  "Next": "Undeterminable"
+                }
+              ],
+              "Default": "Refused"
+            },
+
+            "Execute": {
+              "Type": "Task",
+              "Resource": "${ExecuteFunctionArn}",
+              "Parameters": {
+                "action_type": "execute",
+                "issue.$": "$.request.issue",
+                "action.$": "$.request.action",
+                "resource.$": "$.request.resource",
+                "account_id.$": "$.request.account_id",
+                "region.$": "$.request.region",
+                "verification.$": "$.verification"
+              },
+              "ResultPath": "$.execution",
+              "Comment": "No Retry. Every destructive action in this platform is attempted exactly once: a retry after an ambiguous failure could delete a second thing, and execute.py re-verifies on entry so a retry would also re-read an approval that may have changed. A failure here is for a human.",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "ExecutionFailed"
+                }
+              ],
+              "End": true
+            },
+
+            "Refused": {
+              "Comment": "A condition failed. The evidence is in the verification result, which the caller reads from the execution output.",
+              "Type": "Fail",
+              "Error": "QuorumRefused",
+              "Cause": "A condition in design 08's five was not satisfied. See the verification result in the execution history."
+            },
+
+            "Undeterminable": {
+              "Comment": "The question could not be answered -- Jira unreachable, approver list unreadable, the record not yet at its approval step, or no target declared. A finding about the platform, not about the requester.",
+              "Type": "Fail",
+              "Error": "QuorumUndeterminable",
+              "Cause": "Two-party approval could not be verified. This is not a refusal: nothing has been concluded about whether the action was approved."
+            },
+
+            "ExecutionFailed": {
+              "Comment": "Verified and approved, and the action itself failed. An operator needs to know whether the resource is in the state they expect -- the evidence table holds the attempt row either way.",
+              "Type": "Fail",
+              "Error": "QuorumExecutionFailed",
+              "Cause": "The approved action was attempted and failed. See the evidence table."
+            }
+          }
+        }
+      LoggingConfiguration:
+        Level: ALL
+        # Execution data stays OUT of the state machine log, and this matters
+        # more here than it does for containment.
+        #
+        # A quorum execution carries the approver accountIds, the requester,
+        # the resource being destroyed and the full verification result. All of
+        # it is already written to the evidence table -- append-only, KMS
+        # encrypted, seven-year retention, and the only role that writes there
+        # cannot rewrite it. Copying it into a second place doubles what has to
+        # be protected and secured for no gain, and one of those copies would
+        # be the one nobody remembers to check.
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      Tags:
+        - Key: platform:component
+          Value: quorum
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/vendedlogs/states/platform-quorum
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+Outputs:
+
+  ExecuteRoleArn:
+    Description: >-
+      Pass this as QuorumPipelineRoleArn to quorum/00-executor-role.yaml. It is
+      the only principal that template will trust.
+    Value: !GetAtt ExecuteRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ExecuteRoleArn'
+
+  StateMachineArn:
+    Description: The quorum pipeline.
+    Value: !Ref QuorumStateMachine
+
+  EvidenceTableName:
+    Description: Append-only quorum evidence.
+    Value: !Ref EvidenceTable
+
+  ReverseFunctionName:
+    Description: Reverse reconciliation, for running a sweep by hand.
+    Value: !Ref ReverseFunction

@@ -178,27 +178,60 @@ def _assume(account_id, region, issue, action, resource):
     ), session_name
 
 
-def _record(item):
+def _record(issue, record_type, item):
     """Append one evidence row. Never updates, never deletes.
 
     Immutability is enforced by the absence of UpdateItem and DeleteItem from
-    the execution role's IAM policy, not by anything here. A bug in this
-    function cannot rewrite history because the credentials it runs under
-    cannot express the request.
+    this function's IAM policy, not by anything written here. A bug in this
+    code cannot rewrite history because the credentials it runs under cannot
+    express the request.
+
+    PK groups every row for one change record; SK orders them by when they
+    happened. Reconstructing a single decision -- the attempt, the verification
+    it rested on, what came of it -- is one query.
     """
+    at = _now().isoformat()
+    row = {
+        "PK": f"quorum#{issue}",
+        "SK": f"{at}#{record_type}",
+        "record_type": record_type,
+        **item,
+    }
     if not EVIDENCE_TABLE:
-        print(json.dumps({"evidence_not_written": item}, default=str))
-        return
+        print(json.dumps({"evidence_not_written": row}, default=str))
+        return row
     dynamodb.put_item(
         TableName=EVIDENCE_TABLE,
         Item={k: {"S": json.dumps(v, default=str)
                   if isinstance(v, (dict, list)) else str(v)}
-              for k, v in item.items() if v is not None},
-        # Append-only at the API level too: refuse to overwrite a row that
-        # already exists, rather than trusting every caller to pick a unique
-        # key. A collision is a bug worth hearing about, not a silent
-        # overwrite of evidence.
-        ConditionExpression="attribute_not_exists(evidence_id)",
+              for k, v in row.items() if v is not None},
+        # Append-only at the API level too. Refusing to overwrite an existing
+        # row is belt to the IAM policy's braces: a collision is a bug worth
+        # hearing about rather than a silent overwrite of evidence.
+        ConditionExpression="attribute_not_exists(PK)",
+    )
+    return row
+
+
+def _record_lock(issue, action, resource, at):
+    """Claim this approval. Raises ConditionalCheckFailedException if taken.
+
+    A deterministic SK, unlike every other row in this table -- the whole point
+    is that a second write collides. `attribute_not_exists(PK)` evaluates
+    against the item this write would replace, so it succeeds only when no such
+    item exists.
+    """
+    if not EVIDENCE_TABLE:
+        return
+    dynamodb.put_item(
+        TableName=EVIDENCE_TABLE,
+        Item={
+            "PK": {"S": f"quorum#{issue}"},
+            "SK": {"S": f"LOCK#{action}#{resource}"},
+            "record_type": {"S": "quorum-execution-lock"},
+            "claimed_at": {"S": at.isoformat()},
+        },
+        ConditionExpression="attribute_not_exists(PK)",
     )
 
 
@@ -219,7 +252,6 @@ def execute(event, context=None):
     account_id = event.get("account_id")
     region = event.get("region") or os.environ.get("AWS_REGION")
     started = _now()
-    evidence_id = f"{issue}#{started.isoformat()}"
 
     if action not in ACTION_SPEC:
         raise ExecutionRefused(
@@ -234,8 +266,6 @@ def execute(event, context=None):
                            "resource": resource})
 
     attempt = {
-        "evidence_id": evidence_id,
-        "record_type": "quorum-execution-attempt",
         "issue": issue,
         "action": action,
         "resource": resource,
@@ -245,15 +275,13 @@ def execute(event, context=None):
         "verification_at_gate": event.get("verification"),
         "verification_at_execution": fresh,
     }
-    _record(attempt)
+    _record(issue, "quorum-execution-attempt", attempt)
 
     if fresh.get("verdict") != verify.VERDICT_APPROVED:
         # Recorded as a refusal, which is itself evidence worth keeping: a
         # request that reached the execution step and was turned away at the
         # last moment is more interesting than one that never got there.
         outcome = {
-            "evidence_id": f"{evidence_id}#refused",
-            "record_type": "quorum-execution-refused",
             "issue": issue, "action": action, "resource": resource,
             "account_id": account_id,
             "refused_at": _now().isoformat(),
@@ -261,12 +289,42 @@ def execute(event, context=None):
             "failures": fresh.get("failures"),
             "reason": fresh.get("reason"),
         }
-        _record(outcome)
+        _record(issue, "quorum-execution-refused", outcome)
         print(json.dumps(outcome, default=str))
         raise ExecutionRefused(
             f"{issue} did not verify at execution time: "
             f"{fresh.get('verdict')}. "
             f"{fresh.get('reason') or fresh.get('failures')}")
+
+    # ---- One approval, one execution.
+    #
+    # A deterministic row per (issue, action, resource) written with a
+    # conditional put. A second attempt to act on the same approval fails the
+    # condition and is refused.
+    #
+    # This is what a reader expects "two people approved this" to mean: they
+    # approved the thing happening, once. Without it, an approved record can be
+    # replayed -- by a retry, by somebody re-running the state machine, or by
+    # anybody who can start an execution -- and every replay verifies perfectly
+    # because the approval is genuinely still there.
+    #
+    # DynamoDB's conditional write is the whole mechanism. It is atomic, so two
+    # simultaneous executions cannot both win it, which also covers the
+    # parallel case that reserved concurrency would have handled.
+    try:
+        _record_lock(issue, action, resource, started)
+    except dynamodb.exceptions.ConditionalCheckFailedException:
+        outcome = {
+            "issue": issue, "action": action, "resource": resource,
+            "account_id": account_id,
+            "refused_at": _now().isoformat(),
+            "verdict": "already-executed",
+        }
+        _record(issue, "quorum-execution-refused", outcome)
+        raise ExecutionRefused(
+            f"{issue} has already been executed against {resource}. "
+            "An approval authorises an action once. If it genuinely needs to "
+            "happen again, that is a new change record and a new approval.")
 
     client, session_name = _assume(account_id, region, issue, action, resource)
 
@@ -283,8 +341,6 @@ def execute(event, context=None):
         error = f"{type(exc).__name__}: {exc}"
 
     outcome = {
-        "evidence_id": f"{evidence_id}#{status}",
-        "record_type": f"quorum-execution-{status}",
         "issue": issue, "action": action, "resource": resource,
         "account_id": account_id, "region": region,
         "session_name": session_name,
@@ -298,7 +354,7 @@ def execute(event, context=None):
         "approver_account_ids": fresh.get("approver_account_ids"),
         "requester_account_id": fresh.get("requester_account_id"),
     }
-    _record(outcome)
+    _record(issue, f"quorum-execution-{status}", outcome)
     print(json.dumps(outcome, default=str))
 
     if error:
