@@ -386,7 +386,164 @@ def _missing_sequences(rows, cutoff):
     return sorted(missing)
 
 
-HANDLERS = {"heartbeat": heartbeat, "detect_gaps": detect_gaps}
+# ---------------------------------------------------------------------------
+# Count reconciliation
+# ---------------------------------------------------------------------------
+
+
+def reconcile_counts(event=None, context=None):
+    """design 04's fourth control: periodic count comparison with Truveon.
+
+    Asks both sides how many records exist for a stream over a window and
+    compares. The window is by `emitted_at` -- the platform's clock -- because
+    `occurred_at` is the source's, and a Config evaluation arriving late would
+    otherwise make a healthy period look short on one side only.
+
+    Counts alone prove less than they look like they do. Equal totals can hide
+    one record lost and one duplicated, so the sequence RANGE is compared too:
+    a window holding `count` records between `min_sequence` and `max_sequence`
+    should satisfy `max - min + 1 == count`, and a stream that does not is
+    reporting a total that does not describe its own contents.
+
+    With no endpoint configured this does NOT report a match. It reports that
+    no comparison was possible. B-088, and the same rule as everywhere in this
+    module: an unanswerable question is not a negative answer.
+    """
+    endpoint = os.environ.get("TRUVEON_ENDPOINT", "").rstrip("/")
+    window_hours = int(os.environ.get("EVIDENCE_RECONCILE_HOURS", "26"))
+    until = _now()
+    since = until - datetime.timedelta(hours=window_hours)
+
+    if not endpoint:
+        out = {"record_type": "evidence-count-reconciliation",
+               "compared": False,
+               "reason": ("TRUVEON_ENDPOINT is not configured, so the far side "
+                          "of the comparison does not exist yet (B-088). No "
+                          "conclusion is drawn about whether counts agree.")}
+        _emit({
+            "record_type": "evidence-completeness-finding",
+            "recorded_at": _iso(_now()),
+            "current_state": "ALARM",
+            "routing": "digest",
+            "alarm": {"name": "platform-evidence-reconciliation-impossible",
+                      "resource_id": "truveon"},
+            "assessment": {"probable_cause": out["reason"]},
+        })
+        print(json.dumps(out, default=str))
+        return out
+
+    try:
+        registry = tenants()
+    except TenantsUnknown as exc:
+        out = {"record_type": "evidence-count-reconciliation",
+               "compared": False, "reason": str(exc)}
+        print(json.dumps(out, default=str))
+        return out
+
+    compared, mismatches = 0, []
+    for tenant, facts in sorted(registry.items()):
+        partner = (facts or {}).get("partner")
+        for category in sorted(record.CATEGORIES):
+            stream = record.stream_id(tenant, category)
+            ours = _count_ours(stream, since, until)
+            if ours is None:
+                continue
+            theirs = _count_theirs(endpoint, stream, since, until)
+            compared += 1
+            result = {
+                "stream_id": stream, "tenant": tenant, "partner": partner,
+                "window_start": _iso(since), "window_end": _iso(until),
+                "source_count": ours["count"],
+                "truveon_count": (theirs or {}).get("count"),
+                "source_range": [ours["min"], ours["max"]],
+                "truveon_range": [(theirs or {}).get("min_sequence"),
+                                  (theirs or {}).get("max_sequence")],
+                "unreadable": theirs is None,
+            }
+            agrees = (theirs is not None
+                      and theirs.get("count") == ours["count"])
+            result["agrees"] = agrees
+            # Persisted whether or not it agrees. A comparison that matched is
+            # evidence the control operated; only keeping the failures would
+            # leave an auditor unable to tell "checked and fine" from "never
+            # checked". D-016.
+            _persist(tenant=tenant, partner=partner, kind="count-reconciled",
+                     control_ref="evidence-pipeline-completeness",
+                     payload=result)
+            if not agrees:
+                mismatches.append(result)
+                _emit({
+                    "record_type": "evidence-completeness-finding",
+                    "recorded_at": _iso(_now()),
+                    "current_state": "ALARM",
+                    "routing": "digest_and_jira",
+                    "alarm": {"name": "platform-evidence-count-mismatch",
+                              "resource_id": stream},
+                    "assessment": {"probable_cause": (
+                        f"{stream}: the platform holds {ours['count']} record(s) "
+                        f"for this window, Truveon reports "
+                        f"{result['truveon_count']}. "
+                        + ("Truveon could not be read, so this is not yet a "
+                           "disagreement -- it is an unanswered question."
+                           if theirs is None else
+                           "The two stores disagree about a period that is "
+                           "closed, so one of them is missing records."))},
+                    "evidence_completeness": result,
+                })
+
+    out = {"record_type": "evidence-count-reconciliation", "compared": True,
+           "streams": compared, "mismatches": len(mismatches),
+           "window_hours": window_hours}
+    print(json.dumps(out, default=str))
+    return out
+
+
+def _count_ours(stream_id, since, until):
+    """How many records the platform allocated in this window."""
+    rows = _ledger_rows(stream_id)
+    if rows is None:
+        return None
+    seqs = []
+    for seq, row in rows.items():
+        if not isinstance(seq, int):
+            continue
+        emitted = _parse(row.get("emitted_at"))
+        if emitted and since <= emitted <= until:
+            seqs.append(seq)
+    if not seqs:
+        return None
+    return {"count": len(seqs), "min": min(seqs), "max": max(seqs)}
+
+
+def _count_theirs(endpoint, stream_id, since, until):
+    """Truveon's count for the same window, or None if it cannot be asked.
+
+    None is distinct from zero throughout. A Truveon that cannot be reached has
+    not told us it holds nothing.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    try:
+        import sender
+        token = sender._token()
+    except Exception:                              # noqa: BLE001
+        return None
+    query = urllib.parse.urlencode({
+        "stream_id": stream_id, "from": _iso(since), "to": _iso(until)})
+    req = urllib.request.Request(
+        f"{endpoint}/v1/evidence/count?{query}",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:                              # noqa: BLE001
+        return None
+
+
+HANDLERS = {"heartbeat": heartbeat, "detect_gaps": detect_gaps,
+            "reconcile_counts": reconcile_counts}
 
 
 def handler(event, context):

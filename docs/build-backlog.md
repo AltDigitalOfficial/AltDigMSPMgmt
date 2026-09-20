@@ -3143,3 +3143,49 @@ arn:...OrganizationAccountAccessRole/retest`, with `quorum_authorised_by: None`
 
 **Still open:** the forwarding StackSet is deployed to the sandbox OU only. The
 other OUs need the same update before this control is live estate-wide.
+
+## B-088 · Truveon's ingestion endpoint does not exist yet
+
+**Deferred with a trigger** — 2026-09-20. Not blocking 9.1.
+
+Prompt 9.1 says to treat Truveon as "an external endpoint that may be
+unavailable". It turns out to be better than that: Truveon is an AltDigital
+build on the same workstation, so **both ends of this contract are ours**.
+
+That inverts the usual direction. Rather than discovering an API and adapting to
+it, the contract is specified by what design 04's completeness controls
+require — written down in
+[docs/truveon-ingestion-contract.md](truveon-ingestion-contract.md) for the
+Truveon project to implement.
+
+**The two requirements that are easy to drop and expensive to drop:**
+
+*Ingest must be idempotent on `(stream_id, sequence)`.* The sender retries, so a
+Truveon that appended on every POST would accumulate duplicates — and the count
+reconciliation would then report a mismatch on a stream that is perfectly
+intact. The control would be wrong in the direction that costs an audit
+conversation rather than the direction that is merely noisy.
+
+*The 200 must mean PERSISTED, not received.* The sender marks its ledger row
+delivered on that response, and a delivered row is excluded from gap detection
+forever. An acknowledgement meaning "queued" lets Truveon lose a record the
+platform has already stopped looking for — which is precisely the silent
+failure the whole phase exists to prevent.
+
+**Until it exists,** the sender is deployed with no endpoint configured. It does
+NOT mark records delivered in that state: records stay pending, and the pipeline
+reports itself as not delivering. A stub that acknowledged locally would make
+the pipeline look healthy while sending nowhere, which is design 04's "clean
+month" reproduced inside the thing built to prevent it.
+
+**Trigger to revive:** whichever comes first —
+
+- the Truveon project implements `POST /v1/evidence`, at which point set
+  `TRUVEON_ENDPOINT` and the buffered backlog drains on its own, or
+- a tenant contract requires evidence delivery, which makes it blocking rather
+  than deferred.
+
+Nothing needs re-architecting at that point. The endpoint and credential are
+configuration, and the buffer means evidence produced in the meantime is
+delivered rather than lost — the same property the design asks for against a
+Truveon outage, exercised early by Truveon simply not being built yet.

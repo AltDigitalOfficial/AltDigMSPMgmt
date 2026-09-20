@@ -1,0 +1,636 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the evidence pipeline to Truveon (prompt 9.1).
+  Collects the four categories design 04 names, numbers them per tenant stream,
+  buffers them, delivers them, and proves nothing was silently dropped. Deploys
+  to the Audit account.
+
+# ---------------------------------------------------------------------------
+# The completeness controls are the stack
+# ---------------------------------------------------------------------------
+# design/04-security-controls-and-evidence.md:
+#
+#     Because we push, we must prove nothing was silently dropped.
+#     [...] A silently failed pipeline that looks like a clean month is the
+#     failure mode that destroys an audit. This is the control that prevents it.
+#
+# Each of design 04's four controls is a named resource here:
+#
+#   sequence numbering   SequenceTable, allocated on INGEST (see record.py)
+#   heartbeat            HeartbeatSchedule
+#   buffering            EvidenceQueue, with a DLQ and 14-day retention
+#   reconciliation       CountReconciliationSchedule
+#
+# And a fifth that design 04 does not name but the other four require:
+#
+#   replay               ReplaySchedule
+#
+# Without replay, the gap detector finds a hole, reports it correctly, and
+# nobody can fill it. A detection with no remedy is half a control.
+#
+# ---------------------------------------------------------------------------
+# The ledger is the record. The queue is transport.
+# ---------------------------------------------------------------------------
+# A message leaves the queue when the sender takes it, delivered or not. So the
+# queue cannot be what remembers that evidence is owed — the LedgerTable is,
+# and the replay schedule is what reads it back.
+#
+# This matters more than it sounds. It is what makes "a Truveon outage delays
+# delivery rather than losing it" true for outages longer than the queue's
+# retention, and it is why the pipeline can be deployed today with no Truveon
+# at all: records accumulate as pending, and drain when an endpoint exists.
+# B-088.
+#
+# ---------------------------------------------------------------------------
+# This pipeline is itself in SOC 2 scope
+# ---------------------------------------------------------------------------
+# design 15 puts "evidence pipeline" inside AltDigital's own reference report,
+# which partners rely on through the carve-out. design 04 does not mention it.
+#
+# So the completeness results are written as evidence in their own right rather
+# than only alerted — a Type II auditor asks whether a control operated
+# THROUGHOUT the period, and an alert that fired once proves nothing about the
+# months either side of it. D-016.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+    Description: >-
+      The organization event bus. Every evidence category already arrives here
+      from member accounts; this stack recognises and numbers it rather than
+      producing anything new.
+
+  TruveonEndpoint:
+    Type: String
+    Default: ''
+    Description: >-
+      Base URL of the Truveon ingestion API, e.g. https://truveon.example.
+
+      EMPTY IS A SUPPORTED STATE and is the current one. The sender does not
+      mark records delivered when it has nowhere to deliver them — they stay
+      pending, the pipeline reports that it is not delivering, and the backlog
+      drains when an endpoint appears. A stub that acknowledged locally would
+      reproduce design 04's "clean month" inside the thing built to prevent it.
+      B-088.
+
+  TruveonSecretName:
+    Type: String
+    Default: platform/truveon/ingest
+    Description: >-
+      Bearer token for the ingestion API. One credential for all tenants: the
+      record's `tenant` field carries the isolation and Truveon enforces it.
+      Per-tenant credentials would mean N secrets to rotate, with the failure
+      mode that one expires quietly and that tenant's evidence stops while
+      every other tenant looks fine.
+
+  TenantMapParam:
+    Type: String
+    Default: /platform/evidence/tenants
+    Description: >-
+      Tenants, their partners and their account ids. Partner and tenant travel
+      ON each record rather than being derived at query time, because an
+      account can be re-parented and evidence about March must not change in
+      September. D-016.
+
+  InflightGraceMinutes:
+    Type: Number
+    Default: 60
+    Description: >-
+      How long a record may sit undelivered before its absence counts as a gap
+      rather than as in-flight. Shared by the gap detector and the replay, which
+      must agree: replaying earlier than this is wasted work, and reporting a
+      gap earlier raises a finding against something already being fixed.
+
+      Generous rather than tight. A gap reported an hour late is still
+      reported; a control nobody trusts is not. B-043, B-081.
+
+  HeartbeatSchedule:
+    Type: String
+    Default: 'rate(1 hour)'
+
+  GapScanSchedule:
+    Type: String
+    Default: 'rate(1 hour)'
+
+  ReplaySchedule:
+    Type: String
+    Default: 'rate(1 hour)'
+
+  ReconcileSchedule:
+    Type: String
+    Default: 'rate(12 hours)'
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+  HasEndpoint: !Not [!Equals [!Ref TruveonEndpoint, '']]
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # State
+  # -------------------------------------------------------------------------
+
+  SequenceTable:
+    Type: AWS::DynamoDB::Table
+    # Retain. Losing the counters would restart every stream at 1, which makes
+    # every previously delivered record look like a duplicate and every future
+    # gap uncomputable. The sequence is the only thing that makes absence
+    # provable.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: platform-evidence-sequence
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: stream_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: stream_id, KeyType: HASH }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  LedgerTable:
+    Type: AWS::DynamoDB::Table
+    # Retain, emphatically. This is the platform's own copy of what it owes
+    # Truveon and what it has delivered. It is the answer to "how do you know
+    # nothing was dropped", which is the question design 04 exists to answer.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: platform-evidence-ledger
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+      KeySchema:
+        # PK is the stream, SK is the zero-padded sequence. Padded so lexical
+        # order IS numeric order: without it sequence 9 sorts after 10 and a
+        # range query returns nonsense.
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # -------------------------------------------------------------------------
+  # Buffer. design 04's third completeness control.
+  # -------------------------------------------------------------------------
+
+  EvidenceDlq:
+    Type: AWS::SQS::Queue
+    # Delete, explicitly, and it is safe for the same reason the main queue is.
+    # A message here has a pending ledger row behind it; losing the message
+    # loses a diagnostic copy, not the evidence.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: platform-evidence-dlq
+      # 14 days, the maximum. A message here is evidence that could not be
+      # delivered after every retry, and the ledger row behind it stays pending
+      # and keeps being reported as a gap — so the DLQ is a diagnostic aid
+      # rather than the last line of defence.
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  EvidenceQueue:
+    Type: AWS::SQS::Queue
+    # Delete rather than Retain, deliberately.
+    #
+    # Retain looks like the cautious choice and would be the wrong one. The
+    # queue is transport; the LEDGER is the record of what is owed. Every
+    # message in here has a pending ledger row behind it, so destroying the
+    # queue destroys a copy and not the evidence -- the replay schedule
+    # re-queues anything still pending on its next run.
+    #
+    # Retaining it would leave an orphaned queue after a stack replacement,
+    # holding messages nothing consumes, while the replay quietly refills a new
+    # one. Two queues, one consumer, and a pile of duplicates that only look
+    # harmless because ingest happens to be idempotent.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: platform-evidence
+      MessageRetentionPeriod: 1209600
+      # Longer than the sender's FUNCTION timeout (300s), not than its HTTP
+      # timeout. If visibility expired first, SQS would hand the same batch to
+      # a second invocation while the first was still working on it -- two
+      # senders posting the same records concurrently.
+      #
+      # Harmless for correctness, because ingest is idempotent on
+      # (stream_id, sequence), and wasteful and confusing in the logs. cfn-lint
+      # catches this; it was set to 180 against the 20s HTTP timeout, which is
+      # the wrong one of the two to reason from.
+      VisibilityTimeout: 360
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EvidenceDlq.Arn
+        # Generous. Truveon being down is the expected reason for failure and
+        # is not the message's fault; the replay schedule re-queues anything
+        # that lands in the DLQ anyway, because the ledger still says it is
+        # owed.
+        maxReceiveCount: 10
+
+  # -------------------------------------------------------------------------
+  # Collection
+  # -------------------------------------------------------------------------
+
+  CollectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformEvidenceCollect
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  CollectPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: NumberAndBufferEvidence
+      Roles: [!Ref CollectRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllocateSequenceNumbers
+            Effect: Allow
+            Action: dynamodb:UpdateItem
+            Resource: !GetAtt SequenceTable.Arn
+          # PutItem only. The collector records that evidence is owed; it must
+          # not be able to mark anything delivered, which is the sender's job
+          # and the thing that stops the gap detector looking.
+          - Sid: AppendToLedger
+            Effect: Allow
+            Action: dynamodb:PutItem
+            Resource: !GetAtt LedgerTable.Arn
+          - Sid: Buffer
+            Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt EvidenceQueue.Arn
+          - Sid: ReadTenantMap
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TenantMapParam}'
+          - Sid: ReportCollectionProblems
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  CollectLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-evidence-collect
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  CollectFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: CollectLogGroup
+    Properties:
+      FunctionName: platform-evidence-collect
+      Runtime: python3.12
+      Handler: collect.handler
+      Role: !GetAtt CollectRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          EVIDENCE_SEQUENCE_TABLE: !Ref SequenceTable
+          EVIDENCE_LEDGER_TABLE: !Ref LedgerTable
+          EVIDENCE_QUEUE_URL: !Ref EvidenceQueue
+          EVIDENCE_TENANT_MAP_PARAM: !Ref TenantMapParam
+          ALERT_BUS_NAME: !Ref AlertBusName
+
+  # design 04's four categories, as they arrive on the bus. Deliberately
+  # enumerated rather than matched by a wildcard: a pattern broad enough to
+  # catch everything would also number things that are not evidence, and the
+  # sequence would then include records no auditor recognises.
+  EvidenceCollectionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-collect-evidence
+      EventBusName: !Ref AlertBusName
+      Description: 'The four categories design 04 names, plus quorum outcomes.'
+      EventPattern:
+        source:
+          - aws.config
+          - aws.securityhub
+          - altdigital.change
+          - altdigital.quorum
+          - platform.response
+          - platform.recovery
+          - platform.instrumentation
+          - platform.identity
+      State: ENABLED
+      Targets:
+        - Id: collect
+          Arn: !GetAtt CollectFunction.Arn
+
+  CollectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CollectFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EvidenceCollectionRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Delivery
+  # -------------------------------------------------------------------------
+
+  SenderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformEvidenceSender
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  SenderPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: DeliverEvidence
+      Roles: [!Ref SenderRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # UpdateItem to mark delivered, Scan and SendMessage for replay.
+          #
+          # No DeleteItem. A delivered row and a pending row are both evidence
+          # of what the pipeline did; a component that could remove either
+          # could erase the trace of a record it failed to deliver.
+          - Sid: MarkDeliveredAndReplay
+            Effect: Allow
+            Action:
+              - dynamodb:UpdateItem
+              - dynamodb:Scan
+            Resource: !GetAtt LedgerTable.Arn
+          - Sid: DrainAndRequeue
+            Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:SendMessage
+            Resource: !GetAtt EvidenceQueue.Arn
+          - Sid: ReadTruveonCredential
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TruveonSecretName}-*'
+          - Sid: ReportDeliveryProblems
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  SenderLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-evidence-sender
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  SenderFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SenderLogGroup
+    Properties:
+      FunctionName: platform-evidence-sender
+      Runtime: python3.12
+      Handler: sender.handler
+      Role: !GetAtt SenderRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          EVIDENCE_LEDGER_TABLE: !Ref LedgerTable
+          EVIDENCE_QUEUE_URL: !Ref EvidenceQueue
+          EVIDENCE_INFLIGHT_GRACE_MINUTES: !Ref InflightGraceMinutes
+          TRUVEON_ENDPOINT: !Ref TruveonEndpoint
+          TRUVEON_SECRET_NAME: !Ref TruveonSecretName
+          ALERT_BUS_NAME: !Ref AlertBusName
+
+  SenderQueueSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt EvidenceQueue.Arn
+      FunctionName: !GetAtt SenderFunction.Arn
+      BatchSize: 10
+      # Only the failed records redrive. Failing a whole batch would delay
+      # every healthy record behind one poisoned one — harmless for
+      # correctness, because ingest is idempotent, but slow for no reason.
+      FunctionResponseTypes: [ReportBatchItemFailures]
+
+  # -------------------------------------------------------------------------
+  # Completeness
+  # -------------------------------------------------------------------------
+
+  CompletenessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformEvidenceCompleteness
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  CompletenessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ProveNothingWasDropped
+      Roles: [!Ref CompletenessRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllocateSequenceNumbers
+            Effect: Allow
+            Action: dynamodb:UpdateItem
+            Resource: !GetAtt SequenceTable.Arn
+          # Query and PutItem: reads the ledger to find gaps, and writes its
+          # own findings back as evidence. No UpdateItem on the ledger — the
+          # component that decides whether records are missing must not be able
+          # to mark one delivered.
+          - Sid: ReadLedgerAndRecordFindings
+            Effect: Allow
+            Action:
+              - dynamodb:Query
+              - dynamodb:PutItem
+            Resource: !GetAtt LedgerTable.Arn
+          - Sid: ReadTenantMap
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TenantMapParam}'
+          - Sid: ReadTruveonCredential
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TruveonSecretName}-*'
+          - Sid: ReportFindings
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  CompletenessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-evidence-completeness
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  CompletenessFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: CompletenessLogGroup
+    Properties:
+      FunctionName: platform-evidence-completeness
+      Runtime: python3.12
+      Handler: completeness.handler
+      Role: !GetAtt CompletenessRole.Arn
+      Timeout: 600
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          EVIDENCE_SEQUENCE_TABLE: !Ref SequenceTable
+          EVIDENCE_LEDGER_TABLE: !Ref LedgerTable
+          EVIDENCE_TENANT_MAP_PARAM: !Ref TenantMapParam
+          EVIDENCE_INFLIGHT_GRACE_MINUTES: !Ref InflightGraceMinutes
+          TRUVEON_ENDPOINT: !Ref TruveonEndpoint
+          TRUVEON_SECRET_NAME: !Ref TruveonSecretName
+          ALERT_BUS_NAME: !Ref AlertBusName
+
+  # design 04's second control. One record per tenant per run, so that silence
+  # is readable: a live heartbeat with no other evidence is a quiet tenant, and
+  # an absent heartbeat is a stopped pipeline. Without it the two are identical.
+  HeartbeatRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-evidence-heartbeat
+      ScheduleExpression: !Ref HeartbeatSchedule
+      State: ENABLED
+      Targets:
+        - Id: heartbeat
+          Arn: !GetAtt CompletenessFunction.Arn
+          Input: '{"action": "heartbeat"}'
+
+  GapScanRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-evidence-gap-scan
+      ScheduleExpression: !Ref GapScanSchedule
+      State: ENABLED
+      Targets:
+        - Id: gaps
+          Arn: !GetAtt CompletenessFunction.Arn
+          Input: '{"action": "detect_gaps"}'
+
+  ReconcileRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-evidence-count-reconciliation
+      ScheduleExpression: !Ref ReconcileSchedule
+      State: ENABLED
+      Targets:
+        - Id: reconcile
+          Arn: !GetAtt CompletenessFunction.Arn
+          Input: '{"action": "reconcile_counts"}'
+
+  CompletenessPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CompletenessFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # The remedy for what the gap scan detects. See the header: a detection with
+  # no remedy is half a control.
+  ReplayRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-evidence-replay
+      ScheduleExpression: !Ref ReplaySchedule
+      State: ENABLED
+      Targets:
+        - Id: replay
+          Arn: !GetAtt SenderFunction.Arn
+          Input: '{"action": "replay_pending"}'
+
+  ReplayPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SenderFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReplayRule.Arn
+
+Outputs:
+
+  EvidenceQueueUrl:
+    Description: The buffer. design 04's third completeness control.
+    Value: !Ref EvidenceQueue
+
+  LedgerTableName:
+    Description: What the platform owes Truveon and what it has delivered.
+    Value: !Ref LedgerTable
+
+  SequenceTableName:
+    Description: Per-stream counters. Losing these makes absence unprovable.
+    Value: !Ref SequenceTable
+
+  Delivering:
+    Description: >-
+      Whether an endpoint is configured. 'false' means evidence is being
+      collected and numbered but not delivered — records accumulate as pending
+      and drain when an endpoint appears. B-088.
+    Value: !If
+      - HasEndpoint
+      - 'true'
+      - 'false - collecting and numbering, not delivering (B-088)'
