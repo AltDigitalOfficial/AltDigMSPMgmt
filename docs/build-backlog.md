@@ -3971,3 +3971,37 @@ Steps 5, 6 and 7 are the closest: the machinery exists and what is missing is
 the per-tenant invocation rather than the capability. Step 8 is the one worth
 doing early regardless of the others, because it is what would catch the
 previous seven having gone wrong.
+
+## B-107 · Exit refuses, because the data extraction path does not exist
+
+**Open, and blocking exit by design** — 2026-09-21.
+
+prompt 12.6 requires two things before a contractual exit removes anything:
+
+> The data extraction path must be real and tested — application data, tenant
+> logs from the archive, and the Truveon tenant if retained. Verify nothing of
+> AltDigital's is entangled in the member account requiring surgical removal.
+
+Neither is built. `deprovision.py` therefore **refuses exit** rather than
+proceeding, and the refusal names both.
+
+**Why refusing is the only option.** Exit removes accounts. An exit that
+removed them and then discovered the extraction was not built is unrecoverable,
+and design 10 makes exit a contractual commitment — so the failure would be a
+breach rather than an inconvenience. `extract()` returning "nothing to extract"
+would be the single most expensive no-op in this codebase, and it is exactly
+the shape a placeholder takes.
+
+The entanglement check is the quieter half and fails the same way. Returning an
+empty list of concerns reads as "clean" and means "did not look"; a customer
+taking over an account would inherit whatever was missed, including roles still
+assumable from AltDigital's accounts.
+
+**What works today.** `dormant` and `cleanup` are complete as designs and
+blocked only by the provisioning steps they undo (B-106). Exit is blocked by
+this entry as well, which is the right order: the two variants design 13 says
+are "needed sooner than exit" are the two that are closer.
+
+**Trigger:** before any exit conversation, and before the first tenant contract
+is signed — design 10 lists a tested exit path as a commitment, so signing
+without one commits to something that does not exist.
