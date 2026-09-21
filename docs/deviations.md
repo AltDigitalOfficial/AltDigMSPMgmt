@@ -398,6 +398,32 @@ option available to phase 1.2 rather than requiring a root-level change later.
 **Close when** — Phase 1.2 decides whether to use RCPs, and design doc 04 is
 updated either way.
 
+**Decided 2026-09-20 (prompt 10.2): RCPs are used, and this is why.**
+
+design 11 names cross-account trust as a bypass — "a role trusting an external
+principal is an exfiltration path with no alarm" — and asks for an SCP denying
+role creation with external principals in the trust policy.
+
+**No SCP can express that.** SCPs evaluate the REQUEST, and there is no
+condition key exposing the `Principal` element of a trust policy being created.
+The first attempt here compared `aws:PrincipalAccount` to `aws:ResourceAccount`,
+which compares the caller's account to the role's account — both the same
+account, always — and would have shipped as a statement that denied nothing
+while appearing to be the control.
+
+An RCP evaluates on the RESOURCE side and denies the assume itself, whatever
+the trust policy says. `policies/rcp/00-no-external-principals.json` denies
+`sts:AssumeRole` and its variants when `aws:PrincipalOrgID` does not match
+`aws:ResourceOrgID`, with `aws:PrincipalIsAWSService` excluded so Lambda, ECS
+and service-linked roles keep working.
+
+That is strictly better than what design 11 asked for: it holds even if a trust
+policy is edited later, and it needs no organization id written down anywhere.
+
+**design 11 should be updated** to say the control is an RCP. As written it
+asks for something AWS cannot do, and the plausible-looking SCP is a trap —
+it passes review, attaches cleanly, and denies nothing.
+
 ---
 
 ## D-004 · Partner precondition warns where the design requires it to block — CLOSED

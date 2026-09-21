@@ -3648,3 +3648,38 @@ routing through the bus is the thing you have to know about.
 **Trigger:** the next time a platform-health alarm is added, or before the
 on-call rota covers anybody but Jamie. A second person on the rota is the point
 at which "I know which alarms mean what" stops being a workable answer.
+
+## B-098 · The policy deploy script never deployed an RCP, and its header said it did
+
+**Fixed** — 2026-09-20, found by writing the first RCP.
+
+`scripts/deploy-policies.sh` opens with:
+
+> Reads `policies/scp/*.json` and `policies/rcp/*.json`, and optionally attach
+> them to OUs.
+
+The glob was `find "${REPO_ROOT}/policies/scp"` only. RCPs were never read, never
+created, never attached — and the script reported success, because it had
+faithfully deployed everything it looked at.
+
+`create-policy` also hardcoded `--type SERVICE_CONTROL_POLICY`, so an RCP that
+did reach it would have been created as the wrong policy type: attached,
+visible in the console, governing nothing.
+
+**Third instance of the same shape today**, and the clearest statement of it:
+
+| | claimed | did |
+|---|---|---|
+| B-092 | all policies valid | validated zero |
+| B-098 | deploys scp and rcp | deployed scp |
+
+> A script that reports on what it PROCESSED, rather than on what it was ASKED
+> to process, cannot tell "nothing to do" from "did not look".
+
+Fixed with both directories globbed and the type derived from the path, the
+same way `validate-policies.sh` does it. The header is now true.
+
+**What made it findable.** Nothing in the run said "0 RCPs". The gap surfaced
+only because the RCP was expected to appear in the output and did not —
+somebody comparing an intention against a result. That is the same thing that
+caught B-089, and it is not a check, it is a habit.

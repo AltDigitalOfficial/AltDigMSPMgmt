@@ -40,3 +40,15 @@
 # tenant pipeline that creates a role to be passing the boundary first,
 # which is a conversation and a migration rather than a deployment.
 05-require-boundary.json	sandbox
+
+# 06 and 07 are sandbox-only for now. 06 especially: attached to
+# members it denies every action in an unapproved region, including to
+# a tenant pipeline that deploys somewhere nobody checked. That is a
+# conversation before it is a deployment.
+06-region-restriction.json	sandbox
+07-deny-bypass.json	sandbox
+
+# The first RCP. design 11 names cross-account trust as a bypass, and no
+# SCP condition key can see a trust policy's Principal -- an RCP
+# evaluates on the RESOURCE side and denies the assume itself. D-003.
+00-no-external-principals.json	sandbox

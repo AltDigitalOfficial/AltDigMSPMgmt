@@ -62,12 +62,37 @@ policy_name_for() {
   printf 'Platform%s' "$(printf '%s' "${base}" | awk -F- '{for(i=1;i<=NF;i++) printf toupper(substr($i,1,1)) substr($i,2)}')"
 }
 
+# Policy TYPE from the directory, the same way validate-policies.sh derives
+# it. An RCP and an SCP are different Organizations policy types, and a
+# policy created as the wrong one is silently ineffective: it attaches, it
+# appears in the console, and it governs nothing.
+policy_type_for() {
+  case "$1" in
+    *policies/scp/*) printf 'SERVICE_CONTROL_POLICY' ;;
+    *policies/rcp/*) printf 'RESOURCE_CONTROL_POLICY' ;;
+    *) die "cannot infer policy type from path: $1" ;;
+  esac
+}
+
 find_policy_id() {
-  aws organizations list-policies --filter SERVICE_CONTROL_POLICY \
+  aws organizations list-policies --filter "$2" \
     --query "Policies[?Name=='$1'].Id | [0]" --output text 2>/dev/null | no_cr | sed 's/^None$//'
 }
 
-mapfile -t FILES < <(find "${REPO_ROOT}/policies/scp" -name '*.json' 2>/dev/null | sort)
+# BOTH directories.
+#
+# The header has said "policies/rcp/*.json" since this script was written
+# and the glob only ever covered scp. So the first RCP validated cleanly,
+# sat in the repository, and was never deployed -- with the script
+# reporting success, because it had faithfully deployed everything it
+# looked at.
+#
+# Same shape as B-092, where the validator's path match skipped every
+# staged policy and then reported all valid. A script that reports on what
+# it PROCESSED rather than on what it was ASKED to process cannot tell the
+# two apart. B-098.
+mapfile -t FILES < <(find "${REPO_ROOT}/policies/scp" "${REPO_ROOT}/policies/rcp" \
+  -name '*.json' 2>/dev/null | sort)
 [[ ${#FILES[@]} -gt 0 ]] || die "No policy documents found."
 
 # --- drift mode ------------------------------------------------------------
@@ -76,7 +101,7 @@ if [[ ${DO_DRIFT} -eq 1 ]]; then
   DRIFTED=0
   for f in "${FILES[@]}"; do
     name="$(policy_name_for "${f}")"
-    pid="$(find_policy_id "${name}")"
+    pid="$(find_policy_id "${name}" "$(policy_type_for "${f}")")"
     if [[ -z "${pid}" ]]; then
       warn "${name}: not present in the Organization"; DRIFTED=1; continue
     fi
@@ -113,7 +138,8 @@ hr
 declare -a POLICY_IDS=() POLICY_NAMES=()
 for f in "${FILES[@]}"; do
   name="$(policy_name_for "${f}")"
-  pid="$(find_policy_id "${name}")"
+  ptype="$(policy_type_for "${f}")"
+  pid="$(find_policy_id "${name}" "${ptype}")"
   content="$(cat "${f}")"
 
   if [[ -n "${pid}" ]]; then
@@ -136,7 +162,7 @@ for f in "${FILES[@]}"; do
       pid="$(aws organizations create-policy \
         --name "${name}" \
         --description "Platform control-protection SCP, managed from $(basename "${f}")" \
-        --type SERVICE_CONTROL_POLICY \
+        --type "${ptype}" \
         --content "${content}" \
         --query 'Policy.PolicySummary.Id' --output text | no_cr)"
       ok "Created ${name} (${pid})"

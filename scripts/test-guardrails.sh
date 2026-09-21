@@ -337,8 +337,7 @@ AZ="${TEST_REGION}a"
 # Run first so the volume it creates can serve the platform-tag check, which
 # needs a REAL resource id -- a synthetic one is rejected on validation before
 # authorization is ever consulted, so the check silently tested nothing.
-HARNESS_VOL="$(as_test aws ec2 create-volume --availability-zone "${AZ}"   --size 1 --volume-type gp3 --region "${TEST_REGION}"   --tag-specifications "${TAGGED}"   --query VolumeId --output text 2>/dev/null | tr -d '
-')" || true
+  HARNESS_VOL="$(as_test aws ec2 create-volume --availability-zone "${AZ}" --size 1 --volume-type gp3 --region "${TEST_REGION}" --tag-specifications "${TAGGED}" --query VolumeId --output text 2>/dev/null | no_cr)" || true
 
 if [[ "${HARNESS_VOL}" == vol-* ]]; then
   emit PASS "ec2:CreateVolume WITH all four tags" "control"     "permitted — the policy denies untagged creation, not creation"
@@ -354,9 +353,66 @@ check 04 DataClassificationMustBeOneOfFour "ec2:CreateVolume, invalid classifica
 
 if [[ "${HARNESS_VOL}" == vol-* ]]; then
   check 04 ProtectPlatformManagedTags "ec2:CreateTags on a platform tag" yes --     aws ec2 create-tags --region "${TEST_REGION}"     --resources "${HARNESS_VOL}" --tags Key=BackupPolicy,Value=none
-  as_test aws ec2 delete-volume --volume-id "${HARNESS_VOL}"     --region "${TEST_REGION}" >/dev/null 2>&1 ||     warn "Could not delete harness volume ${HARNESS_VOL} — remove it by hand."
+  # The volume is NOT deleted here. Check 07 takes a snapshot from it, and
+  # deleting it at this point left that check with nothing to test.
 else
   emit AMBIG "ec2:CreateTags on a platform tag" "04/ProtectPlatformManagedTags"     "no real volume to test against — a synthetic id fails validation before authorization, which tests nothing"
+fi
+
+# --- 06: region restriction (prompt 10.2, design 11's priority) -----------
+#
+# design 11: "Region sprawl is the one to prioritise. It is entirely innocent
+# in intent and produces a total visibility blind spot." A developer picks the
+# wrong region from a dropdown and Config, GuardDuty and every alarm are simply
+# not there.
+#
+# Tested in BOTH directions and with a global service, because the classic way
+# to get this wrong is a policy that denies correctly and also breaks IAM.
+DENIED_REGION="eu-west-1"
+
+check 06 DenyOutsideApprovedRegions "ec2:DescribeVpcs in ${DENIED_REGION}" yes --   aws ec2 describe-vpcs --region "${DENIED_REGION}"
+
+expect_allowed "ec2:DescribeVpcs in ${TEST_REGION} (approved)" --   aws ec2 describe-vpcs --region "${TEST_REGION}"
+
+# THE one that catches the common mistake. iam, organizations, cloudfront and
+# route53 are global and report whatever region the caller used. A region deny
+# without a NotAction carve-out denies them everywhere, and the first symptom
+# is that nobody can create a role.
+expect_allowed "iam:ListRoles (global service, must survive the region deny)" --   aws iam list-roles --max-items 1
+
+# --- 07: the bypasses design 11 enumerates --------------------------------
+
+check 07 NoNetworkingAroundTheBaseline "ec2:CreateVpcPeeringConnection" yes --   aws ec2 create-vpc-peering-connection --region "${TEST_REGION}"   --vpc-id vpc-00000000 --peer-vpc-id vpc-11111111
+
+check 07 NoNetworkingAroundTheBaseline "ec2:CreateInternetGateway" yes --   aws ec2 create-internet-gateway --region "${TEST_REGION}"
+
+# Sharing a snapshot moves data out of the account with no data-plane call --
+# no GetObject, no export, nothing the evidence pipeline would see as egress.
+#
+# Needs a REAL snapshot. A synthetic id returns InvalidSnapshot.NotFound, which
+# EC2 raises before consulting authorization, so the check passes through the
+# policy without ever testing it -- the same way a synthetic volume id defeated
+# the platform-tag check. Third time that has happened here; validation runs
+# before authorization and a made-up resource id tests nothing.
+HARNESS_SNAP=""
+if [[ "${HARNESS_VOL}" == vol-* ]]; then
+  HARNESS_SNAP="$(as_test aws ec2 create-snapshot --volume-id "${HARNESS_VOL}" --region "${TEST_REGION}" --description "guardrail harness, safe to delete" --query SnapshotId --output text 2>/dev/null | no_cr)" || true
+fi
+
+if [[ "${HARNESS_SNAP}" == snap-* ]]; then
+  check 07 NoSnapshotOrImageSharing "ec2:ModifySnapshotAttribute" yes --     aws ec2 modify-snapshot-attribute --region "${TEST_REGION}"     --snapshot-id "${HARNESS_SNAP}" --attribute createVolumePermission     --operation-type add --user-ids 999999999999
+  as_test aws ec2 delete-snapshot --snapshot-id "${HARNESS_SNAP}"     --region "${TEST_REGION}" >/dev/null 2>&1 ||     warn "Could not delete harness snapshot ${HARNESS_SNAP} — remove it by hand."
+else
+  emit AMBIG "ec2:ModifySnapshotAttribute" "07/NoSnapshotOrImageSharing"     "no real snapshot to test against; a synthetic id fails validation before authorization and would test nothing"
+fi
+
+# The harness volume has now served both the platform-tag check and the
+# snapshot check, so it can go. Deleted here rather than in the 04 block,
+# where removing it left check 07 with nothing to snapshot.
+if [[ "${HARNESS_VOL}" == vol-* ]]; then
+  as_test aws ec2 delete-volume --volume-id "${HARNESS_VOL}" \
+    --region "${TEST_REGION}" >/dev/null 2>&1 || \
+    warn "Could not delete harness volume ${HARNESS_VOL} - remove it by hand."
 fi
 
 # --- 05: permissions boundary (prompt 10.1, design 11's Layer 2) ----------
