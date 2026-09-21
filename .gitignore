@@ -22,6 +22,15 @@ config/identity.env*
 config/quorum.env*
 !config/quorum.env.example
 
+# Support pricing. Commercial terms, not source: a rate does not belong in git
+# history, in a diff, or on a screenshare. Copy config/rates.env.example.
+#
+# The platform reads these from SSM, never from this file directly --
+# scripts/set-cost-rates.sh publishes them, and prints the model names without
+# the figures.
+config/rates.env*
+!config/rates.env.example
+
 # Local AWS and tooling state
 .aws-sam/
 *.tfstate

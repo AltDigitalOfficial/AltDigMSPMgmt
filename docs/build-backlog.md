@@ -3409,3 +3409,55 @@ The scripts that failed silently were the ones reporting only a verdict.
 
 Fixed with `*policies/scp/*`. The skip branch stays: a genuinely unknown path
 should still be refused rather than guessed at.
+
+## B-093 · I wrote the same bug an hour after documenting it four times
+
+**Fixed** — 2026-09-20, found on the first live run of the cost report.
+
+`cost/src/report.py` read the pricing rates like this:
+
+```python
+except Exception as exc:
+    raise RatesNotSet(f"could not read {RATES_PARAM}: ... Run
+                        scripts/set-cost-rates.sh.")
+```
+
+Every failure became "nobody has set the pricing". The first live run produced:
+
+    refused because: could not read /platform/cost/rates: TokenRetrievalError.
+    design 10's $1,000 and 15-20% are INDICATIVE ... Run set-cost-rates.sh.
+
+An expired SSO token, reported as a pricing problem, with confident and
+specific instructions to go and fix the wrong thing.
+
+**Written in the same session as B-086, B-089, B-091 and B-092**, all of which
+are the same fault, and after the rule had been written down:
+
+> A check that can pass without doing anything must report what it examined,
+> not only what it concluded.
+
+That rule turns out to be the narrow version. This case did not pass — it
+failed, correctly, and stopped the report. The outcome was safe. What was wrong
+was the DIAGNOSIS, and nothing about a safe outcome protects against that.
+
+**The wider rule:**
+
+> Where two causes lead to the same action, the action being right does not
+> make the explanation right. Distinguish them at the point where they are
+> still distinguishable.
+
+`ParameterNotFound` and `AccessDenied` arrive as different error codes and are
+collapsed by a bare `except Exception`. The information was present and thrown
+away, which is the same move B-091 made when the harness discarded the word
+"identity-based".
+
+**Fixed** with two exception types — `RatesNotSet` and `RatesUnreadable` — and
+a `blocked_by` field in the output, so the report says which of the two stopped
+it. Both still refuse to produce a report.
+
+**Worth noting about the test.** The original test stubbed
+`RuntimeError("ParameterNotFound")`, an exception with no `.response`, so both
+paths looked identical to it and it could never have caught this. A fixture
+that does not have the shape of the real thing tests the fixture. The test now
+raises a botocore-shaped error carrying a real error code, and asserts both
+branches by name.
