@@ -44,8 +44,20 @@ RATES_FILE="${REPO_ROOT}/config/rates.env"
       Copy config/rates.env.example and fill in the agreed figures.
       That file is gitignored: pricing is a commercial term, not source."
 
+# `set -a` so the rates are EXPORTED, not merely set.
+#
+# The helper below reads them from os.environ, and a plain `source` creates
+# shell variables that a child process cannot see -- so it found nothing and
+# reported "config/rates.env defines no RATE_<MODEL>_FLAT / _PERCENT pairs"
+# about a file full of them.
+#
+# Turned off immediately after: leaving allexport on would export every
+# variable this script later assigns, including the assembled payload, into
+# anything it runs.
+set -a
 # shellcheck disable=SC1090
 source "${RATES_FILE}"
+set +a
 
 PY="$(command -v python || command -v python3)" || die "python not found."
 

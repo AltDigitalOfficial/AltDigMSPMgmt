@@ -3461,3 +3461,48 @@ paths looked identical to it and it could never have caught this. A fixture
 that does not have the shape of the real thing tests the fixture. The test now
 raises a botocore-shaped error carrying a real error code, and asserts both
 branches by name.
+
+## B-094 · An empty billing report had three causes and reported one
+
+**Fixed** — 2026-09-20, caught before it misled anybody, which is the only
+reason it is worth a separate entry from B-093.
+
+The first live run of the cost report returned `tenants: 0`. That is defensible
+— every account in the estate is `kind=shared`, so there are no billable
+tenants — but it is indistinguishable from two other things, and the report
+said nothing about which:
+
+| `groups_seen == 0` because | a problem? |
+|---|---|
+| nothing was spent in the period | no |
+| the Cost Categories have not backfilled (AWS takes up to 24h) | no, wait |
+| spend exists and categorisation returns nothing | **yes** |
+
+The categories had been created minutes earlier, so the second was the obvious
+suspect — and adding a warning for it was the first fix. It was wrong. Querying
+the period ungrouped showed August cost **zero**: the estate did not exist yet.
+The report would have warned about a backfill delay for a month in which there
+was nothing to backfill.
+
+**Separated by asking what the period cost without any grouping.** Ungrouped
+zero means nothing was spent. Ungrouped non-zero with no groups means the
+categorisation is not accounting for real money. A third branch covers the
+ungrouped call itself failing, because "unknown" must not collapse into
+"nothing" — that is the distinction the whole check exists to make.
+
+Verified live against both: August reports no spend, September reports one cost
+group, none billable, every account shared. Which is correct, and now says so.
+
+**Why this one is filed as a near-miss rather than a defect.** It was noticed
+by asking "how would this look if the thing I just built were broken?" rather
+than by the report failing. That question is what the previous five entries
+cost, and it is cheaper to ask than to learn again:
+
+| | reported | actually |
+|---|---|---|
+| B-086 | clean estate | swept zero accounts |
+| B-089 | pipeline healthy | collected zero events |
+| B-091 | policy over-broad | subject was contained |
+| B-092 | all policies valid | validated zero policies |
+| B-093 | rates not set | credentials expired |
+| B-094 | no tenants | *three different things* |

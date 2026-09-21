@@ -154,6 +154,20 @@ def _amount(group, metric):
     return float(group["Metrics"][metric]["Amount"])
 
 
+def _period_total(start, end):
+    """Ungrouped spend for the period, to tell 'nothing' from 'not grouped'."""
+    try:
+        result = ce.get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
+            Granularity="MONTHLY", Metrics=["UnblendedCost"])
+        return sum(float(r["Total"]["UnblendedCost"]["Amount"])
+                   for r in result.get("ResultsByTime", []))
+    except Exception:                              # noqa: BLE001
+        # Unknown, and must not be reported as zero -- zero is one of the two
+        # answers this call exists to distinguish.
+        return None
+
+
 def report(event=None, context=None):
     """One month, one line per tenant, three numbers each."""
     month = (event or {}).get("month")
@@ -190,8 +204,20 @@ def report(event=None, context=None):
     tenants = {}
     shared_total = 0.0
     discount_delta = 0.0
+    # How many groups Cost Explorer returned AT ALL.
+    #
+    # "No tenants" has two causes and they look identical in the output:
+    #
+    #   every account is kind=shared        correct, and true today
+    #   the Cost Categories have not        Cost Explorer takes up to 24 hours
+    #   backfilled yet                      to populate a newly created one
+    #
+    # A billing report that cannot tell those apart would show a customer
+    # nothing and look healthy doing it. Counted rather than inferred.
+    groups_seen = 0
     for result in grouped.get("ResultsByTime", []):
         for group in result.get("Groups", []):
+            groups_seen += 1
             tenant, kind = (group["Keys"] + ["", ""])[:2]
             tenant = tenant.split("$", 1)[-1] or "unregistered"
             kind = kind.split("$", 1)[-1] or "unknown"
@@ -275,7 +301,49 @@ def report(event=None, context=None):
         # position "the uplift covers it" is otherwise uncheckable. B-090.
         "shared_platform_cost": round(shared_total, 2),
         "rates_are_contractual": contractual,
+        # See above. Zero groups means the categorisation is not answering,
+        # not that the estate is empty.
+        "cost_groups_seen": groups_seen,
     }
+
+    if groups_seen == 0:
+        # THREE causes, not two, and only one is a problem. Separated by asking
+        # what the period cost WITHOUT any grouping -- which the first version
+        # did not do, and so reported "the categories have not backfilled"
+        # about a month in which nothing had been spent because the estate did
+        # not yet exist.
+        #
+        #   ungrouped total is zero     nothing was spent. Not a problem.
+        #   total > 0, no groups        categorisation is not answering. It is
+        #                               either backfilling or misconfigured,
+        #                               and both need somebody to look.
+        total = _period_total(start, end)
+        if total is None:
+            out["coverage_warning"] = (
+                "Cost Explorer returned no grouped results, and the ungrouped "
+                "total could not be read either — so it is not known whether "
+                "this period had no spend or whether the categorisation "
+                "failed. No conclusion should be drawn from an empty report.")
+        elif total == 0.0:
+            out["coverage_note"] = (
+                "No spend at all in this period, grouped or ungrouped. The "
+                "report is empty because nothing was spent, not because the "
+                "categorisation failed.")
+        else:
+            out["coverage_warning"] = (
+                f"This period cost {total:.2f} ungrouped, and Cost Explorer "
+                "returned NO grouped results. Spend exists and the Cost "
+                "Categories are not accounting for it. Most likely they were "
+                "created within the last 24 hours and are still backfilling; "
+                "if not, check scripts/sync-cost-categories.sh has run. Do "
+                "not read this report as an empty estate.")
+    elif not lines:
+        # Groups came back and none of them were billable. That IS a real
+        # answer, and a different one.
+        out["coverage_note"] = (
+            f"{groups_seen} cost group(s) found, none billable — every "
+            "account in this period is kind=shared, which is AltDigital's own "
+            "estate. Correct until a tenant account is vested.")
 
     if not contractual:
         out["warning"] = (
