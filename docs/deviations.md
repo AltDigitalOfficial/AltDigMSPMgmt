@@ -1096,3 +1096,76 @@ rather than on the assumption that they will.
 The section is worth a sentence saying which parts of "running configuration"
 are separable through the API and which are not. The three items are listed as
 one grant and only two of them are grantable.
+
+## D-018 · A PagerDuty service exists for every tier, not production only
+
+**Accepted.** Prompt 12.2, 2026-09-21. Decided by Jamie.
+
+design 13 lists, under what provisioning creates in PagerDuty:
+
+> Service per application (**production only**)
+
+This creates a business service per **tier** and a technical service per
+**object** within each tier, for every environment a client runs.
+
+### Why the design says production only, and why that is half an argument
+
+The reasoning behind the restriction is sound: a dev account that pages the
+production on-call rotation teaches that rotation to ignore pages, and the
+habit does not stay confined to dev. Nothing here disputes that.
+
+The conclusion drawn from it does not follow. "Must not page the production
+rotation" and "gets no service at all" are different requirements, and the
+design takes the first as grounds for the second.
+
+In Jamie's words: a dev tier is the developer's working space, their
+production in a way. When it breaks their work stops, and somebody should find
+out: the developer, or whoever supports their infrastructure. With no service,
+that alert has nowhere to go and the failure is discovered by somebody
+noticing.
+
+### What was built instead
+
+Separation is expressed as **urgency and escalation policy**, not as absence:
+
+| tier | urgency | escalation |
+|---|---|---|
+| prod | high | platform policy, pages |
+| uat / test / dev | low | platform policy, pending B-117 |
+
+A low-urgency PagerDuty incident still notifies according to each responder's
+own rules. It does not force a page. That is precisely the distinction the
+design's reasoning needs, and it is one PagerDuty already models.
+
+This also mirrors what the platform does for itself: `AltDigital Platform` and
+`AltDigital Platform - Low Urgency` already split paging from notification
+rather than splitting alerting from nothing. Applying a stricter rule to
+clients than the platform applies to its own dev and test alarms would be hard
+to defend.
+
+### Structure
+
+design 13's flat "service per application" becomes two levels, which is
+PagerDuty's own model:
+
+- **business service per tier**, `tenant-<client>-<tier>`. Subscribed to,
+  ingests nothing. Answers "is this client's UAT healthy" without the asker
+  knowing what is underneath it.
+- **technical service per object**, `tenant-<client>-<tier>-<object>`.
+  Ingests, has an escalation policy, carries the routing key.
+- **a dependency** from each object to its tier.
+
+`objects` currently holds app slugs, the finest granularity the registry
+carries. Finer objects (a database, a queue, one service) slot into the same
+list without reshaping anything, which is why it is a list. Jamie has flagged
+more nuanced relationships to follow; a PagerDuty dependency is its own
+resource, so they attach without disturbing what exists.
+
+### What is still open
+
+**B-117.** Non-production tiers currently fall back to the platform escalation
+policy, which is the production rotation. That is wrong in the long run for
+exactly the reason design 13 gives, and it is mitigated for now by urgency:
+low-urgency incidents notify rather than page. Jamie and Wayne own the real
+answer. `tier_escalation_policy_ids` exists so that answering it is a data
+change rather than a restructuring.

@@ -48,18 +48,22 @@ module "tenant" {
   source   = "./modules/tenant"
   for_each = local.tenants
 
-  tenant_id       = each.key
-  partner         = each.value.partner
-  production_apps = each.value.production_apps
+  tenant_id = each.key
+  partner   = each.value.partner
+  tiers     = each.value.tiers
 
-  # Every tenant pages through the platform escalation policy today.
+  # Every tier falls back to the platform escalation policy today.
   #
   # design 13 says the escalation policy references "the on-call schedule",
-  # singular, and there is one. A per-tenant policy over the same schedule
-  # would be separation in name only -- the same phone rings either way -- so
-  # it is not created until there is a second rotation for it to point at.
-  # When that happens this becomes a lookup rather than a constant.
-  escalation_policy_id = pagerduty_escalation_policy.platform.id
+  # singular, and there is one. A per-tier policy over the same schedule would
+  # be separation in name only -- the same phone rings either way -- so none is
+  # created until there is a second rotation to point at.
+  #
+  # Non-production escalation is an open question owned by Jamie and Wayne
+  # (B-117). Dev is the developer's own production, so the answer is probably a
+  # different policy rather than no policy; `tier_escalation_policy_ids` is
+  # where it lands, as data.
+  default_escalation_policy_id = pagerduty_escalation_policy.platform.id
 
   acknowledgement_timeout_minutes = var.acknowledgement_timeout_minutes
   auto_resolve_timeout_minutes    = var.auto_resolve_timeout_minutes

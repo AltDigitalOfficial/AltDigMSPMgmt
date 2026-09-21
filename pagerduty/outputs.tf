@@ -93,15 +93,16 @@ output "commercial_business_service_id" {
 # credentials.
 
 output "tenants" {
-  description = "Per-client business service id and per-app production services with their routing keys. Read by scripts/sync-pagerduty-tenants.sh."
+  description = "Per-client tier business services, per-object technical services and their routing keys. Read by scripts/sync-pagerduty-tenants.sh."
   sensitive   = true
   value = {
     for id, m in module.tenant : id => {
-      business_service_id = m.business_service_id
-      services            = m.services
-      # Carried so the consumer can tell "no production application" from
-      # "the apply did not create one". See modules/tenant/outputs.tf.
-      production_app_count = m.production_app_count
+      conversations_business_service_id = m.conversations_business_service_id
+      tiers                             = m.tiers
+      objects                           = m.objects
+      # Carried so the consumer can tell "no service in that tier" from "the
+      # apply did not create one". See modules/tenant/outputs.tf.
+      counts = m.counts
     }
   }
 }

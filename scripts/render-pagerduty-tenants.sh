@@ -38,13 +38,18 @@
 #              tenants have had their paging removed on purpose (design 14 and
 #              the deprovisioning UNDO table), so re-rendering them would
 #              recreate what a teardown deliberately took away.
-#   apps       ACCOUNT records with environment=prod and kind=tenant, grouped
-#              by client. design 13: a paging service exists "per application
-#              (production only)".
+#   tiers      ACCOUNT records with kind=tenant, grouped by client and then by
+#              environment. EVERY tier, not production only -- see D-018. A dev
+#              environment is the developer's own production and needs somewhere
+#              for its alerts to go; the separation from production is urgency
+#              and escalation policy, not absence.
+#   objects    the `app` field on each account, which is the finest granularity
+#              the registry currently carries. The empty string is a real value
+#              meaning the account's single unnamed application.
 #
-# A client with no production account renders an EMPTY production_apps list.
-# That is correct -- it gets a business service and no paging service -- and it
-# is not the same as the client being absent. The summary prints both counts so
+# A client with no accounts renders an EMPTY tiers map. That is correct -- it
+# gets the client-conversation business service and nothing else -- and it is
+# not the same as the client being absent. The summary prints both counts so
 # the difference is visible rather than inferred.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -92,7 +97,7 @@ def s(item, key):
 # took away. Exited tenants are excluded for the same reason, more finally.
 LIVE_STATES = {"provisioning", "provisioned", "verifying", "live"}
 
-clients, apps, skipped = {}, {}, []
+clients, apps, skipped, unplaced = {}, {}, [], []
 
 for item in items:
     kind = s(item, "record_type")
@@ -108,21 +113,28 @@ for item in items:
         clients[tid] = s(item, "partner")
 
     elif kind == "ACCOUNT":
-        # Only production, and only tenant accounts. A platform account in
-        # production is AltDigital's own and is covered by the platform
-        # service, not by a tenant one.
-        if s(item, "environment") != "prod":
-            continue
+        # Tenant accounts in every tier. A PLATFORM account is AltDigital's own
+        # and is covered by the platform service, not by a tenant one -- that
+        # is the only exclusion here.
         if (s(item, "kind") or "tenant") != "tenant":
             continue
-        apps.setdefault(s(item, "client"), set()).add(s(item, "app"))
+        env = s(item, "environment")
+        if not env:
+            # An account with no environment cannot be placed in a tier, and
+            # guessing one would put a production workload behind dev-tier
+            # urgency. Reported rather than assigned.
+            unplaced.append({"account_id": s(item, "account_id"),
+                             "client": s(item, "client")})
+            continue
+        apps.setdefault(s(item, "client"), {}).setdefault(env, set()).add(
+            s(item, "app"))
 
 tenants = {}
 for tid, partner in sorted(clients.items()):
-    tenants[tid] = {
-        "partner": partner,
-        "production_apps": sorted(apps.get(tid, set())),
-    }
+    tiers = {}
+    for env, objects in sorted((apps.get(tid) or {}).items()):
+        tiers[env] = {"objects": sorted(objects)}
+    tenants[tid] = {"partner": partner, "tiers": tiers}
 
 # Accounts whose client has no TENANT record. Reported rather than dropped:
 # a production account with no registry tenant is a real inconsistency, and
@@ -135,9 +147,14 @@ print(json.dumps({
         "records_scanned": len(items),
         "clients_included": len(tenants),
         "clients_skipped": skipped,
-        "clients_with_production": sum(
-            1 for t in tenants.values() if t["production_apps"]),
-        "orphan_production_accounts": orphans,
+        "clients_with_accounts": sum(
+            1 for t in tenants.values() if t["tiers"]),
+        "tiers_total": sum(len(t["tiers"]) for t in tenants.values()),
+        "objects_total": sum(
+            len(c["objects"]) for t in tenants.values()
+            for c in t["tiers"].values()),
+        "orphan_accounts": orphans,
+        "unplaced_accounts": unplaced,
     },
 }, indent=2, sort_keys=True))
 PYEOF
@@ -153,8 +170,11 @@ print(json.dumps(d, indent=2, sort_keys=True))
 
 SCANNED="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(json.load(sys.stdin)["records_scanned"])')"
 INCLUDED="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(json.load(sys.stdin)["clients_included"])')"
-WITHPROD="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(json.load(sys.stdin)["clients_with_production"])')"
-ORPHANS="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(" ".join(json.load(sys.stdin)["orphan_production_accounts"]) or "none")')"
+WITHPROD="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(json.load(sys.stdin)["clients_with_accounts"])')"
+TIERS="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(json.load(sys.stdin)["tiers_total"])')"
+OBJECTS="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(json.load(sys.stdin)["objects_total"])')"
+UNPLACED="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(len(json.load(sys.stdin)["unplaced_accounts"]))')"
+ORPHANS="$(printf '%s' "${SUMMARY}" | python -c 'import json,sys; print(" ".join(json.load(sys.stdin)["orphan_accounts"]) or "none")')"
 SKIPPED="$(printf '%s' "${SUMMARY}" | python -c '
 import json, sys
 rows = json.load(sys.stdin)["clients_skipped"]
@@ -167,16 +187,27 @@ log "PagerDuty tenant map"
 # render of an estate with no tenants in it.
 log "  registry records scanned : ${SCANNED}"
 log "  clients included         : ${INCLUDED}"
-log "  of which with production : ${WITHPROD}"
+log "  of which with accounts   : ${WITHPROD}"
+log "  tiers                    : ${TIERS}"
+log "  objects                  : ${OBJECTS}"
+log "  accounts with no tier    : ${UNPLACED}"
 log "  clients skipped          : ${SKIPPED}"
-log "  orphan prod accounts     : ${ORPHANS}"
+log "  orphan accounts          : ${ORPHANS}"
 hr
 
 if [[ "${ORPHANS}" != "none" ]]; then
   # Not fatal, and not silent. A production account whose client has no tenant
   # record gets no paging service, which means its alarms page nobody.
-  warn "Production account(s) for client(s) with no TENANT record: ${ORPHANS}"
-  warn "These get no paging service, so their alarms would page nobody."
+  warn "Account(s) for client(s) with no TENANT record: ${ORPHANS}"
+  warn "These get no service, so their alarms would reach nobody."
+fi
+
+if [[ "${UNPLACED}" != "0" ]]; then
+  # An account with no environment cannot be placed in a tier. Guessing would
+  # put a production workload behind dev-tier urgency, which is the wrong
+  # direction to be wrong in.
+  warn "${UNPLACED} account(s) carry no environment and were not placed in any tier."
+  warn "Their alarms have no service to reach. Fix the registry record."
 fi
 
 if [[ "${DRY_RUN}" == "1" ]]; then

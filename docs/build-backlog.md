@@ -4444,3 +4444,35 @@ editing infrastructure.
 on the platform's own Lambdas — or a PutEvents-rate alarm on the alert bus —
 would have. design 06a has no entry for either. Tracked here rather than
 silently accepted.
+
+## B-117 · Non-production tiers escalate to the production rotation
+
+**Open, owned by Jamie and Wayne** — 2026-09-21.
+
+D-018 creates PagerDuty services for every tier. Each technical service needs
+an escalation policy, and non-production ones currently fall back to
+`AltDigital Platform Escalation`, which is the production rotation.
+
+**Mitigated, not solved.** Non-production services carry **low** urgency, so
+they notify rather than page: a dev alert reaches responders through their own
+notification rules without forcing a phone call. Nobody is woken by a dev
+environment today.
+
+But the target is wrong even where the effect is currently tolerable. The
+people who should hear about a client's dev tier are the developers working in
+it and whoever supports their infrastructure, Jamie for now, not the platform
+on-call rotation. As the estate grows, "low urgency to the wrong people" stops
+being harmless and becomes a channel nobody reads.
+
+**What it needs.** Probably a schedule and policy per audience rather than per
+tenant: an infrastructure-support policy covering non-production across all
+clients, possibly a per-client developer policy where the client's own people
+are in PagerDuty. That is a rotation design question, not a code question.
+
+**Where it lands.** `tier_escalation_policy_ids` on `pagerduty/modules/tenant`,
+keyed by tier name. Answering this is a data change in `tenants.json` plus
+whatever policies get created at the root config. No restructuring.
+
+**Trigger:** before the first client with a non-production account goes live,
+or before any client's own developers are given PagerDuty access, whichever
+comes first.
