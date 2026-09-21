@@ -161,6 +161,37 @@ else
       first if that is not intended."
 fi
 
+# --- commercial routing key -----------------------------------------------
+#
+# design 12's client-conversation class. A DIFFERENT service from the platform
+# one and a different urgency: these notify, they do not page.
+#
+# Kept separate from the platform secret rather than added as another field in
+# it, because the two have different blast radii. Anything holding the platform
+# key can page the on-call rotation; anything holding this one can raise a
+# low-urgency notification. A consumer that only needs the second should not be
+# given the first as a side effect of them sharing a secret.
+COMM_KEY="$(cd "${TFDIR}" && "${TF}" output -raw commercial_routing_key 2>/dev/null)" || true
+if [[ -n "${COMM_KEY}" ]]; then
+  [[ ${#COMM_KEY} -ge 20 ]] || die "Commercial routing key looks wrong (${#COMM_KEY} characters)."
+  COMM_SECRET="platform/pagerduty/commercial-routing-key"
+  COMM_PAYLOAD="$(printf '{"events_v2_routing_key":"%s"}' "${COMM_KEY}")"
+  if MSYS_NO_PATHCONV=1 aws secretsmanager describe-secret        --secret-id "${COMM_SECRET}" >/dev/null 2>&1; then
+    MSYS_NO_PATHCONV=1 aws secretsmanager put-secret-value       --secret-id "${COMM_SECRET}" --secret-string "${COMM_PAYLOAD}"       --query 'VersionId' --output text >/dev/null
+    ok "rotated ${COMM_SECRET} (${#COMM_KEY} characters, not printed)"
+  else
+    MSYS_NO_PATHCONV=1 aws secretsmanager create-secret       --name "${COMM_SECRET}"       --description "PagerDuty Events API v2 routing key for the client-conversation service (design 12). Notifies; does not page."       --secret-string "${COMM_PAYLOAD}"       --tags Key=platform-managed,Value=true       --query 'ARN' --output text >/dev/null
+    ok "created ${COMM_SECRET} (${#COMM_KEY} characters, not printed)"
+  fi
+else
+  # Not fatal, and not silent. B-115: the commercial service was committed as
+  # deployed and had never been applied, so an absent key here is exactly the
+  # symptom that went unnoticed.
+  warn "No commercial_routing_key in the Terraform output. design 12's
+      client-conversation events have a router and no destination. Apply the
+      PagerDuty configuration first if that is not intended."
+fi
+
 hr
 info "Next: redeploy the alerting stack so it creates the subscription"
 log "  scripts/deploy-to-account.sh --account ${ACCOUNT_KEY} \\"

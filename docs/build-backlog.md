@@ -4325,9 +4325,49 @@ correctly decides where to send them and no destination to send them to. The
 AWS side would emit, and the events would go nowhere — the failure being
 invisible precisely because the sending half works.
 
-**Fix:** `scripts/pagerduty-apply.sh --apply` creates all five. Not run
-unprompted: it creates an escalation policy in a live PagerDuty account, which
-is a change to where pages can go and belongs to a person, not to a build step.
+### Partly closed 2026-09-21, and the chain is longer than first stated
+
+Applied by the user. All five resources now exist: service `POD5UN1`
+(`AltDigital Client Conversations`), business service `PS31XHG`
+(`Client Conversations`), escalation policy `PPP1MJI`, the service dependency
+and the Events API v2 integration `PC4MAUO`. The apply also proved write
+access on the API key, which `pagerduty-check.sh` cannot.
+
+`sync-pagerduty-secrets.sh` now writes the Events API v2 key to
+`platform/pagerduty/commercial-routing-key` — a separate secret from the
+platform one rather than another field inside it, because the blast radii
+differ. Anything holding the platform key can page the on-call rotation;
+anything holding this one can raise a low-urgency notification, and a consumer
+needing only the second should not get the first as a side effect.
+
+**Still open: nothing carries the event from the bus to PagerDuty.** Tracing
+the whole path rather than the half that was failing:
+
+| link | state |
+|---|---|
+| EventBridge rules match declared commercial events and incident dossiers | built |
+| `route.py` decides awareness-only, withholds notifiable detail, refuses without a notifier | built and verified |
+| `route.py` emits `client-conversation` back onto the alert bus | built |
+| **a rule matching `client-conversation` and forwarding to PagerDuty** | **absent** |
+| PagerDuty service to receive it | built 2026-09-21 |
+| routing key in Secrets Manager | built 2026-09-21 |
+
+Nothing in the repository matches `DetailType: client-conversation` — the
+router emits into the bus and no rule listens. So the destination now exists
+and is still unreachable.
+
+**What the missing link needs.** The platform alarm path reaches PagerDuty by
+SNS subscription to the CloudWatch integration URL, which works because the
+payload is an SNS-wrapped alarm the vendor integration parses. This payload is
+arbitrary JSON going to Events API v2, so it needs shaping: an EventBridge API
+Destination and Connection holding the routing key, and a rule targeting it.
+
+**The lesson, restated more precisely than the original entry had it.** The
+first version of this finding said the PagerDuty half was never applied. That
+was true and incomplete: two of six links were missing, and applying fixed one
+of them. Checking the link that was obviously suspect, finding it broken, and
+stopping there would have left a chain that still does not carry an event —
+and the next person would have read "B-115 closed" and believed it.
 
 > A title that says "deployed" needs a verification line that names the thing
 > deployed. "Verified live" covering one of two halves reads as covering both,
