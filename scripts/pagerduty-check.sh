@@ -84,9 +84,24 @@ try:
     abilities = get("/abilities").get("abilities") or []
     out["ok"] = True
     out["abilities"] = len(abilities)
-    # Useful signals for what the tenant module can rely on later.
-    for want in ("teams", "service_dependencies", "business_services"):
-        out[want] = want in abilities
+
+    # Capability is tested by USING it, not by looking for a name in the
+    # abilities list. B-114: the first version of this check looked for
+    # "business_services" there, did not find it, and reported False -- while
+    # the account had four business services and the module that needs them
+    # would have worked. "business_services" is simply not an ability name,
+    # so the lookup answered a question PagerDuty does not answer, and the
+    # answer looked definitive.
+    #
+    # Listing is the weakest call that proves the endpoint is reachable and
+    # the key is scoped to it, and it creates nothing.
+    listed = get("/business_services")
+    out["business_services_usable"] = "_err" not in listed
+    if "_err" in listed:
+        out["business_services_error"] = listed["_err"]
+    else:
+        out["business_services_existing"] = len(
+            listed.get("business_services") or [])
 except urllib.error.HTTPError as exc:
     out["ok"] = False
     out["status"] = exc.code
@@ -118,17 +133,27 @@ fi
 
 ok "authenticated against the PagerDuty REST API"
 
-# Reported because the tenant module depends on them. `business_services` in
-# particular: design 12's client-conversation event class needs a business
-# service, and an account without that ability would fail at apply time rather
-# than here.
+# Reported because the tenant module depends on it. design 12's
+# client-conversation event class needs a business service per client, and an
+# account where that endpoint is unusable would fail at apply time -- part way
+# through provisioning a tenant -- rather than here.
 SUMMARY="$(printf '%s' "${RESULT}" | python -c '
 import json, sys
 d = json.load(sys.stdin)
-print("{0} abilities; business_services={1}, teams={2}".format(
-    d.get("abilities", 0), d.get("business_services"), d.get("teams")))
+if d.get("business_services_usable"):
+    bs = "usable ({0} already exist)".format(d.get("business_services_existing", 0))
+else:
+    bs = "NOT usable (HTTP {0})".format(d.get("business_services_error"))
+print("{0} abilities; business services: {1}".format(d.get("abilities", 0), bs))
 ')"
 info "${SUMMARY}"
+
+# The tenant module creates a business service per client. If that endpoint is
+# not usable, an apply fails part way through provisioning rather than here.
+USABLE="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("business_services_usable"))')"
+if [[ "${USABLE}" != "True" ]]; then
+  die "Business services are not usable with this key. pagerduty/modules/tenant creates one per client (design 12's client-conversation class), so an apply would fail mid-tenant."
+fi
 
 printf '\n'
 # Said explicitly rather than left implied. See the header.

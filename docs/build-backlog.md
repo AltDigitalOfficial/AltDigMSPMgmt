@@ -4263,3 +4263,72 @@ check work — a version that handled only `S` would have read both windows as
 unset and FAILED a correctly configured partner. The failure would have looked
 like a compliance finding rather than a parsing bug, which is the expensive
 kind of wrong: somebody would have gone looking at the contract.
+
+## B-114 · A capability probe asked for a name the API does not use
+
+**Closed same day** — 2026-09-21.
+
+`pagerduty-check.sh` tested whether business services were available by looking
+for `business_services` in the account's `/abilities` list. It was not there,
+so the check reported `business_services=False`.
+
+The account has **four business services**. `business_services` is simply not
+an ability name — `GET /abilities/business_services` returns 404, as does
+`service_dependencies`. The lookup asked a question PagerDuty does not answer,
+and the negative answer was indistinguishable from a real one.
+
+Had it been believed, the conclusion would have been that
+`pagerduty/modules/tenant` could not create its business service, and design
+12's client-conversation class would have been redesigned around a limitation
+that does not exist.
+
+This is the third of this shape in two days:
+
+| | asked | actually answered |
+|---|---|---|
+| B-108 | can this credential administer AMI | can it administer *anything* |
+| B-113 | what does this registry field say | what does this *attribute map* say |
+| B-114 | does the account have business services | is `business_services` an ability name |
+
+> Test a capability by USING it, not by looking for its name in a list. The
+> weakest call that exercises the endpoint — here, listing — proves reachability
+> and scope, creates nothing, and cannot answer a different question than the
+> one asked.
+
+Fixed: the check now lists business services and reports how many exist, and
+`die`s if the endpoint is unusable, because the tenant module would otherwise
+fail part way through provisioning a client.
+
+## B-115 · The commercial PagerDuty resources were committed as "deployed" and never applied
+
+**Open** — 2026-09-21.
+
+Commit `f1cf3e7`, *"The client-conversation destination, deployed and proven"*,
+added five PagerDuty resources for design 12's client-conversation event class:
+a technical service, a business service, an escalation policy, a service
+dependency and an Events API v2 integration.
+
+None of them exist. `terraform state list` does not contain them, and the
+PagerDuty account has no matching service or business service — only
+`AltDigital Platform`, `AltDigital Platform – Low Urgency`, and unrelated
+services belonging to other AltDigital work.
+
+**The commit body does not actually claim otherwise, and that is the
+instructive part.** Everything it verifies is AWS-side router behaviour: the
+router refusing to emit with no notifier, routing awareness-only, withholding
+notifiable detail, passing a cost anomaly through, declining an unrelated
+event. All true, all verified, none of it touching PagerDuty. The word
+"deployed" in the title covered both halves; the verification covered one.
+
+**Consequence.** Design 12's client-conversation events have a router that
+correctly decides where to send them and no destination to send them to. The
+AWS side would emit, and the events would go nowhere — the failure being
+invisible precisely because the sending half works.
+
+**Fix:** `scripts/pagerduty-apply.sh --apply` creates all five. Not run
+unprompted: it creates an escalation policy in a live PagerDuty account, which
+is a change to where pages can go and belongs to a person, not to a build step.
+
+> A title that says "deployed" needs a verification line that names the thing
+> deployed. "Verified live" covering one of two halves reads as covering both,
+> and the half nobody mentions is the half nobody checks.
