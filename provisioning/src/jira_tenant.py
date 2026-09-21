@@ -55,6 +55,7 @@ an absence instead of hiding behind a satisfied check.
 import datetime
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -68,6 +69,7 @@ import jira
 from jira import JiraUnavailable
 
 OPS_PROJECT = os.environ.get("JIRA_OPS_PROJECT", "")
+SERVICE_DESK_ID = os.environ.get("JIRA_SERVICE_DESK_ID", "")
 TASK_ISSUETYPE = os.environ.get("JIRA_TASK_ISSUETYPE", "Task")
 SUBTASK_ISSUETYPE = os.environ.get("JIRA_SUBTASK_ISSUETYPE", "Sub-task")
 TIMEOUT = int(os.environ.get("JIRA_TIMEOUT_SECONDS", "30"))
@@ -75,7 +77,25 @@ MAX_ATTEMPTS = int(os.environ.get("JIRA_MAX_ATTEMPTS", "5"))
 
 # The only paths this module may write to. See the module docstring: the point
 # is that adding a workflow call here has to be a deliberate act.
-_ALLOWED_WRITE_PATHS = ("/rest/api/3/issue",)
+#
+# These are ANCHORED PATTERNS rather than prefixes, and that is load-bearing.
+# A prefix of `/rest/servicedeskapi/servicedesk/` would admit
+# `/rest/servicedeskapi/servicedesk/2/requesttype` -- request type
+# configuration, which prompt 12.3 explicitly forbids -- as a side effect of
+# allowing `/rest/servicedeskapi/servicedesk/2/organization`. The two sit under
+# the same prefix and mean entirely different things, so the guard has to match
+# the endpoint rather than the neighbourhood.
+_ALLOWED_WRITE_PATTERNS = (
+    # Issue content.
+    re.compile(r"^/rest/api/3/issue(/|\?|$)"),
+    # Organizations: the JSM construct for customer isolation. Data, not
+    # configuration -- one per tenant adds no workflow, screen, field or
+    # scheme, which is exactly why it is allowed here when a component is not.
+    re.compile(r"^/rest/servicedeskapi/organization(/[0-9]+)?(/user)?$"),
+    # Attaching an organization to the service desk, and nothing else under
+    # that path.
+    re.compile(r"^/rest/servicedeskapi/servicedesk/[0-9]+/organization$"),
+)
 
 
 class ConfigurationRefused(Exception):
@@ -181,15 +201,18 @@ def _call(path, payload=None, method="POST"):
     every caller is check-then-create, so a run that dies part way through is
     continued simply by running it again.
     """
-    if method != "GET" and not path.startswith(_ALLOWED_WRITE_PATHS):
+    bare = path.split("?", 1)[0]
+    if method != "GET" and not any(p.match(bare)
+                                   for p in _ALLOWED_WRITE_PATTERNS):
         raise ConfigurationRefused(
-            f"{method} {path} is not issue content. This module writes issues "
-            "and nothing else. Prompt 12.3 forbids automating workflow, "
-            "screen, custom field, permission scheme and request type "
-            "configuration, because per-tenant configuration drift breaks the "
-            "single definition of 'approved' that design 08's reconciliation "
-            "depends on. If such a call is genuinely needed, that is a design "
-            "decision and belongs in a change record, not a code edit.")
+            f"{method} {path} is neither issue content nor an organization. "
+            "This module writes those two things and nothing else. Prompt "
+            "12.3 forbids automating workflow, screen, custom field, "
+            "permission scheme and request type configuration, because "
+            "per-tenant configuration drift breaks the single definition of "
+            "'approved' that design 08's reconciliation depends on. If such a "
+            "call is genuinely needed, that is a design decision and belongs "
+            "in a change record, not a code edit.")
 
     data = json.dumps(payload).encode() if payload is not None else None
     delay, last = 1.0, None
@@ -198,7 +221,12 @@ def _call(path, payload=None, method="POST"):
             _url(path), data=data, method=method,
             headers={"Authorization": jira._auth_header(),
                      "Content-Type": "application/json",
-                     "Accept": "application/json"})
+                     "Accept": "application/json",
+                     # Required by the organization endpoints. Atlassian
+                     # marks them experimental and rejects the call outright
+                     # without this, with a 412 that does not mention the
+                     # header.
+                     "X-ExperimentalApi": "opt-in"})
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 body = resp.read().decode()
@@ -340,6 +368,89 @@ def ensure_issue(project, issuetype, summary, description, labels,
 
 
 # ---------------------------------------------------------------------------
+# The customer boundary
+# ---------------------------------------------------------------------------
+
+
+def ensure_organization(tenant_id, service_desk_id=None):
+    """The one real isolation boundary available here (B-109).
+
+    A label separates tenants for AltDigital's own eyes and restricts nothing;
+    Jira has no ACL on a label and no way to attach one. A JSM **organization**
+    does restrict: a customer placed in one sees their own requests and those
+    shared with their organization, and nothing else. They never browse the
+    project, so they never see another tenant's work or AltDigital's internal
+    dossiers.
+
+    This is allowed here when creating a component was not, and the difference
+    is worth stating: an organization is DATA. Creating one per tenant adds no
+    workflow, no screen, no custom field and no scheme, so it cannot produce
+    the per-tenant configuration drift prompt 12.3 forbids.
+
+    Created eagerly, before any customer exists. A boundary built at the moment
+    somebody needs it is a boundary built under time pressure.
+
+    Note it cannot be undone from here: deleting an organization returns 403
+    for this credential. That is containment rather than a limitation, and the
+    deprovisioning path records it.
+    """
+    service_desk_id = service_desk_id or SERVICE_DESK_ID
+    if not service_desk_id:
+        raise ValueError(
+            "JIRA_SERVICE_DESK_ID is not set. An organization created and "
+            "never attached to a service desk isolates nothing, so this "
+            "refuses rather than creating a half-boundary.")
+
+    name = tenant_label(tenant_id)
+
+    # Check. The organization list is site-wide, not per desk, so a name
+    # collision across desks is possible and is the reason the name carries the
+    # tenant- prefix rather than being the bare client name.
+    existing = None
+    for org in (_call("/rest/servicedeskapi/organization?limit=100",
+                      None, "GET") or {}).get("values") or []:
+        if org.get("name") == name:
+            existing = org
+            break
+
+    created = False
+    if existing is None:
+        existing = _call("/rest/servicedeskapi/organization", {"name": name})
+        if not existing.get("id"):
+            raise JiraUnavailable(
+                f"Jira accepted the creation of organization '{name}' and "
+                "returned no id, so it cannot be confirmed to exist.")
+        created = True
+
+    org_id = str(existing.get("id"))
+
+    # Attach, separately and idempotently. Creation and attachment are two
+    # calls and the second can fail on its own; an organization that exists but
+    # is attached to no service desk looks provisioned and isolates nobody.
+    attached = any(
+        str(o.get("id")) == org_id
+        for o in (_call(f"/rest/servicedeskapi/servicedesk/{service_desk_id}"
+                        "/organization", None, "GET") or {}).get("values") or [])
+    if not attached:
+        _call(f"/rest/servicedeskapi/servicedesk/{service_desk_id}"
+              "/organization", {"organizationId": int(org_id)})
+        # Confirm by reading back, not by the absence of an error.
+        attached = any(
+            str(o.get("id")) == org_id
+            for o in (_call(f"/rest/servicedeskapi/servicedesk/"
+                            f"{service_desk_id}/organization", None, "GET")
+                      or {}).get("values") or [])
+        if not attached:
+            raise JiraUnavailable(
+                f"organization {org_id} ('{name}') was not refused when "
+                f"attached to service desk {service_desk_id}, and does not "
+                "appear on it when read back. It exists and isolates nothing.")
+
+    return {"id": org_id, "name": name, "created": created,
+            "service_desk_id": str(service_desk_id)}
+
+
+# ---------------------------------------------------------------------------
 # Provisioning
 # ---------------------------------------------------------------------------
 
@@ -361,6 +472,15 @@ def provision(tenant_id, project=None, when=None):
     def note(result, kind):
         (made if result["created"] else found).append(
             {"key": result["key"], "kind": kind, "marker": result["marker"]})
+
+    # The customer boundary first. Everything below it is AltDigital's own
+    # work, which no customer sees; the organization is the only artefact here
+    # that restricts anything, so it is the one that should not be left until
+    # last and forgotten.
+    org = ensure_organization(tenant_id)
+    (made if org["created"] else found).append(
+        {"key": f"org:{org['id']}", "kind": "organization",
+         "marker": org["name"]})
 
     # The onboarding parent. AMI has no Epic issue type -- its hierarchy tops
     # out at level 0 -- so design 13's "onboarding epic" becomes a Task with
@@ -406,6 +526,8 @@ def provision(tenant_id, project=None, when=None):
            "tenant_id": tenant_id,
            "project": project,
            "tenant_label": label,
+           "organization_id": org["id"],
+           "service_desk_id": org["service_desk_id"],
            "onboarding_key": parent["key"],
            "created": made,
            "already_present": found,
