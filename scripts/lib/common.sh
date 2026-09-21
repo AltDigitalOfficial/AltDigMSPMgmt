@@ -578,3 +578,150 @@ cfn_outputs() {
   aws cloudformation describe-stacks --stack-name "${stack}" \
     --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' --output text 2>/dev/null || true
 }
+
+# --- secrets that more than one account reads ---------------------------------
+#
+# B-110. A secret is only useful in the account that reads it, and several of
+# them are now read from two: reconciliation and quorum run in Audit, while
+# provisioning runs in Tooling alongside the registry. Cross-account reads are
+# not available for these — they are encrypted under the AWS-managed
+# `aws/secretsmanager` key, which cannot be shared between accounts.
+#
+# Two copies of a credential is a rotation hazard: update one, miss the other,
+# and the missed account keeps working on the old value until that value is
+# revoked, at which point it fails in a way that looks like an outage rather
+# than a half-finished rotation.
+#
+# So the fan-out lives HERE rather than in each script. Two copies of this
+# logic would drift exactly the way the two copies of the credential would,
+# which would be a poor joke.
+
+resolve_accounts() {
+  # resolve_accounts <alias> [<alias>...] -> prints "alias:account-id" per line
+  #
+  # ALL of them, before any caller writes anything. An alias that does not
+  # resolve must stop the run rather than be discovered after the first
+  # account has already been rotated.
+  local key acct
+  for key in "$@"; do
+    acct="$(get_param "/org/account/${key}")"
+    [[ -n "${acct}" && "${acct}" != "None" ]] \
+      || die "Account ${key} is not registered in SSM. Nothing has been written."
+    printf '%s:%s\n' "${key}" "${acct}"
+  done
+}
+
+in_account() (
+  # in_account <account-id> <command...>
+  #
+  # A subshell, so the assumed-role credentials cannot leak into the next
+  # iteration. Getting that wrong would write the second account's secret
+  # using the first account's credentials — which either fails confusingly or,
+  # worse, writes the same account twice and reports two successes.
+  local acct="$1"; shift
+  local creds ak sk st
+  creds="$(aws sts assume-role \
+    --role-arn "arn:aws:iam::${acct}:role/OrganizationAccountAccessRole" \
+    --role-session-name platform-secret-write \
+    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+    --output text 2>/dev/null | no_cr)" || true
+  [[ -n "${creds}" ]] || return 3
+  read -r ak sk st <<<"${creds}"
+  unset AWS_PROFILE
+  export AWS_ACCESS_KEY_ID="${ak}" AWS_SECRET_ACCESS_KEY="${sk}" \
+         AWS_SESSION_TOKEN="${st}"
+  MSYS_NO_PATHCONV=1 "$@"
+)
+
+read_secret() {
+  # read_secret <account-id> <secret-name> -> prints the value, or nothing.
+  # Never echoed to a terminal by anything here; used for propagation and for
+  # the read-back check.
+  in_account "$1" aws secretsmanager get-secret-value \
+    --secret-id "$2" --query SecretString --output text 2>/dev/null | no_cr || true
+}
+
+secret_fingerprint() {
+  # Twelve hex characters of sha256, read from stdin. Enough to tell two
+  # accounts apart without displaying either value to whoever is watching the
+  # terminal.
+  python -c '
+import hashlib, sys
+raw = sys.stdin.buffer.read().strip()
+print(hashlib.sha256(raw).hexdigest()[:12] if raw else "absent")
+'
+}
+
+store_secret_everywhere() {
+  # store_secret_everywhere <secret-name> <description> <payload> <alias:id>...
+  #
+  # Writes every account, THEN verifies every account by reading back and
+  # comparing fingerprints. The verification is a read-back rather than the
+  # absence of an error: an API that accepted a put-secret-value has told you
+  # it accepted a request, not what is stored.
+  local name="$1" description="$2" payload="$3"; shift 3
+  local want entry key acct have wrote="" failed="" mismatch=""
+
+  want="$(printf '%s' "${payload}" | secret_fingerprint)"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    for entry in "$@"; do
+      key="${entry%%:*}"; acct="${entry##*:}"
+      have="$(read_secret "${acct}" "${name}" | secret_fingerprint)"
+      printf '%s DRY%s  would store %s in %s (%s): %s -> %s\n' \
+        "${C_YELLOW}" "${C_RESET}" "${name}" "${key}" "${acct}" "${have}" "${want}"
+    done
+    return 0
+  fi
+
+  for entry in "$@"; do
+    key="${entry%%:*}"; acct="${entry##*:}"
+    if in_account "${acct}" aws secretsmanager describe-secret \
+         --secret-id "${name}" >/dev/null 2>&1; then
+      if in_account "${acct}" aws secretsmanager put-secret-value \
+           --secret-id "${name}" --secret-string "${payload}" \
+           --query VersionId --output text >/dev/null 2>&1; then
+        ok "rotated ${name} in ${key} (${acct})"; wrote="${wrote}${key} "
+      else
+        failed="${failed}${key} "
+      fi
+    else
+      if in_account "${acct}" aws secretsmanager create-secret \
+           --name "${name}" --secret-string "${payload}" \
+           --description "${description}" --query ARN --output text \
+           >/dev/null 2>&1; then
+        ok "stored ${name} in ${key} (${acct})"; wrote="${wrote}${key} "
+      else
+        failed="${failed}${key} "
+      fi
+    fi
+  done
+
+  printf '\n'
+  info "verifying by read-back"
+  for entry in "$@"; do
+    key="${entry%%:*}"; acct="${entry##*:}"
+    have="$(read_secret "${acct}" "${name}" | secret_fingerprint)"
+    if [[ "${have}" == "${want}" ]]; then
+      ok "${key} holds ${have}"
+    else
+      warn "${key} holds ${have}, expected ${want}"
+      mismatch="${mismatch}${key} "
+    fi
+  done
+
+  if [[ -n "${mismatch}" ]]; then
+    printf '\n'
+    # Named explicitly. "Rotation failed" is the one message that would leave
+    # somebody guessing which half of the estate is stale — and the accounts
+    # that DID take the new value are named too, because they are the ones
+    # that break when the old credential is revoked.
+    warn "PARTIAL ROTATION. Consuming accounts do not agree."
+    warn "  updated:  ${wrote:-none}"
+    warn "  stale:    ${mismatch}"
+    [[ -n "${failed}" ]] && warn "  failed:   ${failed}"
+    die "Re-run to finish. Do NOT revoke the old credential until every account above reports the same fingerprint."
+  fi
+
+  ok "all consuming accounts hold the same credential (${want})"
+}

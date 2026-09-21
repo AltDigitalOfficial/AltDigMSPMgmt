@@ -1,26 +1,43 @@
 #!/usr/bin/env bash
 #
-# Store the PagerDuty API token in Secrets Manager.
+# Store the PagerDuty REST API token in Secrets Manager, in every account that
+# reads it, in one run.
 #
-#   scripts/set-pagerduty-token.sh          # prompts, input hidden
+#   scripts/set-pagerduty-token.sh              # prompts, input hidden
 #   ... | scripts/set-pagerduty-token.sh --stdin
+#   scripts/set-pagerduty-token.sh --propagate  # fan an existing value out
 #
 # ---------------------------------------------------------------------------
-# This is the most dangerous PagerDuty credential the platform holds
+# An ACCOUNT key, not a personal one
 # ---------------------------------------------------------------------------
-# A ROUTING key can only raise an incident on one service. This token can
-# create, modify and delete services, escalation policies and schedules — it
-# can silently redirect or switch off every page the platform sends, and the
-# absence of alerts is the hardest failure to notice.
+# prompt 12.2: "Authenticate as a platform service account with tokens in
+# Secrets Manager, rotated. Not a personal account."
 #
-# Which is the argument FOR putting it here rather than against. In an
-# environment variable it exists on one laptop, nothing records its use, and
-# rotating it means remembering where it was typed. In Secrets Manager every
-# retrieval is a CloudTrail event in an archive nobody can alter.
+# PagerDuty has no separate service-account object in the classic model. The
+# equivalent is a **General Access REST API Key**, created under
+# Integrations -> API Access Keys, which belongs to the account rather than to
+# a person. That distinction is the whole requirement:
 #
-# Be clear about what this does NOT buy: use-time secrecy. Terraform reads the
-# token from its environment, so fetching it puts it in a process environment
-# either way. The gain is at rest, in rotation, and in audit.
+#   a user token     dies when the person leaves, consumes a seat, and
+#                    attributes every platform action to a human who did not
+#                    take it
+#   an account key   survives staff changes and is revocable without
+#                    disturbing anyone's login
+#
+# It must NOT be read-only. This creates services, escalation policies and
+# business services.
+#
+# ---------------------------------------------------------------------------
+# What reads it
+# ---------------------------------------------------------------------------
+#   tooling   provisioning renders a tenant's PagerDuty configuration from the
+#             registry (saga step 3) and reads back what exists to confirm it
+#   audit     the drift detector, alongside the rest of the detection estate
+#
+# And Terraform, run from a workstation by a person. `pagerduty-apply.sh`
+# reads the token from Secrets Manager rather than requiring PAGERDUTY_TOKEN
+# to be exported by hand — an exported credential outlives the shell it was
+# meant for and ends up in a scrollback.
 #
 # ---------------------------------------------------------------------------
 # Never on a command line
@@ -32,14 +49,22 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 FROM_STDIN=0
+PROPAGATE=0
 SECRET_NAME="platform/pagerduty/api-token"
+
+# Overriding this narrows the fan-out, which is how a half-rotation gets done
+# on purpose. Comma or space separated.
+CONSUMER_KEYS="altdig-security-audit altdig-infra-tooling"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --stdin)  FROM_STDIN=1; shift ;;
-    --secret) SECRET_NAME="$2"; shift 2 ;;
+    --stdin)     FROM_STDIN=1; shift ;;
+    --propagate) PROPAGATE=1; shift ;;
+    --secret)    SECRET_NAME="$2"; shift 2 ;;
+    --account)   CONSUMER_KEYS="${2//,/ }"; shift 2 ;;
     -h|--help)
-      printf 'Usage: %s [--stdin] [--secret <name>]\n' "$0"; exit 0 ;;
+      printf 'Usage: %s [--stdin] [--propagate] [--secret <name>] [--account <alias>[,<alias>]]\n' "$0"
+      exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
@@ -48,69 +73,59 @@ export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
 require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
 
-TOOLING="$(get_param /org/account/altdig-infra-tooling)"
-[[ -n "${TOOLING}" && "${TOOLING}" != "None" ]] \
-  || die "Platform Tooling account not registered."
+mapfile -t ACCOUNTS < <(resolve_accounts ${CONSUMER_KEYS})
+info "consuming accounts: ${ACCOUNTS[*]}"
 
-if [[ ${FROM_STDIN} -eq 1 ]]; then
-  IFS= read -r TOKEN
+if [[ "${PROPAGATE}" == "1" ]]; then
+  PAYLOAD=""
+  for entry in "${ACCOUNTS[@]}"; do
+    candidate="$(read_secret "${entry##*:}" "${SECRET_NAME}")"
+    if [[ -n "${candidate}" && "${candidate}" != "None" ]]; then
+      PAYLOAD="${candidate}"
+      ok "propagating the value already held by ${entry%%:*}"
+      break
+    fi
+  done
+  [[ -n "${PAYLOAD}" ]] \
+    || die "--propagate found no existing token in any consuming account. Run without --propagate to store one."
 else
-  # -s suppresses echo. The trailing newline is printed separately because -s
-  # swallows the one the user typed, and without it the next output line
-  # overwrites the prompt.
-  printf 'PagerDuty API token (input hidden): '
-  IFS= read -rs TOKEN
-  printf '\n'
+  if [[ "${FROM_STDIN}" == "1" ]]; then
+    read -r TOKEN
+  else
+    printf 'PagerDuty REST API key (input hidden): '
+    # -s so it is never echoed to the terminal or captured by a screen recorder.
+    read -rs TOKEN
+    printf '\n'
+  fi
+  [[ -n "${TOKEN}" ]] || die "No token supplied."
+
+  # Shape check only, and it is a warning rather than a refusal. PagerDuty's
+  # general access keys have been 20 and 32 characters at different times, and
+  # a length rule that hard-failed would reject a valid key the first time
+  # they changed the format again. The value is never printed.
+  if [[ ${#TOKEN} -lt 20 ]]; then
+    warn "That key is shorter than any PagerDuty API key observed so far."
+    warn "Storing it anyway; verify with scripts/pagerduty-check.sh."
+  fi
+  if [[ "${TOKEN}" == R0* ]]; then
+    # PagerDuty prefixes read-only keys. Catching it here saves discovering it
+    # as a 403 from a Terraform apply half way through creating a tenant.
+    die "That looks like a READ-ONLY key (they begin R0). This must create services, escalation policies and business services, so it needs a full-access key."
+  fi
+
+  PAYLOAD="$(TOKEN="${TOKEN}" python -c '
+import json, os
+print(json.dumps({"api_token": os.environ["TOKEN"]}))
+')"
+  unset TOKEN
 fi
 
-[[ -n "${TOKEN}" ]] || die "No token supplied."
+store_secret_everywhere \
+  "${SECRET_NAME}" \
+  "PagerDuty REST API key for tenant provisioning (12.2) and drift detection. Account-level key, not a personal token. Written by scripts/set-pagerduty-token.sh." \
+  "${PAYLOAD}" \
+  "${ACCOUNTS[@]}"
+unset PAYLOAD
 
-# Length check only; the value is never echoed. PagerDuty general access keys
-# are 20 or 32 characters depending on vintage, so this catches a paste that
-# picked up nothing rather than validating the token.
-[[ ${#TOKEN} -ge 16 ]] || die "Token looks wrong (${#TOKEN} characters). Refusing to store it."
-
-hr
-log "PagerDuty API token -> Secrets Manager"
-log "  account : altdig-infra-tooling (${TOOLING})"
-log "  secret  : ${SECRET_NAME}"
-log "  token   : ${#TOKEN} characters (not printed)"
-hr
-
-CREDS="$(aws sts assume-role \
-  --role-arn "arn:aws:iam::${TOOLING}:role/OrganizationAccountAccessRole" \
-  --role-session-name platform-pd-token \
-  --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-  --output text 2>/dev/null | no_cr)" || true
-[[ -n "${CREDS}" ]] || die "Could not assume into ${TOOLING}."
-read -r AK SK ST <<<"${CREDS}"
-unset AWS_PROFILE
-export AWS_ACCESS_KEY_ID="${AK}" AWS_SECRET_ACCESS_KEY="${SK}" AWS_SESSION_TOKEN="${ST}"
-
-PAYLOAD="$(printf '{"api_token":"%s"}' "${TOKEN}")"
-
-if MSYS_NO_PATHCONV=1 aws secretsmanager describe-secret \
-     --secret-id "${SECRET_NAME}" >/dev/null 2>&1; then
-  MSYS_NO_PATHCONV=1 aws secretsmanager put-secret-value \
-    --secret-id "${SECRET_NAME}" --secret-string "${PAYLOAD}" \
-    --query 'VersionId' --output text >/dev/null
-  ok "rotated ${SECRET_NAME}"
-  log ""
-  log "Nothing needs redeploying. Unlike the ROUTING keys — which CloudFormation"
-  log "resolves into an SNS subscription endpoint at deploy time and does not"
-  log "re-resolve — this token is read fresh on every terraform run."
-else
-  MSYS_NO_PATHCONV=1 aws secretsmanager create-secret \
-    --name "${SECRET_NAME}" \
-    --description "PagerDuty REST API token used by terraform in pagerduty/. General Access key, not a user token (open item B10)." \
-    --secret-string "${PAYLOAD}" \
-    --tags Key=platform-managed,Value=true \
-    --query 'ARN' --output text >/dev/null
-  ok "created ${SECRET_NAME}"
-fi
-
-hr
-info "scripts/pagerduty-apply.sh now finds it automatically."
-log "  PAGERDUTY_TOKEN in the environment still wins, for the case where you"
-log "  need to run as a different identity without rewriting the secret."
-hr
+printf '\n'
+info "Next: scripts/pagerduty-check.sh confirms the key authenticates and is not read-only."

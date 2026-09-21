@@ -117,63 +117,9 @@ require_cli
 require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
 
 # --- resolve the consuming accounts ----------------------------------------
-#
-# Resolved up front, all of them, before anything is written. An alias that
-# does not resolve should stop the run rather than be discovered after the
-# first account has already been rotated.
 
-ACCOUNTS=""
-for key in ${CONSUMER_KEYS}; do
-  acct="$(get_param "/org/account/${key}")"
-  [[ -n "${acct}" && "${acct}" != "None" ]] \
-    || die "Account ${key} is not registered in SSM. Nothing has been written."
-  ACCOUNTS="${ACCOUNTS}${key}:${acct} "
-done
-
-info "consuming accounts: $(printf '%s' "${ACCOUNTS}")"
-
-# --- helpers ----------------------------------------------------------------
-#
-# Each runs in a subshell so the assumed-role credentials cannot leak into the
-# next iteration. Getting that wrong would write the second account's secret
-# using the first account's credentials, which fails confusingly or, worse,
-# silently writes the same account twice.
-
-in_account() (
-  # in_account <account-id> <command...>
-  local acct="$1"; shift
-  local creds ak sk st
-  creds="$(aws sts assume-role \
-    --role-arn "arn:aws:iam::${acct}:role/OrganizationAccountAccessRole" \
-    --role-session-name set-jira-token \
-    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-    --output text 2>/dev/null | no_cr)" || true
-  [[ -n "${creds}" ]] || return 3
-  read -r ak sk st <<<"${creds}"
-  unset AWS_PROFILE
-  export AWS_ACCESS_KEY_ID="${ak}" AWS_SECRET_ACCESS_KEY="${sk}" \
-         AWS_SESSION_TOKEN="${st}"
-  MSYS_NO_PATHCONV=1 "$@"
-)
-
-read_payload() {
-  # Prints the stored secret string, or nothing. Used by --propagate and by
-  # the fingerprint check; the value is never echoed to a terminal.
-  in_account "$1" aws secretsmanager get-secret-value \
-    --secret-id "${SECRET_NAME}" --query SecretString --output text 2>/dev/null \
-    | no_cr || true
-}
-
-fingerprint() {
-  # A short hash, so two accounts can be COMPARED without either value being
-  # displayed. Twelve hex characters of sha256 identifies a mismatch without
-  # being useful to anyone reading over a shoulder.
-  python -c '
-import hashlib, sys
-raw = sys.stdin.buffer.read().strip()
-print(hashlib.sha256(raw).hexdigest()[:12] if raw else "absent")
-'
-}
+mapfile -t ACCOUNTS < <(resolve_accounts ${CONSUMER_KEYS})
+info "consuming accounts: ${ACCOUNTS[*]}"
 
 # --- obtain the payload -----------------------------------------------------
 
@@ -183,18 +129,16 @@ if [[ "${PROPAGATE}" == "1" ]]; then
   # because re-typing a token to fan it out is how a typo becomes a rotation
   # nobody meant to do.
   PAYLOAD=""
-  SOURCE_KEY=""
-  for entry in ${ACCOUNTS}; do
-    key="${entry%%:*}"; acct="${entry##*:}"
-    candidate="$(read_payload "${acct}")"
+  for entry in "${ACCOUNTS[@]}"; do
+    candidate="$(read_secret "${entry##*:}" "${SECRET_NAME}")"
     if [[ -n "${candidate}" && "${candidate}" != "None" ]]; then
-      PAYLOAD="${candidate}"; SOURCE_KEY="${key}"
+      PAYLOAD="${candidate}"
+      ok "propagating the value already held by ${entry%%:*}"
       break
     fi
   done
   [[ -n "${PAYLOAD}" ]] \
     || die "--propagate found no existing credential in any consuming account. There is nothing to fan out; run without --propagate to store one."
-  ok "propagating the value already held by ${SOURCE_KEY}"
 else
   if [[ -z "${EMAIL}" ]]; then
     # The email is not secret in the way the token is, so it is prompted
@@ -232,79 +176,5 @@ print(json.dumps({"email": os.environ["EMAIL"],
   unset TOKEN
 fi
 
-WANT="$(printf '%s' "${PAYLOAD}" | fingerprint)"
-
-if [[ "${DRY_RUN}" == "1" ]]; then
-  for entry in ${ACCOUNTS}; do
-    key="${entry%%:*}"; acct="${entry##*:}"
-    have="$(read_payload "${acct}" | fingerprint)"
-    printf '%s DRY%s  would store %s in %s (%s): %s -> %s\n' \
-      "${C_YELLOW}" "${C_RESET}" "${SECRET_NAME}" "${key}" "${acct}" \
-      "${have}" "${WANT}"
-  done
-  exit 0
-fi
-
-# --- write every account, then verify every account -------------------------
-#
-# Written first, verified second, and the verification is a READ BACK rather
-# than the absence of an error from the write. An API that accepted a
-# put-secret-value has told us it accepted a request; the fingerprint tells us
-# what is actually stored.
-
-WROTE=""
-FAILED=""
-for entry in ${ACCOUNTS}; do
-  key="${entry%%:*}"; acct="${entry##*:}"
-  if in_account "${acct}" aws secretsmanager describe-secret \
-       --secret-id "${SECRET_NAME}" >/dev/null 2>&1; then
-    if in_account "${acct}" aws secretsmanager put-secret-value \
-         --secret-id "${SECRET_NAME}" --secret-string "${PAYLOAD}" \
-         --query VersionId --output text >/dev/null 2>&1; then
-      ok "rotated ${SECRET_NAME} in ${key} (${acct})"
-      WROTE="${WROTE}${key} "
-    else
-      FAILED="${FAILED}${key} "
-    fi
-  else
-    if in_account "${acct}" aws secretsmanager create-secret \
-         --name "${SECRET_NAME}" --secret-string "${PAYLOAD}" \
-         --description "Jira Cloud service account for change reconciliation (8.2), quorum verification (8.3) and tenant provisioning (12.3). Written by scripts/set-jira-token.sh." \
-         --query ARN --output text >/dev/null 2>&1; then
-      ok "stored ${SECRET_NAME} in ${key} (${acct})"
-      WROTE="${WROTE}${key} "
-    else
-      FAILED="${FAILED}${key} "
-    fi
-  fi
-done
+store_secret_everywhere   "${SECRET_NAME}"   "Jira Cloud service account for change reconciliation (8.2), quorum verification (8.3) and tenant provisioning (12.3). Written by scripts/set-jira-token.sh."   "${PAYLOAD}"   "${ACCOUNTS[@]}"
 unset PAYLOAD
-
-printf '\n'
-info "verifying by read-back"
-MISMATCH=""
-for entry in ${ACCOUNTS}; do
-  key="${entry%%:*}"; acct="${entry##*:}"
-  have="$(read_payload "${acct}" | fingerprint)"
-  if [[ "${have}" == "${WANT}" ]]; then
-    ok "${key} holds ${have}"
-  else
-    warn "${key} holds ${have}, expected ${WANT}"
-    MISMATCH="${MISMATCH}${key} "
-  fi
-done
-
-if [[ -n "${MISMATCH}" ]]; then
-  printf '\n'
-  # Named explicitly, because "rotation failed" is the one message that would
-  # leave somebody guessing which half of the estate is now stale. The accounts
-  # that DID take the new value are named too — they are the ones that will
-  # break when the old token is revoked.
-  warn "PARTIAL ROTATION. Consuming accounts do not agree."
-  warn "  updated:  ${WROTE:-none}"
-  warn "  stale:    ${MISMATCH}"
-  [[ -n "${FAILED}" ]] && warn "  failed:   ${FAILED}"
-  die "Re-run to finish. Do NOT revoke the old Jira token until every account above reports the same fingerprint."
-fi
-
-ok "all consuming accounts hold the same credential (${WANT})"
