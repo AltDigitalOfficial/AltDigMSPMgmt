@@ -193,7 +193,14 @@ def transition(tenant_id, to_state, reason=None):
     dynamodb.update_item(
         TableName=REGISTRY_TABLE,
         Key={"PK": {"S": f"TENANT#{tenant_id}"}, "SK": {"S": "META"}},
-        UpdateExpression="SET #s = :new, state_reason = :r, updated_at = :t",
+        # state_changed_at is SEPARATE from updated_at and both are written.
+        # updated_at moves whenever any identifier is written back, so it
+        # cannot answer "how long has this tenant been waiting" -- an
+        # unrelated write would reset the clock and a tenant stalled for a
+        # month on a signature would read as fresh. prompt 12.4 asks for
+        # exactly that stall to be visible, so it needs its own timestamp.
+        UpdateExpression=("SET #s = :new, state_reason = :r, "
+                          "state_changed_at = :t, updated_at = :t"),
         ExpressionAttributeNames={"#s": "state"},
         ExpressionAttributeValues={
             ":new": {"S": to_state},
@@ -290,27 +297,15 @@ def _do_jira(ctx):
     import jira_tenant
 
     result = jira_tenant.provision(ctx["tenant_id"])
-    now = _iso(_now())
-    dynamodb.update_item(
-        TableName=REGISTRY_TABLE,
-        Key={"PK": {"S": f"TENANT#{ctx['tenant_id']}"}, "SK": {"S": "META"}},
-        UpdateExpression=("SET jira_tenant_label = :l, "
-                          "jira_onboarding_key = :k, "
-                          "jira_organization_id = :o, updated_at = :u"),
-        ExpressionAttributeValues={
-            ":l": {"S": result["tenant_label"]},
-            ":k": {"S": result["onboarding_key"]},
-            # The JSM organization is the only artefact in step 4 that
-            # restricts anything (B-109). Recorded so the deprovisioning path
-            # knows it exists -- it cannot delete it, and a teardown that does
-            # not know about it would not say so.
-            ":o": {"S": result["organization_id"]},
-            ":u": {"S": now}},
-        # The registry record must already exist -- step 1 created it. If it
-        # does not, something removed it mid-saga and stamping a Jira key onto
-        # a record that is not there would create a half-record describing a
-        # tenant nobody declared.
-        ConditionExpression="attribute_exists(PK)")
+    write_back(
+        ctx["tenant_id"],
+        jira_tenant_label=result["tenant_label"],
+        jira_onboarding_key=result["onboarding_key"],
+        # The JSM organization is the only artefact in step 4 that restricts
+        # anything (B-109). Recorded so the deprovisioning path knows it
+        # exists -- it cannot delete it, and a teardown that does not know
+        # about it would not say so.
+        jira_organization_id=result["organization_id"])
     return {"jira_tenant_label": result["tenant_label"],
             "jira_onboarding_key": result["onboarding_key"],
             "jira_organization_id": result["organization_id"]}

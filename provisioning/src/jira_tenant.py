@@ -300,6 +300,35 @@ def _period_key(cadence, when=None):
         "collapses the recurrence to a single ticket.")
 
 
+# prompt 12.4: non-blocking tasks are "created, owned and dated". Blocking
+# tasks are deliberately NOT dated. They gate the transition to `verifying`, so
+# their urgency is already expressed by the tenant not advancing, and a due
+# date on them would invent a commitment nobody made. How long a tenant has
+# been waiting is measured from the registry's state_changed_at instead, which
+# is the real answer.
+NON_BLOCKING_DUE_DAYS = int(os.environ.get("JIRA_NON_BLOCKING_DUE_DAYS", "30"))
+
+
+def _due(when, days):
+    return (when + datetime.timedelta(days=days)).date().isoformat()
+
+
+def _period_end(cadence, when):
+    """The last day of the period an obligation belongs to.
+
+    An annual obligation due on the day it was raised is overdue immediately;
+    due at the end of its period is the date that actually means something.
+    """
+    if cadence == "annual":
+        return datetime.date(when.year, 12, 31).isoformat()
+    quarter = (when.month - 1) // 3 + 1
+    last_month = quarter * 3
+    if last_month == 12:
+        return datetime.date(when.year, 12, 31).isoformat()
+    return (datetime.date(when.year, last_month + 1, 1)
+            - datetime.timedelta(days=1)).isoformat()
+
+
 def _adf(text):
     return {"type": "doc", "version": 1,
             "content": [{"type": "paragraph",
@@ -334,7 +363,7 @@ def find_by_marker(project, marker):
 
 
 def ensure_issue(project, issuetype, summary, description, labels,
-                 parent=None):
+                 parent=None, duedate=None):
     """Create an issue only if its marker is not already present.
 
     The marker is the FIRST label by convention, not by API requirement, so
@@ -354,6 +383,8 @@ def ensure_issue(project, issuetype, summary, description, labels,
     }
     if parent:
         fields["parent"] = {"key": parent}
+    if duedate:
+        fields["duedate"] = duedate
 
     created = _call("/rest/api/3/issue", {"fields": fields})
     key = created.get("key")
@@ -503,14 +534,17 @@ def provision(tenant_id, project=None, when=None):
              "blocking"],
             parent=parent["key"]), "onboarding-blocking")
 
+    raised_at = when or datetime.datetime.now(datetime.timezone.utc)
+    due = _due(raised_at, NON_BLOCKING_DUE_DAYS)
+
     for index, (summary, why, owner) in enumerate(NON_BLOCKING):
         note(ensure_issue(
             project, SUBTASK_ISSUETYPE, summary,
             f"{why}\n\nOwner: {owner}. Tracked and dated; does not gate "
-            "go-live.",
+            f"go-live. Due {due}.",
             [_marker("onb", tenant_id, "n", index), label, "onboarding",
              "non-blocking"],
-            parent=parent["key"]), "onboarding-non-blocking")
+            parent=parent["key"], duedate=due), "onboarding-non-blocking")
 
     for key, summary, cadence, why in OBLIGATIONS:
         period = _period_key(cadence, when)
@@ -520,7 +554,8 @@ def provision(tenant_id, project=None, when=None):
             f"period {period}. One ticket per period -- the idempotency key "
             "includes the period so that next period gets its own.",
             [_marker("obl", tenant_id, key, period), label, "obligation",
-             f"obligation-{key}"]), f"obligation-{key}")
+             f"obligation-{key}"],
+            duedate=_period_end(cadence, raised_at)), f"obligation-{key}")
 
     out = {"record_type": "jira-tenant-provision",
            "tenant_id": tenant_id,
