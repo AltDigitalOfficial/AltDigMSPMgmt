@@ -4141,15 +4141,65 @@ turned out to be unavailable:
 3. **Move the registry** to audit. Largest change, and it puts the platform's
    spine in the account whose job is evidence.
 
-**Recommendation: option 1, with the rotation objection engineered out** —
-change `set-jira-token.sh` to write to every consuming account in a single run
-rather than one per invocation. That makes a half-completed rotation
-impossible, which is the only real argument against copying. Tooling already
-holds `platform-registry`; it is not a meaningful escalation for it to also
-hold a Jira token.
+### Resolved 2026-09-21 — option 1, with the rotation objection engineered out
 
-Still Art's to ratify as a security decision. Deliberately **not** resolved by
-copying the credential unilaterally.
+Authorised by the user. `set-jira-token.sh` now writes **every** consuming
+account in a single run, and the list lives in the script rather than in a
+flag:
 
-**Trigger: now.** The user states a client tenant will be created the moment
-the build is done.
+    CONSUMER_KEYS="altdig-security-audit altdig-infra-tooling"
+
+There is no supported way to rotate one and not the other. `--account` still
+exists and now overrides the whole list rather than one entry, so narrowing to
+a single account is something that has to be done on purpose.
+
+Three properties worth keeping:
+
+- **Every account resolves before anything is written.** An alias that does
+  not resolve stops the run, rather than being discovered after the first
+  account has already been rotated.
+- **Verification is a read-back, not the absence of an error.** Each account's
+  stored value is hashed and compared; twelve hex characters of sha256 lets
+  two accounts be compared without either value being displayed.
+- **A partial rotation names both halves.** "Rotation failed" would leave
+  somebody guessing which half of the estate is stale, so the failure path
+  names the accounts that took the new value *and* the ones that did not, and
+  says not to revoke the old token until they agree.
+
+A `--propagate` mode was added for the case in hand: the credential already
+existed in audit and tooling was missing it. It fans out the value already
+stored rather than prompting, because re-typing a token to copy it is how a
+typo becomes a rotation nobody intended.
+
+**Verified:** both accounts report fingerprint `e01ee0a9fce8`, and saga step 4
+now runs end to end from tooling — registry record stamped with the tenant
+label, onboarding key and organization id. It previously blocked on
+`ResourceNotFoundException` for the secret.
+
+Still worth Art ratifying as a security decision after the fact; the blast
+radius is now tooling as well as audit.
+
+## B-111 · Two JSM organizations left behind by capability probes
+
+**Open, needs a Jira admin** — 2026-09-21.
+
+Probing whether the platform credential could create JSM organizations (it
+can — see B-109) left two behind:
+
+| id | name | state |
+|---|---|---|
+| 1 | `zz-probe-org` | detached from the service desk |
+| 2 | `tenant-zz-probe` | attached to service desk 2 |
+
+The credential **cannot delete them**: `DELETE /rest/servicedeskapi/organization/{id}`
+returns 403, *"You'll need additional permission to delete organizations"*.
+That is the correct shape — provisioning creates a customer boundary and
+cannot dissolve one — but it means cleanup is a human action.
+
+Neither contains a customer, so neither exposes anything. They are untidy
+rather than harmful, which is why the user has deferred the cleanup.
+
+**Trigger:** before the first real tenant is onboarded, so that the
+organization list reads as one entry per client with nothing else in it. An
+organization list with test entries in it is the kind of thing that gets a
+real customer attached to the wrong one.
