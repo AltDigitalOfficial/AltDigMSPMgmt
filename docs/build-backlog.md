@@ -3878,3 +3878,33 @@ and doing it here would have buried a baseline change inside a detector commit.
 inert until it exists — or before the telemetry detector is relied on to
 distinguish a killed agent from one that never ran, since today it can only say
 which by pointing at this entry.
+
+## B-104 · A publish script was copied and half-renamed, and uploaded under the wrong name
+
+**Fixed** — 2026-09-21, noticed in the script's own output.
+
+`scripts/publish-commercial.sh` was built from `publish-telemetry.sh`, which was
+built from `publish-quorum.sh`. The rename was applied to the script's head and
+not its tail, so the commercial package uploaded as:
+
+    s3://.../telemetry/telemetry-2bb45bee1d7e5170.zip
+
+containing `route.py`. The trailing guidance was worse — two generations stale,
+telling the reader to deploy an executor role and sync an approver list, neither
+of which exists in this phase.
+
+**Nothing broke**, which is the point. The upload succeeded, the key was
+content-addressed and collided with nothing, and only the *name* was wrong.
+Somebody later deploying the telemetry stack from a key list would have had a
+one-in-three chance of shipping the commercial router into it.
+
+**Caught by reading the output rather than by any check.** The script printed
+"Commercial package" and then a telemetry key on the next line, which is only
+visible to somebody looking. Third publish script in this codebase built by
+copying the last one, and the first two carried their ancestry harmlessly.
+
+**Worth a guard when there is a fourth**, not before: assert that the upload
+key's prefix matches the script's own name. Two copies is coincidence; four is
+a pattern, and a guard written now would be guessing at what the pattern is.
+
+The stray object has been deleted from the artifact bucket.

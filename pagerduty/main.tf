@@ -290,3 +290,90 @@ resource "pagerduty_event_orchestration_service" "platform_low" {
     }
   }
 }
+
+# ---------------------------------------------------------------------------
+# The client-conversation class — design 12's fourth destination
+# ---------------------------------------------------------------------------
+# design/12-commercial-access.md:
+#
+#     A fourth destination in the routing design of 06, alongside PagerDuty,
+#     Jira and the review queue. Defined by WHO NEEDS TO HAVE A CONVERSATION,
+#     not by severity.
+#
+#     Implemented as a PagerDuty business service with notification rules
+#     rather than paging rules.
+#
+# Two resources, because PagerDuty splits what that sentence joins. A BUSINESS
+# service is the subscribable object — it represents a customer-facing
+# capability and people subscribe to its status. It does not ingest events. A
+# TECHNICAL service ingests events and has an escalation policy.
+#
+# So the technical service below receives what platform.commercial emits, and
+# the business service is what Tina and Wayne subscribe to. Building only the
+# business service would have produced something that looks right in the
+# console and receives nothing.
+
+resource "pagerduty_escalation_policy" "commercial" {
+  name      = "AltDigital Commercial"
+  num_loops = 0 # Do not loop. This is not a page; repeating it is not useful.
+
+  rule {
+    escalation_delay_in_minutes = 60
+
+    target {
+      type = "schedule_reference"
+      id   = pagerduty_schedule.platform.id
+    }
+  }
+}
+
+resource "pagerduty_service" "commercial" {
+  name              = var.commercial_service_name
+  description       = "Client-conversation events. design 12's fourth routing destination: defined by who needs to have a conversation, not by severity. These NOTIFY; they do not page."
+  escalation_policy = pagerduty_escalation_policy.commercial.id
+  alert_creation    = "create_alerts_and_incidents"
+
+  # Low, constant, and not a threshold.
+  #
+  # An SLA outage is commercially urgent and operationally already handled by
+  # the production service — the commercial team needs to know before a
+  # customer calls, which is a different job from being woken up. Two people
+  # paged for one event is how one of them stops reading the other's channel.
+  incident_urgency_rule {
+    type    = "constant"
+    urgency = "low"
+  }
+
+  # Auto-resolve OFF, unlike the low-urgency operational service.
+  #
+  # A conversation that nobody had is not resolved by four hours passing. The
+  # dev queue auto-resolves because a build machine at 95% CPU stops mattering;
+  # an unacknowledged "a customer's budget broke" still matters tomorrow.
+  auto_resolve_timeout = "null"
+}
+
+resource "pagerduty_service_integration" "commercial_events_v2" {
+  name    = "Platform Commercial Router (Events API v2)"
+  service = pagerduty_service.commercial.id
+  type    = "events_api_v2_inbound_integration"
+}
+
+# The subscribable half. design 12's "business service" literally.
+resource "pagerduty_business_service" "commercial" {
+  name             = "Client Conversations"
+  description      = "Events where somebody at AltDigital needs to talk to a customer. Subscribe to be informed; notification of a customer is governed elsewhere — see design 12, 'Informed is not notifier'."
+  point_of_contact = var.commercial_point_of_contact
+}
+
+resource "pagerduty_service_dependency" "commercial" {
+  dependency {
+    dependent_service {
+      id   = pagerduty_business_service.commercial.id
+      type = "business_service"
+    }
+    supporting_service {
+      id   = pagerduty_service.commercial.id
+      type = "service"
+    }
+  }
+}

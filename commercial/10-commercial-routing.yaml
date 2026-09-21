@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the client-conversation event class (prompt
+  11.2). design 12's fourth routing destination. Deploys to the Audit account.
+
+# ---------------------------------------------------------------------------
+# A fourth destination, not a fourth severity
+# ---------------------------------------------------------------------------
+# design/12-commercial-access.md defines this class by "who needs to have a
+# conversation, not by severity", and that is why it is a separate router
+# rather than a branch in alerting/src/router.py.
+#
+# A cost anomaly is low severity and needs a conversation. A failed restore test
+# in a dev sandbox is higher severity and needs none. Any threshold on the
+# existing router gets both wrong, and the two routers answer different
+# questions about the same event -- which is why a security incident reaches
+# both, as an operational page through one and as awareness through the other.
+#
+# ---------------------------------------------------------------------------
+# Two rules, because the events arrive in two shapes
+# ---------------------------------------------------------------------------
+# Most client-conversation events are emitted deliberately and carry
+# `commercial_event`. Security incidents are not: containment emits a dossier
+# for operational reasons and has no opinion about the commercial team. So the
+# dossier rule exists to pull those in without containment needing to know this
+# destination exists.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  NotifierParam:
+    Type: String
+    Default: /platform/commercial/notifier
+    Description: >-
+      SSM parameter naming the ROLE that owns customer notification.
+
+      A role, not a person: design 12 assigns notification to contract owners,
+      and a name in a payload goes stale and is personal data besides.
+
+      The router refuses to emit an awareness event when this cannot be read.
+      An event saying an incident is in progress, naming nobody to tell the
+      customer, is how a helpful person on a phone call becomes the notifying
+      party.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  RouteRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformCommercialRouter
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  RoutePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: RouteClientConversations
+      Roles: [!Ref RouteRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadNotifierRole
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${NotifierParam}'
+          - Sid: EmitClientConversations
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  RouteLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-commercial-router
+      # Seven years. What the commercial team was told, and when, is the record
+      # that answers "did you know" in a dispute.
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  RouteFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: RouteLogGroup
+    Properties:
+      FunctionName: platform-commercial-router
+      Runtime: python3.12
+      Handler: route.handler
+      Role: !GetAtt RouteRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          ALERT_BUS_NAME: !Ref AlertBusName
+          COMMERCIAL_NOTIFIER_PARAM: !Ref NotifierParam
+
+  # Events emitted deliberately for this class.
+  DeclaredCommercialRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-route-commercial-declared
+      EventBusName: !Ref AlertBusName
+      Description: 'Events that name themselves as client conversations.'
+      EventPattern:
+        detail:
+          commercial_event: [{ exists: true }]
+      State: ENABLED
+      Targets:
+        - Id: route
+          Arn: !GetAtt RouteFunction.Arn
+
+  # Security incidents, which do not.
+  #
+  # containment emits a dossier because an incident happened, not because the
+  # commercial team needs to know. Matching the dossier here means containment
+  # does not have to carry a second destination's concerns -- and it means an
+  # incident cannot be forgotten into silence because somebody omitted a field.
+  IncidentAwarenessRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-route-commercial-incident-awareness
+      EventBusName: !Ref AlertBusName
+      Description: >-
+        Security incidents, as AWARENESS ONLY. The payload that leaves here
+        carries nothing a customer could be notified from. design 12.
+      EventPattern:
+        detail-type: ['Platform Incident Dossier']
+      State: ENABLED
+      Targets:
+        - Id: route
+          Arn: !GetAtt RouteFunction.Arn
+
+  DeclaredPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RouteFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DeclaredCommercialRule.Arn
+
+  IncidentPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RouteFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IncidentAwarenessRule.Arn
+
+Outputs:
+
+  RouteFunctionName:
+    Description: The client-conversation router.
+    Value: !Ref RouteFunction
+
+  NotifierParam:
+    Description: >-
+      Set this before relying on incident awareness. The router refuses to
+      emit an awareness event without it.
+    Value: !Ref NotifierParam

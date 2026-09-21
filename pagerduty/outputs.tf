@@ -68,3 +68,14 @@ output "events_v2_routing_key_low" {
   value       = pagerduty_service_integration.events_v2_low.integration_key
   sensitive   = true
 }
+
+output "commercial_routing_key" {
+  description = "Events API v2 routing key for the client-conversation class. Read by commercial/src/route.py via Secrets Manager, never hardcoded."
+  value       = pagerduty_service_integration.commercial_events_v2.integration_key
+  sensitive   = true
+}
+
+output "commercial_business_service_id" {
+  description = "What the commercial team subscribes to."
+  value       = pagerduty_business_service.commercial.id
+}

@@ -144,3 +144,15 @@ variable "low_urgency_priority" {
     works, it just carries no priority label.
   EOT
 }
+
+variable "commercial_service_name" {
+  description = "Technical service that ingests client-conversation events. These notify; they do not page."
+  type        = string
+  default     = "AltDigital Client Conversations"
+}
+
+variable "commercial_point_of_contact" {
+  description = "Role reference for the business service, not a person's name. A name here goes stale and is personal data besides."
+  type        = string
+  default     = "Commercial lead"
+}
