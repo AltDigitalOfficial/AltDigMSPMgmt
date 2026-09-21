@@ -4203,3 +4203,63 @@ rather than harmful, which is why the user has deferred the cleanup.
 organization list reads as one entry per client with nothing else in it. An
 organization list with test entries in it is the kind of thing that gets a
 real customer attached to the wrong one.
+
+## B-112 · The verification sweep cannot read into tenant accounts
+
+**Open** — 2026-09-21.
+
+Three of design 13's nine verification checks need to read state *inside* a
+tenant's own AWS accounts:
+
+| check | what it must read |
+|---|---|
+| canary running and passing | the canary's last run result |
+| backup policy and first recovery point | the backup vault |
+| guardrail harness against these accounts | whatever the harness asserts |
+
+`verify.py` runs in tooling, holds no role in a member account, and does not
+assume one. All three report `undeterminable`, which blocks go-live — correct
+behaviour, and useless behaviour, since it means the sweep can never clear for
+any tenant no matter how healthy.
+
+**What this needs.** A read-only role in the member baseline, assumable from
+tooling by the verification function specifically, scoped to the handful of
+describe calls these checks make. It is deliberately NOT the existing
+`OrganizationAccountAccessRole`: that role is administrative, and a sweep that
+runs on a schedule should not hold admin in every tenant account in the estate
+to find out whether a canary passed.
+
+**Trigger:** when the vesting pipeline (phase 3) first produces accounts. Until
+then there is nothing to read into, and the checks are blocked by the absence
+of accounts rather than by the absence of a role.
+
+## B-113 · Two registry record shapes, and the sweep read the wrong one
+
+**Closed same day** — 2026-09-21.
+
+`verify.py` was written treating registry records as raw DynamoDB attribute
+maps (`{"state": {"S": "live"}}`), but `saga.record()` unwraps them to plain
+values first. Every field read returned a string where a dict was expected, and
+`.get("S")` on a string raised `AttributeError`.
+
+**Two things caught it, and one of them is the design working.**
+
+The sweep wraps each check in a try/except that reports a raising check as
+`undeterminable` rather than letting it crash or counting it as a pass. So the
+bug surfaced as "every check is undeterminable", which blocks go-live — the
+failure was contained into the safe direction by the fail-closed rule rather
+than by anything specific to this bug.
+
+The test did not catch it, and that is the more useful lesson. It passed raw
+table items straight into the check functions, so it exercised a shape the
+production path never produces. A fixture that constructs its input differently
+from the way the real caller constructs it tests a function that does not exist.
+The tests now route through `saga.record()`, the same way the sweep does.
+
+**A near miss worth naming separately.** The partner windows are stored as
+DynamoDB **numbers**, not strings. `saga.record`'s unwrap reads
+`v.get("S") or v.get("N")`, so copying that pattern was what made the live
+check work — a version that handled only `S` would have read both windows as
+unset and FAILED a correctly configured partner. The failure would have looked
+like a compliance finding rather than a parsing bug, which is the expensive
+kind of wrong: somebody would have gone looking at the contract.

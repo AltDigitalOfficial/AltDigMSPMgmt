@@ -311,6 +311,33 @@ def _do_jira(ctx):
             "jira_organization_id": result["organization_id"]}
 
 
+def _do_verify(ctx):
+    """design 13 step 8. The sweep that makes provisioning a control.
+
+    Lazily imported for the same reason as step 4 -- `verify` reaches the Jira
+    client, which builds a Secrets Manager client at import time.
+
+    Stamps `verified_at` only when every check passed. A sweep that recorded
+    partial success would leave the registry claiming a tenant was verified on
+    the strength of the checks that happened to be implemented, and step 9
+    reads that field.
+    """
+    import verify
+
+    out = verify.sweep(ctx["tenant_id"])
+    if not out["go_live_eligible"]:
+        # Raised rather than returned, so run_step's own confirmation never
+        # gets the chance to find `verified_at` and read the step as done.
+        raise verify.VerificationFailed(
+            f"{len(out['passed'])} of {out['checks_total']} checks passed. "
+            f"failed: {', '.join(out['failed']) or 'none'}; "
+            f"undeterminable: {', '.join(out['undeterminable']) or 'none'}. "
+            "design 13 fails closed -- an undeterminable check has not "
+            "passed, and go-live does not proceed on the ones that did.")
+    write_back(ctx["tenant_id"], verified_at=out["swept_at"])
+    return {"verified_at": out["swept_at"]}
+
+
 STEPS = [
     {
         "number": 0,
@@ -385,7 +412,7 @@ STEPS = [
         "name": "verification-sweep",
         "check": lambda ctx: ({"verified_at": (record(ctx["tenant_id"]) or {}).get("verified_at")}
                               if (record(ctx["tenant_id"]) or {}).get("verified_at") else None),
-        "do": _not_built("The per-tenant verification sweep", "design 13 'The verification sweep'"),
+        "do": _do_verify,
     },
     {
         "number": 9,
