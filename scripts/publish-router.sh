@@ -27,6 +27,7 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 cp "${REPO_ROOT}/alerting/src/router.py" "${BUILD}/router.py"
+cp "${REPO_ROOT}/alerting/src/cadence.py" "${BUILD}/cadence.py"
 cp "${REPO_ROOT}/instrumentation/src/eventspec.py" "${BUILD}/eventspec.py"
 
 # 06a's event-alarm patterns, baked in.
@@ -40,9 +41,29 @@ cp "${REPO_ROOT}/instrumentation/src/eventspec.py" "${BUILD}/eventspec.py"
 info "Baking in 06a's event patterns"
 "${PY}" "$(win_path "${REPO_ROOT}/scripts/lib/extract_event_specs.py")"   "$(win_path "${REPO_ROOT}/design/06a-alarm-specification.yaml")"   "$(win_path "${REPO_ROOT}/instrumentation/src")"   "$(win_path "${BUILD}/event_specs.json")"   || die "Could not extract the event specifications. Nothing packaged."
 
-info "Checking the router compiles"
-"${PY}" -m py_compile "$(win_path "${REPO_ROOT}/alerting/src/router.py")" \
-  || die "router.py does not compile. Nothing packaged."
+# B-060: a hand-written module list left two handlers out of an archive while
+# the stack was already deployed with Lambdas pointing at them. The templates
+# are the authority on what must be present, so they are what gets checked.
+#
+# This package now carries two handlers, which is exactly the condition that
+# made B-060 possible: cadence.py was copied in and, for one commit, neither
+# compile-checked nor covered by any guard.
+info "Checking every handler the templates reference is packaged"
+for HANDLER in $(grep -hoE '^      Handler: [a-z_]+\.handler' \
+                   "${REPO_ROOT}"/alerting/*.yaml \
+                 | awk '{print $2}' | cut -d. -f1 | sort -u); do
+  [[ -f "${BUILD}/${HANDLER}.py" ]] \
+    || die "the templates declare handler ${HANDLER}.handler but
+      ${HANDLER}.py is not in the package. Add it to the copy list above."
+  printf '  %s.py\n' "${HANDLER}"
+done
+ok "every referenced handler is present"
+
+info "Checking the alerting sources compile"
+"${PY}" -m py_compile \
+  "$(win_path "${REPO_ROOT}/alerting/src/router.py")" \
+  "$(win_path "${REPO_ROOT}/alerting/src/cadence.py")" \
+  || die "alerting sources do not compile. Nothing packaged."
 ok "compiles"
 
 info "Packaging"

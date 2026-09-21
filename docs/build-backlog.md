@@ -4526,3 +4526,34 @@ it needs weeks of history, and a band that widens on its own would have
 widened around B-116 given long enough. Adapting to a runaway is exactly the
 wrong behaviour here. Revisit trigger is tenant count: when routine operation
 reaches a quarter of the threshold, raise it and re-measure.
+
+## B-118 · cron() schedules are not cadence-checked
+
+**Open, narrow** — 2026-09-21.
+
+`alerting/src/cadence.py` derives each rule's expected firing rate from its own
+`ScheduleExpression`. It handles `rate(N unit)` exactly and **refuses** to
+evaluate `cron()`, reporting `not_evaluated` with the reason.
+
+Expanding an arbitrary cron expression needs a real cron library. The runtime
+has none, and an approximation would be wrong in the direction that destroys
+the control: a healthy weekly job would read as six days of silence, and a
+control that cries wolf is a control somebody mutes.
+
+**Currently affects one rule:** `platform-containment-exercise-monthly`. Nine
+of the estate's ten scheduled rules are `rate()` and are checked.
+
+**Options, in order of preference:**
+
+1. **Convert the rule to `rate(30 days)`** if monthly-ish is good enough. One
+   line, no new code, no dependency. A containment exercise does not need to
+   land on the first of the month.
+2. Vendor a small cron expander into the package. More code in the path of a
+   control whose value is that it is simple.
+3. Leave it. The rule is reported as unevaluated on every sweep, so the gap is
+   visible rather than silent — which is the property that makes leaving it
+   tolerable.
+
+**Trigger:** when a second cron rule appears. One unevaluated rule is a
+footnote; two is a pattern, and the third will arrive without anybody noticing
+the list has grown.

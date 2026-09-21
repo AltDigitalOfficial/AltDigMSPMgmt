@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — cadence sweep. Is each scheduled component
+  running, at roughly the rate it declared? Both directions.
+
+# ---------------------------------------------------------------------------
+# The other half of runaway detection
+# ---------------------------------------------------------------------------
+# alerting/30-runaway.yaml catches something running at a gross multiple of
+# normal. This catches the opposite, which is worse: something that should be
+# running and is not.
+#
+# A runaway at least leaves a trace — invocations, log lines, a bill. A
+# component that stops produces nothing at all, and nothing is exactly what an
+# estate with no problems produces. That is B-086, B-089, B-092 and B-100:
+# every one of them a thing not running, reporting success.
+#
+# design 06a states the principle for telemetry streams, and it generalises:
+#
+#   "CloudWatch Logs does not alarm on absence natively. Absence is only
+#    detectable against a DECLARED EXPECTATION."
+#
+# The declaration is the rule's own ScheduleExpression, read from the deployed
+# infrastructure rather than from a list maintained beside it. See
+# alerting/src/cadence.py on why a second copy would drift.
+#
+# ---------------------------------------------------------------------------
+# Who watches this
+# ---------------------------------------------------------------------------
+# The sweep is itself a scheduled component, and it cannot report its own
+# absence: if it stops, it simply stops emitting findings, which reads exactly
+# like an estate with nothing wrong.
+#
+# So it publishes a heartbeat metric on every run, and CadenceSweepStalled
+# alarms on the ABSENCE of that metric — TreatMissingData: breaching, which is
+# the inverse of every other alarm in the platform. It is the one alarm that
+# fires because nothing arrived.
+#
+# That alarm is the end of the chain. Nothing watches IT, and that is a
+# deliberate stopping point rather than an oversight: the regress has to end,
+# and it ends at a CloudWatch alarm, which is the most reliable component in
+# the path and the only one with no code of ours in it.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  AlertsTopicArn:
+    Type: String
+    Description: >-
+      High-urgency topic for the dead man's switch only. Findings from the
+      sweep itself route through the alert bus as digest_and_jira — a
+      scheduled job that missed a window needs looking at today, not at 3am.
+      The sweep having stopped is different, because it blinds every other
+      absence check.
+
+  SweepSchedule:
+    Type: String
+    Default: rate(1 hour)
+    Description: >-
+      Hourly. Frequent enough that a stopped component is caught within a
+      working day, infrequent enough that the sweep is not itself a
+      significant source of the invocations it measures.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  CadenceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformCadenceSweep
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  CadencePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SweepScheduledCadence
+      Roles: [!Ref CadenceRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Read-only over EventBridge. This inspects schedules; it never
+          # changes one. Stopping a runaway by disabling a rule is a human
+          # action with a runbook, not something this role can do -- CLAUDE.md
+          # keeps automation additive, and a sweep that could disable rules on
+          # a rate signal would eventually disable the platform during a
+          # legitimate burst.
+          - Sid: ReadSchedules
+            Effect: Allow
+            Action:
+              - events:ListEventBuses
+              - events:ListRules
+              - events:DescribeRule
+            Resource: '*'
+          - Sid: ReadRuleMetrics
+            Effect: Allow
+            # GetMetricStatistics takes no resource-level permissions.
+            Action: cloudwatch:GetMetricStatistics
+            Resource: '*'
+          - Sid: PublishHeartbeat
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: '*'
+            Condition:
+              StringEquals:
+                cloudwatch:namespace: Platform/Cadence
+          - Sid: EmitFindings
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  CadenceLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-cadence-sweep
+      RetentionInDays: 365
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  CadenceFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: CadenceLogGroup
+    Properties:
+      FunctionName: platform-cadence-sweep
+      Runtime: python3.12
+      Handler: cadence.handler
+      Role: !GetAtt CadenceRole.Arn
+      # Generous: one GetMetricStatistics call per scheduled rule, serially.
+      # At 100 rules that is 100 round trips.
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          ALERT_BUS_NAME: !Ref AlertBusName
+
+  CadenceSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-cadence-sweep
+      Description: >-
+        Hourly check that every scheduled rule is firing at its declared rate.
+        This rule is itself covered by the sweep it triggers.
+      ScheduleExpression: !Ref SweepSchedule
+      State: ENABLED
+      Targets:
+        - Id: sweep
+          Arn: !GetAtt CadenceFunction.Arn
+
+  CadencePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CadenceFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CadenceSchedule.Arn
+
+  # -------------------------------------------------------------------------
+  # The dead man's switch
+  # -------------------------------------------------------------------------
+
+  CadenceSweepStalledAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-cadence-sweep-stalled
+      AlarmDescription: >-
+        The cadence sweep has not reported for three hours. It is the control
+        that notices when scheduled components stop running, so while it is
+        down the platform cannot tell a quiet estate from a stopped one.
+
+        This alarm fires on ABSENCE, not on a value. It is the inverse of every
+        other alarm here and it is the end of the chain: nothing watches this,
+        deliberately, because the regress has to stop somewhere and a
+        CloudWatch alarm is the most reliable link in it.
+
+        CHECK: /aws/lambda/platform-cadence-sweep for an error, then whether
+        the platform-cadence-sweep rule is still ENABLED. A rule disabled to
+        stop an incident and never re-enabled is the likeliest cause.
+      Namespace: Platform/Cadence
+      MetricName: SweepCompleted
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      # The whole point. Every other alarm treats missing data as "nothing to
+      # report"; here, nothing arriving IS the report.
+      TreatMissingData: breaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref AlertsTopicArn
+      OKActions:
+        - !Ref AlertsTopicArn
+
+Outputs:
+
+  FunctionName:
+    Description: The cadence sweep.
+    Value: !Ref CadenceFunction
+
+  StalledAlarmName:
+    Description: Fires when the sweep itself stops reporting.
+    Value: !Ref CadenceSweepStalledAlarm
