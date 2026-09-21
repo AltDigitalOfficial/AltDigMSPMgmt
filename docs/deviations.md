@@ -1013,3 +1013,60 @@ reference SOC 2, because the completeness controls read as engineering hygiene
 without it and as audit requirements with it. The difference matters to whoever
 implements it next — it is the reason the heartbeat is persisted rather than
 merely alerted.
+
+---
+
+## D-017 · Developers see the deployed revision but not environment variable keys
+
+**Accepted.** Prompt 10.1, 2026-09-20.
+
+design 11's production grant includes:
+
+> Running configuration — task definition revision, env var **keys**, parameter
+> **names**
+
+and its denied list includes:
+
+> Environment variable **values**, parameter **values**
+
+Those two cannot both be satisfied through the ECS API. `ecs:DescribeTaskDefinition`
+returns the container definitions whole — keys and values together — and there
+is no separate action, no condition key and no response filter that projects
+the values away. The same is true of `lambda:GetFunctionConfiguration`.
+
+### What was built instead
+
+Both calls are **denied** in the production permission set. The deployed task
+definition revision comes from `ecs:DescribeServices`, which returns the task
+definition ARN — revision included — without the container definitions.
+
+So of design 11's three items:
+
+| | granted |
+|---|---|
+| task definition revision | yes, via DescribeServices |
+| parameter names | yes, `ssm:DescribeParameters` separates cleanly |
+| env var keys | **no** |
+
+### Why not the other way
+
+Granting `DescribeTaskDefinition` and describing the grant as "keys" would put
+environment variable values in front of developers while the documentation said
+it did not. A gap somebody knows about is better than a control that is not
+the control it claims to be — and the claim is the part an auditor tests.
+
+It would also be the more tempting choice, because nothing would visibly break.
+
+### What would close it
+
+A platform-mediated view: a read-only Lambda holding the ECS permission,
+returning key names with values stripped. That is real work and real surface —
+a new component with a credential developers do not have — so it is not built
+speculatively. **B-095** carries it, triggered when a developer actually asks,
+rather than on the assumption that they will.
+
+### Note for design 11
+
+The section is worth a sentence saying which parts of "running configuration"
+are separable through the API and which are not. The three items are listed as
+one grant and only two of them are grantable.

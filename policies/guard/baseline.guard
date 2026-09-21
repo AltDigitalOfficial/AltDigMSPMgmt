@@ -172,8 +172,26 @@ rule LOG_GROUP_RETENTION_SET when %log_groups !empty {
 # IAM
 # ===========================================================================
 
+# Permissions boundaries are excluded, and the exclusion is narrow on purpose.
+#
+# The rule below forbids Action "*" because nothing here legitimately needs
+# every action. That reasoning is about GRANTS. A permissions boundary is a
+# CEILING: effective permissions are the intersection of a role's policies and
+# its boundary, so `Allow *` in a boundary grants nobody anything -- it says
+# "this boundary does not itself narrow the allow side", and the denies below
+# it are the content.
+#
+# Enumerating a boundary's allow instead would create a second permission model
+# alongside the permission sets, maintained by hand and drifting, whose first
+# symptom is a developer's legitimate role failing for no visible reason.
+#
+# Matched on the NAME rather than excepting all ManagedPolicies, because
+# CloudFormation has no property saying "this is a boundary" and a blanket
+# exception would let any managed policy claim it by accident. The name is the
+# same one policies/scp/05-require-boundary.json requires.
 let iam_policies = Resources.*[
   Type in [ 'AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy' ]
+  Properties.ManagedPolicyName not in [ 'PlatformDeveloperBoundary' ]
 ]
 
 rule IAM_NO_WILDCARD_ACTION_AND_RESOURCE when %iam_policies !empty {

@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the permissions boundary every developer-created
+  role must carry (prompt 10.1). Part of the member baseline. design 11's Layer 2.
+
+# ---------------------------------------------------------------------------
+# "The layer most often forgotten"
+# ---------------------------------------------------------------------------
+# design/11-developer-access.md calls it that, and explains why it is not
+# optional:
+#
+#     A developer able to create IAM roles — which in dev they should be — can
+#     otherwise create a role more privileged than themselves and pass it to a
+#     service.
+#
+# That is the whole attack, and it needs no malice. A developer who cannot read
+# a secret writes a Lambda that can, attaches AdministratorAccess to it because
+# that is what the tutorial said, and invokes it. Every individual step is
+# something they are permitted to do. The result is a principal that ignores
+# every restriction on the person who created it.
+#
+# The permission set restricts the HUMAN. The boundary restricts what the human
+# can BUILD. Without it, Layer 3 is a suggestion.
+#
+# ---------------------------------------------------------------------------
+# A boundary is a ceiling, not a grant
+# ---------------------------------------------------------------------------
+# This policy gives nobody anything. A role's effective permissions are the
+# INTERSECTION of its policies and its boundary, so `Allow *` here means "this
+# boundary does not itself narrow anything" — the role still only has what its
+# own policies grant.
+#
+# That is why the allow is broad and the denies are the content. Writing a
+# careful allow-list here would be a second permission model to maintain
+# alongside the permission sets, drifting quietly, and the first symptom would
+# be a developer's legitimate role mysteriously failing.
+#
+# ---------------------------------------------------------------------------
+# It carries the same denies as Layer 1, and that duplication is deliberate
+# ---------------------------------------------------------------------------
+# design 11: "The boundary carries the same denies as Layer 1."
+#
+# An SCP already denies these to every principal in the account, so repeating
+# them looks redundant. It is not: an SCP applies to the ACCOUNT, and if the
+# account is ever moved between OUs, or a policy is detached during an
+# incident, the boundary is what still holds. Two independent statements of the
+# same rule fail independently.
+
+Resources:
+
+  DeveloperBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    # Retain. Roles reference a boundary by ARN, and deleting it while roles
+    # still carry it leaves those roles unusable with an error that names a
+    # policy nobody can find. An orphaned boundary costs nothing.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # A LITERAL, not a parameter, for two reasons.
+      #
+      # policies/scp/05-require-boundary.json names this exact ARN, so a
+      # parameter was false flexibility: changing it would silently break the
+      # SCP's requirement rather than reconfigure it.
+      #
+      # And cfn-guard evaluates statically. With !Ref here it sees
+      # {"Ref": "BoundaryName"}, cannot resolve it, and the rule exempting
+      # boundaries from IAM_NO_WILDCARD_ACTION_AND_RESOURCE never matches --
+      # so the template would fail the guard for being unreadable rather than
+      # pass it for being correct. Same reasoning as the session duration in
+      # identity/00-commercial-readonly.yaml.
+      ManagedPolicyName: PlatformDeveloperBoundary
+      Description: >-
+        Maximum permissions for any role a developer creates. Not a grant —
+        effective permissions are the intersection of this and the role's own
+        policies.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+
+          # The ceiling. See the header: this is what makes the boundary a
+          # boundary rather than a second permission model.
+          - Sid: CeilingNotGrant
+            Effect: Allow
+            Action: '*'
+            Resource: '*'
+
+          # design 11 Layer 1's list, repeated here so it survives the SCP
+          # being detached or the account being re-parented.
+          - Sid: NeverTheDetectiveControls
+            Effect: Deny
+            Action:
+              - 'config:Delete*'
+              - 'config:Stop*'
+              - 'config:Put*'
+              - 'cloudtrail:Stop*'
+              - 'cloudtrail:Delete*'
+              - 'cloudtrail:Update*'
+              - 'cloudtrail:Put*'
+              - 'guardduty:Delete*'
+              - 'guardduty:Disassociate*'
+              - 'guardduty:Update*'
+              - 'securityhub:Delete*'
+              - 'securityhub:Disable*'
+              - 'securityhub:Update*'
+              - 'ec2:DeleteFlowLogs'
+            Resource: '*'
+
+          - Sid: NeverTheDataProtection
+            Effect: Deny
+            Action:
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DisableKey'
+              - 'kms:PutKeyPolicy'
+              - 'kms:DisableKeyRotation'
+              - 'backup:Delete*'
+              - 'backup:Put*'
+              - 'backup:Update*'
+              - 'logs:DeleteLogGroup'
+              - 'logs:DeleteRetentionPolicy'
+              - 'logs:DeleteDataProtectionPolicy'
+              - 'logs:PutDataProtectionPolicy'
+            Resource: '*'
+
+          # A role created by a developer must not be able to touch the
+          # platform's own identities -- including, recursively, this boundary
+          # and the roles that enforce it.
+          - Sid: NeverThePlatformIdentities
+            Effect: Deny
+            Action:
+              - 'iam:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Platform*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/OrganizationAccountAccessRole'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/stacksets-exec-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/PlatformDeveloperBoundary'
+
+          # THE recursion guard, and the reason the boundary is not merely a
+          # copy of the SCP.
+          #
+          # Without this, a role created with the boundary can create ANOTHER
+          # role without one -- or with a boundary it wrote itself -- and the
+          # ceiling is escaped in one hop. The SCP denies unbounded creation
+          # account-wide, so this is the second independent statement of it;
+          # if the SCP is ever detached, this is what still holds.
+          - Sid: BoundedRolesMayOnlyCreateBoundedRoles
+            Effect: Deny
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:PutRolePolicy'
+              - 'iam:AttachRolePolicy'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                'iam:PermissionsBoundary': !Sub
+                  'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/PlatformDeveloperBoundary'
+
+          # Removing your own ceiling is the other one-hop escape.
+          - Sid: NeverRemoveABoundary
+            Effect: Deny
+            Action:
+              - 'iam:DeleteRolePermissionsBoundary'
+              - 'iam:DeleteUserPermissionsBoundary'
+            Resource: '*'
+
+          - Sid: NeverLeaveTheOrganization
+            Effect: Deny
+            Action:
+              - 'organizations:LeaveOrganization'
+            Resource: '*'
+
+Outputs:
+
+  BoundaryArn:
+    Description: >-
+      Pass to developer role creation. The SCP denies iam:CreateRole without it.
+    Value: !Ref DeveloperBoundary
+    Export:
+      Name: !Sub '${AWS::StackName}-DeveloperBoundaryArn'
+
+  BoundaryName:
+    Description: Must match policies/scp/05-require-boundary.json.
+    Value: PlatformDeveloperBoundary

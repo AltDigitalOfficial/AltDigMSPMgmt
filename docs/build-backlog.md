@@ -3506,3 +3506,31 @@ cost, and it is cheaper to ask than to learn again:
 | B-092 | all policies valid | validated zero policies |
 | B-093 | rates not set | credentials expired |
 | B-094 | no tenants | *three different things* |
+
+## B-095 · Environment variable keys need a platform-mediated view
+
+**Deferred with a trigger** — 2026-09-20. See D-017.
+
+design 11 grants developers environment variable KEYS in production and denies
+VALUES. ECS returns both from `DescribeTaskDefinition` and offers no way to
+separate them, so the call is denied and keys are not available.
+
+**What would close it:** a read-only Lambda holding `ecs:DescribeTaskDefinition`,
+returning container definitions with every `environment[].value` and every
+`secrets[].valueFrom` stripped, invokable by the developer permission set.
+
+Small, and not free. It is a new component with a credential developers do not
+have, which makes it a thing to secure, test, and reason about during an
+incident. The failure mode if it is wrong is that it returns the values it
+exists to hide.
+
+**Trigger:** a developer asks for it, or an incident review names missing env
+var keys as a contributing factor. Not on the assumption that they will —
+design 11's own argument for the wider production grant is about the failure
+modes it names specifically (OOM kills, evicted tasks, non-zero exits), and env
+var keys are not among them.
+
+Worth noting the asymmetry that makes this deferrable: `ssm:DescribeParameters`
+and `secretsmanager:ListSecrets` DO separate names from values cleanly, so
+parameter names and secret names are already granted. ECS is the only one of
+the three that needs mediating.

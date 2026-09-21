@@ -1,0 +1,416 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — developer permission sets (prompt 10.1).
+  design 11's Layer 3, three grants across the environment gradient. Deployed to
+  the Identity Center delegated administrator.
+
+# ---------------------------------------------------------------------------
+# Three sets in one template, because the GRADIENT is the thing being reviewed
+# ---------------------------------------------------------------------------
+# design/11-developer-access.md's table is the specification:
+#
+#              dev            test           uat        prod
+#   console    full           read + ops     read       read + observe
+#   create     yes            pipeline       pipeline   pipeline
+#   IAM roles  yes, bounded   no             no         no
+#
+# Split across three files, a reviewer checks each against the table. Together,
+# they check each against EACH OTHER, which is where the mistakes are — a grant
+# that appears in prod and not in dev is almost always wrong, and is invisible
+# when the two are in different files.
+#
+# UAT uses the prod set. design 11: "UAT is treated as production for access
+# purposes, because it holds real data."
+#
+# ---------------------------------------------------------------------------
+# The production grant is deliberately WIDER than logs
+# ---------------------------------------------------------------------------
+# design 11 argues against its own first instinct at length, and the argument
+# is worth keeping next to the policy:
+#
+#     It fails where it matters most. The failure modes where an application
+#     CANNOT log: OOM kill (process is gone), task evicted by the scheduler,
+#     health check failing before startup completed, container exiting on a
+#     non-zero code. The ECS stopped reason and exit code are the entire story,
+#     and no amount of better logging produces them.
+#
+#     The compliance argument runs the opposite way. Logs are the MOST
+#     sensitive artifact — they are where PHI and cardholder data actually
+#     leak. Granting logs while withholding metrics and stopped reasons grants
+#     the risky thing and withholds the safe things.
+#
+# So: everything about infrastructure STATE, nothing about data.
+#
+# ---------------------------------------------------------------------------
+# One requirement AWS will not express, stated rather than fudged
+# ---------------------------------------------------------------------------
+# design 11 grants "env var KEYS" and denies "env var VALUES". ECS returns both
+# from the same call — `ecs:DescribeTaskDefinition` has no way to project away
+# the values, and there is no separate action for the keys.
+#
+# So the prod set DENIES DescribeTaskDefinition and gets the deployed revision
+# from `ecs:DescribeServices` instead, which returns the task definition ARN
+# (revision included) without the container definitions. That satisfies
+# "what is actually deployed" and loses the env var keys.
+#
+# Deliberate, and recorded as D-017. The alternative — granting the call and
+# describing it as keys-only — would put secret values in front of developers
+# while the documentation said otherwise, which is worse than a gap somebody
+# knows about. B-095 carries the platform-mediated view that would close it.
+#
+# SSM and Secrets Manager have the same shape and DO separate cleanly:
+# DescribeParameters and ListSecrets return names, GetParameter and
+# GetSecretValue return values. Those are granted and denied respectively.
+
+Parameters:
+
+  InstanceArn:
+    Type: String
+    Description: IAM Identity Center instance ARN.
+
+  SsmPrefix:
+    Type: String
+    Default: /platform
+    Description: Where the permission set ARNs are published for other stacks.
+
+Resources:
+
+  # =========================================================================
+  # dev — full within guardrails
+  # =========================================================================
+  # design 11: "Dev is expected to be chaotic. That is acceptable because it is
+  # isolated by the account boundary and holds no regulated data."
+  #
+  # PowerUserAccess rather than a hand-written grant: the guardrails are the
+  # SCPs and the permissions boundary, not this policy. Trying to also express
+  # them here would be a third copy of the same rules, drifting.
+
+  DeveloperDevPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: DeveloperDev
+      Description: >-
+        Full access within the guardrails, for dev accounts only. IAM role
+        creation permitted and boundary-enforced by SCP 05.
+      InstanceArn: !Ref InstanceArn
+      # Four hours, which is the ceiling SSO_PERMISSION_SET_SESSION_DURATION_BOUNDED
+      # allows. The first draft said eight and argued that a developer works in
+      # this account all day -- true, and the guard's reasoning is better: the
+      # session is how long a revoked or compromised federation keeps working.
+      # Widening a guardrail to fit a convenience is the wrong direction, so the
+      # developer re-authenticates at lunchtime instead.
+      SessionDuration: PT4H
+      ManagedPolicies:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          # PowerUserAccess excludes IAM entirely. design 11 wants role
+          # creation in dev -- "which in dev they should be" -- so it is added
+          # back, and SCP 05 is what makes it safe by requiring the boundary.
+          - Sid: CreateRolesWithinTheBoundary
+            Effect: Allow
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:DeleteRole'
+              - 'iam:PutRolePolicy'
+              - 'iam:DeleteRolePolicy'
+              - 'iam:AttachRolePolicy'
+              - 'iam:DetachRolePolicy'
+              - 'iam:PassRole'
+              - 'iam:TagRole'
+              - 'iam:Get*'
+              - 'iam:List*'
+            Resource: '*'
+          # design 11: "Developers can see their Config rules, alarms,
+          # findings, flow logs [...] This is a design choice, not an
+          # oversight." The prompt says explicitly not to remove it.
+          - Sid: SeeTheControlsOperatingOnThem
+            Effect: Allow
+            Action:
+              - 'config:Describe*'
+              - 'config:Get*'
+              - 'config:List*'
+              - 'config:Select*'
+              - 'securityhub:Get*'
+              - 'securityhub:List*'
+              - 'securityhub:Describe*'
+              - 'guardduty:Get*'
+              - 'guardduty:List*'
+              - 'access-analyzer:Get*'
+              - 'access-analyzer:List*'
+            Resource: '*'
+
+  # =========================================================================
+  # test — read-only plus the operations a pipeline cannot do for you
+  # =========================================================================
+
+  DeveloperTestPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: DeveloperTest
+      Description: >-
+        Read-only plus limited operations. Changes arrive through AppDeployer,
+        not through this. No IAM role creation.
+      InstanceArn: !Ref InstanceArn
+      SessionDuration: PT4H
+      ManagedPolicies:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          # "Limited ops" from design 11's gradient. Restarting a service and
+          # re-running a task are the two things a developer needs during a
+          # test cycle that no pipeline does on demand -- and neither changes
+          # what is DEPLOYED, only whether it is currently running.
+          - Sid: RestartButNotRedeploy
+            Effect: Allow
+            Action:
+              - 'ecs:UpdateService'
+              - 'ecs:StopTask'
+              - 'ecs:RunTask'
+              - 'lambda:InvokeFunction'
+            Resource: '*'
+          # ReadOnlyAccess includes s3:GetObject and
+          # secretsmanager:GetSecretValue. Test accounts should not hold real
+          # data, and "should not" is not a control.
+          - Sid: NoDataPlaneEvenInTest
+            Effect: Deny
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 'secretsmanager:GetSecretValue'
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'dynamodb:GetItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+              - 'dynamodb:BatchGetItem'
+              - 'rds-data:*'
+            Resource: '*'
+
+  # =========================================================================
+  # prod (and uat) — read and observe
+  # =========================================================================
+  # Enumerated rather than ReadOnlyAccess-minus-denies. ReadOnlyAccess grows
+  # when AWS adds services, so a subtractive prod policy silently widens every
+  # time Amazon ships something -- and the first anybody would know is an
+  # auditor asking why developers can read a service nobody reviewed.
+
+  DeveloperProdPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: DeveloperProd
+      Description: >-
+        Read and observe. Everything about infrastructure state, nothing about
+        data. Also used for UAT, which design 11 treats as production because
+        it holds real data.
+      InstanceArn: !Ref InstanceArn
+      # Two hours. Shorter than dev and test: this set sees production, and a
+      # forgotten browser tab is the realistic exposure rather than a stolen
+      # credential.
+      SessionDuration: PT2H
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+
+          - Sid: LogsTheirApplication
+            Effect: Allow
+            Action:
+              - 'logs:Describe*'
+              - 'logs:Get*'
+              - 'logs:FilterLogEvents'
+              - 'logs:StartQuery'
+              - 'logs:StopQuery'
+              - 'logs:TestMetricFilter'
+            Resource: '*'
+
+          # design 11: "all, not a health roll-up. Latency distribution and
+          # saturation cannot be reconstructed from logs."
+          - Sid: AllMetricsNotARollUp
+            Effect: Allow
+            Action:
+              - 'cloudwatch:GetMetric*'
+              - 'cloudwatch:ListMetrics'
+              - 'cloudwatch:DescribeAlarms*'
+              - 'cloudwatch:DescribeAnomalyDetectors'
+              - 'cloudwatch:GetInsightRuleReport'
+            Resource: '*'
+
+          # The failure modes where the application cannot log. Note what is
+          # ABSENT: DescribeTaskDefinition. See the header and D-017 -- the
+          # deployed revision comes from DescribeServices, which does not
+          # carry environment variable values.
+          - Sid: WhyItStopped
+            Effect: Allow
+            Action:
+              - 'ecs:DescribeServices'
+              - 'ecs:DescribeTasks'
+              - 'ecs:DescribeClusters'
+              - 'ecs:DescribeContainerInstances'
+              - 'ecs:ListTasks'
+              - 'ecs:ListServices'
+              - 'ecs:ListTaskDefinitions'
+            Resource: '*'
+
+          # Parameter NAMES and secret NAMES, never values. These APIs do
+          # separate cleanly, unlike ECS.
+          - Sid: NamesNotValues
+            Effect: Allow
+            Action:
+              - 'ssm:DescribeParameters'
+              - 'secretsmanager:ListSecrets'
+              - 'secretsmanager:DescribeSecret'
+            Resource: '*'
+
+          - Sid: WhatWasDeployedAndWhen
+            Effect: Allow
+            Action:
+              - 'cloudformation:Describe*'
+              - 'cloudformation:List*'
+              - 'cloudformation:Get*'
+              - 'codedeploy:Get*'
+              - 'codedeploy:List*'
+              - 'codepipeline:Get*'
+              - 'codepipeline:List*'
+              # NOT GetFunctionConfiguration: it returns the function's
+              # environment variables, the same collision as ECS
+              # DescribeTaskDefinition. Versions and aliases answer
+              # 'what is deployed' without the configuration. D-017.
+              - 'lambda:ListVersionsByFunction'
+              - 'lambda:ListAliases'
+              - 'lambda:ListFunctions'
+            Resource: '*'
+
+          - Sid: Traces
+            Effect: Allow
+            Action:
+              - 'xray:BatchGet*'
+              - 'xray:Get*'
+              - 'xray:List*'
+              - 'application-signals:Get*'
+              - 'application-signals:List*'
+              - 'application-signals:BatchGet*'
+            Resource: '*'
+
+          # design 11: "They should see what wakes us up on their behalf."
+          - Sid: SeeTheControlsOperatingOnThem
+            Effect: Allow
+            Action:
+              - 'config:Describe*'
+              - 'config:Get*'
+              - 'config:List*'
+              - 'config:Select*'
+              - 'securityhub:Get*'
+              - 'securityhub:List*'
+              - 'securityhub:Describe*'
+              - 'guardduty:Get*'
+              - 'guardduty:List*'
+              - 'ec2:DescribeFlowLogs'
+              - 'ec2:DescribeInstances'
+              - 'ec2:DescribeSecurityGroups'
+              - 'ec2:DescribeNetworkInterfaces'
+            Resource: '*'
+
+          # "The restriction on DOING stays absolute. Only the restriction on
+          # SEEING relaxes." A deny rather than simply not granting: the set
+          # above is enumerated and could acquire a write action through a
+          # careless wildcard, and this catches that.
+          - Sid: NeverWriteAnything
+            Effect: Deny
+            NotAction:
+              - 'logs:Describe*'
+              - 'logs:Get*'
+              - 'logs:FilterLogEvents'
+              - 'logs:StartQuery'
+              - 'logs:StopQuery'
+              - 'logs:TestMetricFilter'
+              - 'cloudwatch:Get*'
+              - 'cloudwatch:List*'
+              - 'cloudwatch:Describe*'
+              - 'ecs:Describe*'
+              - 'ecs:List*'
+              - 'ssm:DescribeParameters'
+              - 'secretsmanager:ListSecrets'
+              - 'secretsmanager:DescribeSecret'
+              - 'cloudformation:Describe*'
+              - 'cloudformation:List*'
+              - 'cloudformation:Get*'
+              - 'codedeploy:Get*'
+              - 'codedeploy:List*'
+              - 'codepipeline:Get*'
+              - 'codepipeline:List*'
+              - 'lambda:Get*'
+              - 'lambda:List*'
+              - 'xray:*Get*'
+              - 'xray:List*'
+              - 'application-signals:*'
+              - 'config:*'
+              - 'securityhub:Get*'
+              - 'securityhub:List*'
+              - 'securityhub:Describe*'
+              - 'guardduty:Get*'
+              - 'guardduty:List*'
+              - 'ec2:Describe*'
+              - 'sts:GetCallerIdentity'
+            Resource: '*'
+
+          # The data plane, denied explicitly as well as not granted. design
+          # 11 holds this one firm: "no reading S3 objects, no querying the
+          # database, no retrieving Secrets Manager values".
+          - Sid: NeverTheDataPlane
+            Effect: Deny
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 'secretsmanager:GetSecretValue'
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'dynamodb:GetItem'
+              - 'dynamodb:BatchGetItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+              - 'rds-data:*'
+              - 'ecs:DescribeTaskDefinition'
+              - 'lambda:GetFunctionConfiguration'
+            Resource: '*'
+
+  # Published so provisioning (phase 12) can assign these without being told
+  # the ARNs. identity/00-commercial-readonly.yaml does the same.
+  DevArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/developer-dev'
+      Type: String
+      Value: !GetAtt DeveloperDevPermissionSet.PermissionSetArn
+
+  TestArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/developer-test'
+      Type: String
+      Value: !GetAtt DeveloperTestPermissionSet.PermissionSetArn
+
+  ProdArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/developer-prod'
+      Type: String
+      Value: !GetAtt DeveloperProdPermissionSet.PermissionSetArn
+
+Outputs:
+
+  DeveloperDevArn:
+    Description: dev grant. Full within guardrails.
+    Value: !GetAtt DeveloperDevPermissionSet.PermissionSetArn
+
+  DeveloperTestArn:
+    Description: test grant. Read-only plus restart.
+    Value: !GetAtt DeveloperTestPermissionSet.PermissionSetArn
+
+  DeveloperProdArn:
+    Description: prod and uat grant. Read and observe.
+    Value: !GetAtt DeveloperProdPermissionSet.PermissionSetArn

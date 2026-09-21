@@ -34,3 +34,9 @@
 # developer working. Widening it to members is a conversation, not a
 # deployment.
 04-require-tags.json	sandbox
+
+# 05 is sandbox-only for the same reason as 04: it denies an action
+# developers legitimately take. Widening it to members needs every
+# tenant pipeline that creates a role to be passing the boundary first,
+# which is a conversation and a migration rather than a deployment.
+05-require-boundary.json	sandbox

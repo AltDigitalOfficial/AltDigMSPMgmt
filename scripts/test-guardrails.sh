@@ -359,6 +359,31 @@ else
   emit AMBIG "ec2:CreateTags on a platform tag" "04/ProtectPlatformManagedTags"     "no real volume to test against — a synthetic id fails validation before authorization, which tests nothing"
 fi
 
+# --- 05: permissions boundary (prompt 10.1, design 11's Layer 2) ----------
+#
+# Also ahead of the containment-triggering checks. B-091.
+#
+# design 11 calls this "the layer most often forgotten", and the reason is that
+# forgetting it breaks nothing visibly: developers create roles, the roles
+# work, and the only difference is that one of them can be more privileged than
+# the developer who made it.
+BOUNDARY_ARN="arn:aws:iam::${TARGET_ACCOUNT}:policy/PlatformDeveloperBoundary"
+TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+BOUNDED_ROLE="guardrail-bounded-$$"
+
+check 05 NoBoundaryNoRole "iam:CreateRole without a boundary" yes --   aws iam create-role --role-name "guardrail-unbounded-$$"   --assume-role-policy-document "${TRUST}"
+
+# THE control. An SCP that denied ALL role creation would pass the check above
+# and stop every developer in the estate, and nothing else here would notice.
+if as_test aws iam create-role --role-name "${BOUNDED_ROLE}"      --assume-role-policy-document "${TRUST}"      --permissions-boundary "${BOUNDARY_ARN}" >/dev/null 2>&1; then
+  emit PASS "iam:CreateRole WITH the boundary" "control"     "permitted — the policy requires a boundary, it does not forbid roles"
+  as_test aws iam delete-role --role-name "${BOUNDED_ROLE}" >/dev/null 2>&1 ||     warn "Could not delete harness role ${BOUNDED_ROLE} — remove it by hand."
+else
+  emit FAIL "iam:CreateRole WITH the boundary" "control"     "a correctly bounded role was REFUSED. Either the boundary policy is not deployed to this account, or SCP 05 names a different ARN than baseline/80-developer-boundary.yaml creates — the two must agree exactly"
+fi
+
+check 05 NeverEditTheBoundaryItself "iam:CreatePolicyVersion on the boundary" yes --   aws iam create-policy-version --policy-arn "${BOUNDARY_ARN}"   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'   --set-as-default
+
 check 01 ProtectCloudTrail "cloudtrail:StopLogging" yes -- \
   aws cloudtrail stop-logging --name "${NOPE}"
 
