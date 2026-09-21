@@ -4068,13 +4068,41 @@ partners, all of whom are entitled to see every tenant. The isolation that
 matters right now is operational — finding one tenant's work among another's —
 and a label does that adequately.
 
-**Trigger, not a date:** the first time a person who is not an AltDigital
-partner is given access to the ops project. At that moment the label stops
-being a filing convention and becomes a claimed boundary that does not exist.
-That requires a project per tenant, which requires a credential holding site
-ADMINISTER — and granting that credential also grants workflow, screen and
-field reconfiguration, which prompt 12.3 forbids automating. So the resolution
-is a permission question to be answered deliberately, not a code change.
+### Corrected 2026-09-21: this entry conflated two populations
+
+The original trigger read "the first time a person who is not an AltDigital
+partner is given access to the ops project." That is too broad, and it treats
+customers and agents as the same event when Jira does not.
+
+| | how they reach Jira | what they see | isolated by |
+|---|---|---|---|
+| **Customer** (portal, unlicensed) | portal only, never browses | own requests, plus what is shared with their organization | **JSM Organization** |
+| **Agent** (licensed) | browses the project | everything in the project | issue security level, or a separate project |
+
+**Labels can never do this.** A label carries no ACL in Jira and there is no
+mechanism to attach one. That is not a gap in this implementation — labels are
+metadata with no security semantics at all, so "restrict by label" is not a
+thing that can be built.
+
+**What was found to work.** The platform credential CAN create JSM
+organizations and attach them to the service desk — verified live, no admin
+permission needed. An organization is *data*, not configuration, which is
+exactly why it escapes the prompt 12.3 problem: creating one per tenant adds
+no per-tenant workflow, screen, field or scheme. (It cannot *delete* them —
+403 — which is a containment property rather than a limitation.)
+
+**What was found not to work, and why it is a trap.** AMI does have an issue
+security scheme attached, with two levels (`Sensitive Cases`, `Service Desk
+Team`), and the credential holds `SET_ISSUE_SECURITY`. So per-issue visibility
+is technically reachable. But a *per-tenant* level has to be created by an
+admin inside the scheme, per tenant — which is per-tenant configuration drift,
+the precise thing prompt 12.3 forbids automating. It does not avoid the trap,
+it relocates it from workflows to security schemes.
+
+**Revised trigger:** a person from a client who needs to work tickets as a
+licensed **agent** in the ops project. Customers do not trigger this — they
+never browse, and organizations bound them properly. Only the agent case forces
+a project per tenant, and with it a credential holding site ADMINISTER.
 
 ## B-110 · Provisioning has no deployment, and its two dependencies live in different accounts
 
@@ -4096,14 +4124,32 @@ platform/jira/service-account: ResourceNotFoundException`, which is the correct
 behaviour — it wrote nothing and said why — but it means the saga cannot
 execute end to end from either account as things stand.
 
-**This is a placement decision, not a bug.** The options are to put the Jira
-credential in tooling alongside the registry (`set-jira-token.sh --account`
-already takes the argument), to give a provisioning function in tooling a
-cross-account read of the audit secret, or to move the registry. The first is
-simplest and broadens the credential's blast radius to a second account; that
-trade is a security decision and belongs to Art, not to this build.
+**This is a placement decision, not a bug.** Three options, and one of them
+turned out to be unavailable:
 
-Deliberately **not** resolved by copying the credential unilaterally.
+1. **Copy the credential into tooling.** `set-jira-token.sh --account` already
+   takes the argument. Broadens the blast radius to a second account, and
+   creates two copies to rotate — a rotation that updates one and not the
+   other gives exactly the stale-but-passing failure this codebase keeps
+   finding.
+2. ~~**Cross-account read** of the audit secret from a tooling role.~~
+   **Not possible as things stand.** `describe-secret` returns
+   `KmsKeyId: None`, meaning the secret is encrypted under the AWS-managed
+   `aws/secretsmanager` key, and AWS-managed keys cannot be shared across
+   accounts. This option requires re-creating the secret under a
+   customer-managed key first.
+3. **Move the registry** to audit. Largest change, and it puts the platform's
+   spine in the account whose job is evidence.
 
-**Trigger:** before the first real tenant is provisioned — which the user has
-signalled is close.
+**Recommendation: option 1, with the rotation objection engineered out** —
+change `set-jira-token.sh` to write to every consuming account in a single run
+rather than one per invocation. That makes a half-completed rotation
+impossible, which is the only real argument against copying. Tooling already
+holds `platform-registry`; it is not a meaningful escalation for it to also
+hold a Jira token.
+
+Still Art's to ratify as a security decision. Deliberately **not** resolved by
+copying the credential unilaterally.
+
+**Trigger: now.** The user states a client tenant will be created the moment
+the build is done.
