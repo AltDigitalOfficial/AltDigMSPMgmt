@@ -688,9 +688,23 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # BOTH stages. The state machine invokes ContainArn and
+              # ReadoutArn; granting only the first meant every containment
+              # contained correctly and then failed at the readout with a 403,
+              # failing the execution and firing
+              # platform-containment-execution-failed -- which publishes
+              # straight to SNS and pages.
+              #
+              # Silent from Phase 7 until B-087 started forwarding
+              # protected-action attempts, because nothing was triggering
+              # containment before that. The DefinitionSubstitutions listed
+              # both ARNs and the IAM policy listed one, and nothing compares
+              # the two. B-096.
               - Effect: Allow
                 Action: 'lambda:InvokeFunction'
-                Resource: !GetAtt ContainmentFunction.Arn
+                Resource:
+                  - !GetAtt ContainmentFunction.Arn
+                  - !GetAtt ReadoutFunction.Arn
               - Effect: Allow
                 Action:
                   - 'logs:CreateLogDelivery'

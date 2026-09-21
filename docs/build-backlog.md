@@ -3534,3 +3534,56 @@ Worth noting the asymmetry that makes this deferrable: `ssm:DescribeParameters`
 and `secretsmanager:ListSecrets` DO separate names from values cleanly, so
 parameter names and secret names are already granted. ECS is the only one of
 the three that needs mediating.
+
+## B-096 · Every containment failed at the readout, and paged
+
+**Fixed** — 2026-09-20, found by Jamie asking why each batch pages him.
+
+`containment/10-containment.yaml` gives the state machine role:
+
+```yaml
+Action: 'lambda:InvokeFunction'
+Resource: !GetAtt ContainmentFunction.Arn
+```
+
+The state machine invokes two functions. `DefinitionSubstitutions` lists both
+`ContainArn` and `ReadoutArn`; the IAM policy lists one. So every containment
+contained correctly, recorded its stages, and then died:
+
+    User: .../PlatformContainmentStateMachine/... is not authorized to perform:
+    lambda:InvokeFunction on resource: .../platform-incident-readout
+
+The execution fails, `platform-containment-execution-failed` crosses its
+threshold, and that alarm publishes **straight to the platform-alerts SNS
+topic**, which has a PagerDuty subscription. It never goes near the router —
+which is why the router's own logs showed zero PagerDuty routings while Jamie's
+phone said otherwise.
+
+**Present since Phase 7 and silent until 2026-09-20.** Nothing was triggering
+containment. B-087 started forwarding protected-action attempts to the
+organization bus, the guardrail harness attempts exactly those actions to prove
+the SCPs deny them (B-091), and containment suddenly had work to do. Two
+correct changes exposed a third thing that had been broken all along.
+
+**What it cost beyond the paging.** Every incident record since Phase 7 has its
+containment stages and no readout, so design 07's cross-account indicator
+question is UNANSWERED on all of them. The failure message said so each time,
+into an execution history nobody was reading.
+
+**The class of bug.** A state machine's `DefinitionSubstitutions` and its role's
+IAM policy are two lists of the same functions, in the same file, forty lines
+apart, and nothing compares them. The quorum state machine happens to have both
+entries — by attention, not by construction.
+
+A publish-time guard could check that every ARN a state machine substitutes
+appears in its role's invoke policy. Worth doing when a third state machine
+exists; two is not yet a pattern, and B-060's lesson was about deriving the list
+rather than maintaining a second copy, which is the same shape.
+
+**Two paging paths, and only one goes through the router.** Worth stating
+plainly because it is not obvious from the code: alarms wired directly to the
+alerts topic bypass `alerting/src/router.py` entirely, so none of the tier
+logic, the downgrade-only rule or B-073's account-tier check applies to them.
+That is correct for platform-health alarms — the platform's own failures are
+not a tenant's and have no tier — but it means "the router never pages for dev"
+is not the same statement as "nothing pages for dev".
