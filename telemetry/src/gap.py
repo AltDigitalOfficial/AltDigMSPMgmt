@@ -269,37 +269,94 @@ def gather(ec2, ssm_client, cw, logs_client, instance, region):
     except Exception:                              # noqa: BLE001
         s.unreadable.append("sentinel_metric")
 
+    # The second half of the telemetry signal. design 11: "Log stream
+    # staleness check on lastIngestionTime per expected stream. CloudWatch
+    # Logs does not alarm on absence natively, so this is a scheduled check."
+    #
+    # OR, not AND. Either channel still flowing means the agent is alive, and
+    # requiring both would report a kill whenever somebody trimmed the log
+    # config. The two together answer "is the agent running"; telling apart
+    # which half stopped is a different question and not this alarm's.
+    if s.telemetry is False:
+        try:
+            if _recent_log_ingestion(logs_client, s.instance_id, since):
+                s.telemetry = True
+        except LookupError:
+            # No stream for this instance. Common and not an error: an
+            # instance can legitimately ship metrics and no logs. The sentinel
+            # metric has already answered.
+            pass
+        except Exception:                          # noqa: BLE001
+            s.unreadable.append("log_ingestion")
+
     # Flow logs: traffic is what makes "alive" mean more than "the hypervisor
     # says so". The question is whether packets moved, not whether logging is
     # configured.
     try:
-        s.traffic = _recent_traffic(logs_client, s.instance_id, since)
+        s.traffic = _recent_traffic(cw, s.instance_id, since)
     except Exception:                              # noqa: BLE001
         s.unreadable.append("flow_logs")
 
     return s
 
 
-def _recent_traffic(logs_client, instance_id, since):
-    """Has this instance's ENI logged traffic since `since`?
+def _recent_log_ingestion(logs_client, instance_id, since):
+    """Has any log stream for this instance ingested since `since`?
 
-    Uses the log stream's lastIngestionTime rather than querying records.
-    design 11 asks for a staleness check on lastIngestionTime anyway, and a
-    Logs Insights query per instance per run would be slow and expensive for a
-    question this coarse: "did anything arrive" does not need the contents.
+    lastIngestionTime rather than reading records: the question is whether
+    anything arrived, which does not need the contents, and a Logs Insights
+    query per instance per run would be slow and costly for a boolean.
     """
-    group = os.environ.get("FLOW_LOG_GROUP", "/platform/vpc/flowlogs")
+    group = os.environ.get("APP_LOG_GROUP_PREFIX", "/platform/")
     cutoff = int(since.timestamp() * 1000)
-    streams = logs_client.describe_log_streams(
-        logGroupName=group, orderBy="LastEventTime", descending=True,
-        limit=50).get("logStreams") or []
-    for stream in streams:
-        if instance_id in stream.get("logStreamName", ""):
-            return (stream.get("lastIngestionTime") or 0) >= cutoff
-    # No stream for this instance at all. That is not "no traffic" -- it is no
-    # evidence either way, and the caller must not read a missing stream as
-    # silence.
-    raise LookupError("no flow log stream found for " + instance_id)
+    found = False
+    paginator = logs_client.get_paginator("describe_log_groups")
+    for page in paginator.paginate(logGroupNamePrefix=group):
+        for lg in page.get("logGroups") or []:
+            streams = logs_client.describe_log_streams(
+                logGroupName=lg["logGroupName"],
+                logStreamNamePrefix=instance_id, limit=5).get("logStreams") or []
+            for st in streams:
+                found = True
+                if (st.get("lastIngestionTime") or 0) >= cutoff:
+                    return True
+    if not found:
+        raise LookupError(f"no log stream for {instance_id}")
+    return False
+
+
+def _recent_traffic(cw, instance_id, since):
+    """Has this instance moved packets since `since`?
+
+    NetworkPacketsIn from AWS/EC2, NOT VPC flow logs -- and the substitution is
+    deliberate rather than convenient.
+
+    design 11 names flow logs, and the property its table actually relies on is
+    the one in the signal-dependency table above it: flow logs do not require
+    the agent. `NetworkPacketsIn` is published by the hypervisor and shares that
+    property exactly, while being one CloudWatch call instead of an Athena
+    query.
+
+    Flow logs on this platform land in S3 (baseline/40-network.yaml,
+    LogDestinationType: s3), so there is no log group to read staleness from.
+    The first version of this function looked for one, found nothing, and
+    marked the signal unreadable for every instance -- which would have meant
+    no instance ever matched a row and the detector silently never fired.
+    Exactly the failure it exists to catch, in itself. B-100.
+
+    Flow logs remain the authoritative record and are what answers the port 22
+    question, which needs Athena over S3 and is tracked separately.
+    """
+    points = cw.get_metric_statistics(
+        Namespace="AWS/EC2", MetricName="NetworkPacketsIn",
+        Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+        StartTime=since, EndTime=_now(), Period=300, Statistics=["Sum"])
+    datapoints = points.get("Datapoints") or []
+    if not datapoints:
+        # No datapoints at all is not "no traffic" -- it is no evidence. The
+        # caller records it as unreadable rather than as silence.
+        raise LookupError(f"no NetworkPacketsIn datapoints for {instance_id}")
+    return any(d.get("Sum", 0) > 0 for d in datapoints)
 
 
 # ---------------------------------------------------------------------------
@@ -387,3 +444,240 @@ def survived_association(ssm_client, instance_id, since):
             # absent, so a reinstall did not fix it.
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Attribution
+# ---------------------------------------------------------------------------
+
+
+def attribute(ct, instance_id, since):
+    """Who started a session on this instance before the telemetry stopped?
+
+    design 11: "Session Manager sessions are CloudTrail events. StartSession
+    carries principal, instance and timestamp -- so a correlation rule
+    (session started, telemetry ceased within N minutes, instance still alive)
+    gives an attributed finding."
+
+    And the other half of that paragraph, which is why this returns None so
+    often and should: SSH is NOT a CloudTrail event. OS auth logs ship via the
+    agent, so if the agent died the login evidence died with it. An
+    unattributed finding here is therefore not a failure of this function --
+    it may be the most interesting thing about the finding.
+    """
+    try:
+        events = ct.lookup_events(
+            LookupAttributes=[{"AttributeKey": "EventName",
+                               "AttributeValue": "StartSession"}],
+            StartTime=since, MaxResults=50).get("Events") or []
+    except Exception:                              # noqa: BLE001
+        return None, "CloudTrail could not be read; attribution unavailable"
+
+    for e in events:
+        try:
+            detail = json.loads(e.get("CloudTrailEvent") or "{}")
+        except ValueError:
+            continue
+        target = ((detail.get("requestParameters") or {}).get("target") or "")
+        if instance_id not in target:
+            continue
+        identity = detail.get("userIdentity") or {}
+        return {
+            # accountId and ARN, never a name or an address. Same rule as the
+            # quorum evidence: this record is retained and read later.
+            "principal_arn": identity.get("arn"),
+            "session_started": detail.get("eventTime"),
+            "event_id": detail.get("eventID"),
+        }, None
+
+    return None, (
+        "no Session Manager session on this instance in the window. That is "
+        "not an absence of cause: SSH is not a CloudTrail event, and if the "
+        "agent died the OS auth log died with it. Flow logs show a session; "
+        "they do not show an identity.")
+
+
+# ---------------------------------------------------------------------------
+# The scan
+# ---------------------------------------------------------------------------
+
+
+def _tier(account_id):
+    """dev / test / uat / prod. Unknown returns prod, which pages.
+
+    Same direction as the router's: treating an unknown account as dev would
+    silence a real production finding, and treating it as prod produces a page
+    that says the tier was unknown. B-073.
+    """
+    try:
+        raw = ssm.get_parameter(Name=ACCOUNT_TIER_PARAM)["Parameter"]["Value"]
+        return (json.loads(raw) or {}).get(str(account_id), "prod")
+    except Exception:                              # noqa: BLE001
+        return "prod"
+
+
+def _emit(finding):
+    events_client.put_events(Entries=[{
+        "EventBusName": ALERT_BUS_NAME,
+        "Source": "platform.telemetry",
+        "DetailType": "telemetry-gap",
+        "Detail": json.dumps(finding, default=str),
+    }])
+
+
+def _accounts():
+    """Accounts to scan, from the tier map. B-086: raise rather than return
+    empty, because a scan over zero accounts reports a clean estate."""
+    raw = ssm.get_parameter(Name=ACCOUNT_TIER_PARAM)["Parameter"]["Value"]
+    mapping = json.loads(raw) or {}
+    out = [a for a in mapping if str(a).isdigit()]
+    if not out:
+        raise RuntimeError(
+            f"{ACCOUNT_TIER_PARAM} lists no accounts. Nothing was scanned, "
+            "which is not the same as nothing being wrong.")
+    return out
+
+
+def _clients(account_id, region):
+    creds = sts.assume_role(
+        RoleArn=f"arn:aws:iam::{account_id}:role/{MEMBER_ROLE}",
+        RoleSessionName="telemetry-gap-scan")["Credentials"]
+    kw = {"region_name": region,
+          "aws_access_key_id": creds["AccessKeyId"],
+          "aws_secret_access_key": creds["SecretAccessKey"],
+          "aws_session_token": creds["SessionToken"]}
+    return (boto3.client("ec2", **kw), boto3.client("ssm", **kw),
+            boto3.client("cloudwatch", **kw), boto3.client("logs", **kw),
+            boto3.client("cloudtrail", **kw))
+
+
+def scan(event=None, context=None):
+    """One pass over every instance that should be publishing telemetry.
+
+    The expectation registry is `platform-managed=true` -- the same tag the
+    CloudWatch agent association targets. Derived rather than maintained
+    separately: an instance the association installs onto is exactly an
+    instance that should be publishing, and two lists of that would drift.
+    """
+    region = os.environ.get("AWS_REGION", "us-east-2")
+    since = _now() - datetime.timedelta(minutes=GRACE_MINUTES)
+
+    try:
+        accounts = _accounts()
+    except Exception as exc:                       # noqa: BLE001
+        out = {"record_type": "telemetry-gap-scan", "scanned": False,
+               "reason": str(exc)}
+        print(json.dumps(out, default=str))
+        return out
+
+    findings, examined, suppressed_count, unreadable = [], 0, 0, []
+
+    for account_id in sorted(accounts):
+        try:
+            ec2, ssm_c, cw, logs_c, ct = _clients(account_id, region)
+        except Exception as exc:                   # noqa: BLE001
+            unreadable.append({"account_id": account_id,
+                               "problem": f"{type(exc).__name__}"})
+            continue
+
+        try:
+            reservations = ec2.describe_instances(Filters=[
+                {"Name": "tag:platform-managed", "Values": ["true"]},
+            ]).get("Reservations") or []
+        except Exception as exc:                   # noqa: BLE001
+            unreadable.append({"account_id": account_id,
+                               "problem": f"{type(exc).__name__}"})
+            continue
+
+        for r in reservations:
+            for inst in r.get("Instances") or []:
+                inst["_account"] = account_id
+                examined += 1
+
+                reason = suppressed(inst, ssm_c)
+                if reason:
+                    suppressed_count += 1
+                    continue
+
+                sig = gather(ec2, ssm_c, cw, logs_c, inst, region)
+                scenario, note = classify(sig)
+                if not scenario or not scenario.get("alarm"):
+                    continue
+
+                who, why_not = attribute(ct, sig.instance_id, since)
+                persisted = survived_association(ssm_c, sig.instance_id, since)
+                tier = _tier(account_id)
+
+                finding = {
+                    "scenario": scenario["name"],
+                    "note": note,
+                    "signals": sig.as_dict(),
+                    "attribution": who,
+                    "attribution_note": why_not,
+                    "survived_association": persisted,
+                    "tier": tier,
+                }
+                findings.append(finding)
+
+                # design 11: "In dev, this is a digest line and a manager
+                # notification, not a page. It is a visibility failure, not an
+                # outage." And: "Immediate low-severity notice; page only on
+                # persistence or recurrence."
+                #
+                # So two conditions have to hold before this pages: production,
+                # AND a gap that outlived the association reinstall.
+                if tier == "dev":
+                    routing = "digest"
+                elif persisted is True:
+                    routing = "pagerduty"
+                else:
+                    routing = "digest_and_jira"
+
+                _emit({
+                    "record_type": "telemetry-gap-finding",
+                    "recorded_at": _iso(_now()),
+                    "current_state": "ALARM",
+                    "routing": routing,
+                    "alarm": {"name": f"platform-telemetry-{scenario['name']}",
+                              "resource_id": sig.instance_id,
+                              "account_id": account_id},
+                    "assessment": {"probable_cause": note},
+                    "telemetry_gap": finding,
+                })
+
+    for gapped in unreadable:
+        _emit({
+            "record_type": "telemetry-gap-finding",
+            "recorded_at": _iso(_now()),
+            "current_state": "ALARM",
+            "routing": "review_queue",
+            "alarm": {"name": "platform-telemetry-scan-incomplete",
+                      "resource_id": gapped["account_id"],
+                      "account_id": gapped["account_id"]},
+            "assessment": {"probable_cause": (
+                f"Instances in {gapped['account_id']} could not be examined "
+                f"({gapped['problem']}). No conclusion can be drawn about "
+                "that account, and this scan covers less of the estate than "
+                "its other results imply.")},
+        })
+
+    out = {
+        "record_type": "telemetry-gap-scan",
+        "scanned": True,
+        "scanned_at": _iso(_now()),
+        "accounts": len(accounts),
+        "accounts_unreadable": len(unreadable),
+        "instances_examined": examined,
+        "suppressed": suppressed_count,
+        "findings": len(findings),
+        "grace_minutes": GRACE_MINUTES,
+    }
+    print(json.dumps(out, default=str))
+    return out
+
+
+HANDLERS = {"scan": scan}
+
+
+def handler(event, context):
+    return scan(event, context)

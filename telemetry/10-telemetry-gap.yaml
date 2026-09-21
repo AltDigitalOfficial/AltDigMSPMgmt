@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — telemetry gap detection (prompt 10.3).
+  Detects an agent stopped on a live instance, per design 11's discriminator
+  table. Deploys to the Audit account.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  MemberReadRoleName:
+    Type: String
+    Default: PlatformQuorumReader
+    Description: >-
+      The read-only role assumed in each account. Shared with the quorum
+      reverse sweep: both need cross-account read and neither should be able to
+      change anything, so a second role would be a second thing to audit for
+      the same guarantee.
+
+  GraceMinutes:
+    Type: Number
+    Default: 30
+    Description: >-
+      How long telemetry may be absent before it counts as a gap.
+
+      design 11: "Grace period longer than a normal agent restart." An agent
+      reinstalled by the SSM association returns within minutes; a patch reboot
+      takes longer. Thirty is past both and far short of the daily association
+      run, which is what provides the escalation signal rather than this.
+
+  ScanSchedule:
+    Type: String
+    Default: 'rate(15 minutes)'
+    Description: >-
+      Frequent, because the window between an agent being stopped and whatever
+      it was stopped for is short. Cheap: the scan is a handful of API calls
+      per instance and most instances answer healthy immediately.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  ScanRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformTelemetryGapScan
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  ScanPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ObserveInstanceTelemetry
+      Roles: [!Ref ScanRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Read-only into member accounts. This component observes and
+          # reports; it has no business restarting an agent, and design 11
+          # frames the finding as something a human acts on because the
+          # interesting question is WHO stopped it, not getting it running
+          # again.
+          - Sid: ReadMemberAccounts
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${MemberReadRoleName}'
+          - Sid: ReadTierMap
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/*'
+          - Sid: ReportFindings
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  ScanLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-telemetry-gap
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  ScanFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ScanLogGroup
+    Properties:
+      FunctionName: platform-telemetry-gap
+      Runtime: python3.12
+      Handler: gap.handler
+      Role: !GetAtt ScanRole.Arn
+      # Every account, every platform-managed instance, five signals each.
+      Timeout: 600
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          ALERT_BUS_NAME: !Ref AlertBusName
+          TELEMETRY_READ_ROLE: !Ref MemberReadRoleName
+          TELEMETRY_GRACE_MINUTES: !Ref GraceMinutes
+          ACCOUNT_TIER_PARAM: /platform/routing/account-tiers
+
+  # ScanScheduleRule, not ScanSchedule: CloudFormation refuses a resource and a
+  # parameter sharing a name, and the parameter here is the cron expression.
+  # Second time in this build (the quorum stack did the same), so: when a
+  # parameter names a schedule, the rule it drives takes the Rule suffix.
+  ScanScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-telemetry-gap-scan
+      Description: >-
+        Absence of telemetry from something demonstrably alive. design 11.
+      ScheduleExpression: !Ref ScanSchedule
+      State: ENABLED
+      Targets:
+        - Id: scan
+          Arn: !GetAtt ScanFunction.Arn
+          Input: '{"action": "scan"}'
+
+  ScanScheduleRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ScanFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScanScheduleRule.Arn
+
+Outputs:
+
+  ScanFunctionName:
+    Description: Telemetry gap scan, for running a pass by hand.
+    Value: !Ref ScanFunction
+
+  GraceMinutes:
+    Description: >-
+      Shared with the escalation logic. A gap younger than this is a restart.
+    Value: !Ref GraceMinutes

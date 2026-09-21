@@ -3716,3 +3716,64 @@ merge the two rows and say the cause is undetermined at this level. The current
 form implies a discrimination the signals cannot make, and somebody
 implementing it will either notice — costing an hour — or not, and write a
 detector that asserts a cause it cannot know.
+
+## B-100 · The traffic signal read a log group that does not exist
+
+**Fixed before deployment** — 2026-09-21, found while writing the stack.
+
+`gap.py`'s first `_recent_traffic` read VPC flow logs from a CloudWatch log
+group. On this platform flow logs go to **S3** —
+`baseline/40-network.yaml`, `LogDestinationType: s3` — so there is no log group
+to read.
+
+Every instance would have marked `flow_logs` unreadable, `classify()` correctly
+refuses to judge when a signal is unreadable, and therefore **no instance would
+ever have matched a row**. The detector would have run on schedule, reported
+`findings: 0`, and been inert.
+
+The failure it exists to catch, performed by itself: a scan that examines
+everything and concludes nothing, indistinguishable from a healthy estate.
+
+**Fixed by using `NetworkPacketsIn` from `AWS/EC2`.** The substitution is
+deliberate, not convenient. design 11 names flow logs, and the property its
+table actually relies on is the one in the signal-dependency table above it —
+flow logs **do not require the agent**. `NetworkPacketsIn` is hypervisor-published
+and shares that property exactly, while being one CloudWatch call rather than
+an Athena query over S3.
+
+**Found by writing the deployment**, not by a test. The unit tests construct
+`Signals` directly and never exercise `gather()`, so they passed throughout and
+would have kept passing. What surfaced it was asking where the flow logs
+actually are before wiring the IAM policy — a question the test never asks.
+
+## B-101 · Inbound port 22 detection needs Athena over S3 flow logs
+
+**Deferred with a trigger** — 2026-09-21.
+
+design 11 and prompt 10.3 both ask for it:
+
+> There is no SSH path in this architecture. Inbound on 22 appearing in flow
+> logs is a finding in its own right, independent of the telemetry question,
+> and is alarmed directly.
+
+Not built. Flow logs land in S3, so this needs an Athena table over the flow
+log bucket and a scheduled query — a Glue catalog, partition management, a
+workgroup and a result bucket. Real work, and none of it shared with anything
+built so far.
+
+**What exists meanwhile, and why it is not a substitute.** `cfn-guard`'s
+`SG_NO_OPEN_INGRESS_EXCEPT_443` refuses a security group opening any port but
+443 to `0.0.0.0/0`, which prevents the common way the door gets opened. That is
+a preventive control on the *configuration*. design 11 asks for a detective
+control on the *traffic*, and the two answer different questions: the guard
+catches somebody writing a template, and the flow log catches somebody
+arriving through a path nobody templated.
+
+Stated plainly rather than quietly treated as covered — a preventive control
+described as if it were the detective one is exactly the substitution D-017
+refused.
+
+**Trigger:** when an Athena workgroup exists for any other purpose (cost
+analysis over CUR is the likely first), since most of the cost here is the
+first query rather than the tenth. Sooner if a tenant requires SSH-path
+evidence for an audit.
