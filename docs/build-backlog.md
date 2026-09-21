@@ -4476,3 +4476,53 @@ whatever policies get created at the root config. No restructuring.
 **Trigger:** before the first client with a non-production account goes live,
 or before any client's own developers are given PagerDuty access, whichever
 comes first.
+
+### Follow-up closed 2026-09-21 — runaway detection built
+
+`alerting/30-runaway.yaml`, deployed to Audit as `platform-runaway`. Three
+account-wide alarms at 500 per five-minute period, two evaluation periods:
+Lambda `Invocations`, EventBridge `PutEventsEntriesCount`, EventBridge
+`TriggeredRules`.
+
+**Account-wide, with no dimensions, and that is the point.** The obvious
+design is an invocation alarm per function, and it is wrong because it has to
+be remembered — the gap that let this run for a day was precisely that nobody
+had added one. A control whose coverage depends on being extended by hand has
+holes shaped like whatever was built most recently. Account-wide covers every
+function that exists now and every function added later by somebody who has
+never read the template.
+
+For the EventBridge metrics it was not even a choice. Measured on the live
+account, the `EventBusName` dimension publishes **no data** for
+`PutEventsEntriesCount`, `TriggeredRules` or `MatchedEvents` — only the
+account-level metric carries the signal. A per-bus alarm would have been
+permanently inert, which is the B-100 shape and would have been indispensable
+right up until it was needed.
+
+**Thresholds measured, not guessed**, either side of the fix:
+
+| metric | normal / 5min | during the loop / 5min |
+|---|---|---|
+| Lambda `Invocations` | 1–6 | ~5,000 |
+| `TriggeredRules` | low single digits | ~4,967 |
+| `PutEventsEntriesCount` | low single digits | ~2,604 |
+
+Three orders of magnitude apart, so 500 is not a fine judgement: ~100x above
+normal, 5–10x below the observed runaway.
+
+**Verified retrospectively against the real incident:** every one of the 36
+five-minute periods in the loop window exceeded the threshold — 100%. The
+alarm would have fired within ten minutes of the loop starting and stayed in
+ALARM until it was fixed.
+
+`docs/runbooks/runaway.md` carries the diagnosis and the stop procedure. The
+stop is deliberately manual: CLAUDE.md forbids automated termination, and a
+containment routine that disabled rules on a rate signal would eventually
+disable the platform during a legitimate burst, at the worst possible moment.
+
+**Known limitation, accepted rather than solved.** The threshold is fixed and
+the estate will grow into it. Anomaly detection was considered and rejected —
+it needs weeks of history, and a band that widens on its own would have
+widened around B-116 given long enough. Adapting to a runaway is exactly the
+wrong behaviour here. Revisit trigger is tenant count: when routine operation
+reaches a quarter of the threshold, raise it and re-measure.

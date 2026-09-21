@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — runaway detection. Account-wide rate alarms
+  that catch a feedback loop before its cost becomes the thing that reports it.
+
+# ---------------------------------------------------------------------------
+# Why this exists
+# ---------------------------------------------------------------------------
+# B-116. The commercial router emitted an event that matched the rule which
+# triggered it, and fed itself 190,672 times in 24 hours before anybody looked.
+# Nothing alarmed, because nothing was broken in any way the platform measures:
+#
+#   Errors          zero. Every invocation succeeded.
+#   Throttles       zero. 475/minute is nowhere near a concurrency limit.
+#   Duration        normal. The function did its small job correctly.
+#   DLQ depth       zero. Nothing failed, so nothing was dead-lettered.
+#
+# Every alarm design 06a defines for a Lambda function asks "is this function
+# working". A runaway is a function working perfectly, extremely often. The
+# only signal it produces is RATE, and rate was not being watched.
+#
+# It cost about a dollar a day and was discovered by accident while tracing an
+# unrelated chain. The next one is not guaranteed to be a cheap function: the
+# same loop around a Bedrock call, a cross-region replication or a Textract
+# job is three orders of magnitude more expensive per iteration, and would
+# still produce no errors, no throttles and no dead letters.
+#
+# ---------------------------------------------------------------------------
+# ACCOUNT-WIDE metrics, deliberately, with no dimensions
+# ---------------------------------------------------------------------------
+# The obvious design is an invocation alarm per function. It is the wrong one,
+# because it has to be remembered: every new Lambda needs somebody to add an
+# alarm for it, and the gap that let B-116 run for a day was exactly that
+# nobody had. A control whose coverage depends on being extended by hand is a
+# control with holes shaped like whatever was built most recently.
+#
+# Account-wide Invocations has no dimensions and therefore no enumeration.
+# It covers every function that exists now and every function added later,
+# including ones written by somebody who has never read this file.
+#
+# The same reasoning applies to the EventBridge metrics, and there it is not
+# even a choice: `PutEventsEntriesCount` and `TriggeredRules` publish ONLY at
+# account level. Measured on the live account, the EventBusName dimension
+# returns no data at all — so a per-bus alarm would have been permanently
+# inert, which is the B-100 shape.
+#
+# ---------------------------------------------------------------------------
+# Thresholds, measured rather than guessed
+# ---------------------------------------------------------------------------
+# Taken from the Audit account either side of the B-116 fix:
+#
+#   metric                        normal / 5min     during the loop / 5min
+#   Lambda Invocations            1 - 6             ~5,000
+#   Events TriggeredRules         low single digits ~4,967
+#   Events PutEventsEntriesCount  low single digits ~2,604
+#
+# Three orders of magnitude apart, so the threshold is not a fine judgement.
+# 500 sits roughly 100x above normal and 5-10x below the observed runaway: far
+# enough above routine work to stay quiet through a busy sweep, far enough
+# below a loop to fire within two periods of one starting.
+#
+# The threshold is a FIXED number and the estate will grow into it. That is
+# accepted rather than solved: anomaly detection adapts but needs weeks of
+# history and fails oddly on spiky workloads, and a band that widens on its own
+# would have widened around B-116 given long enough. Revisit trigger is tenant
+# count, not a date — see the AlarmDescription, which is what somebody reads
+# when this fires.
+
+Parameters:
+
+  AlertsTopicArn:
+    Type: String
+    Description: >-
+      High-urgency SNS topic. Targeted DIRECTLY rather than through the
+      routing layer: the router is itself a Lambda, and a runaway involving it
+      would be a runaway whose alarm depended on the thing running away. The
+      topic's direct PagerDuty subscription is the fallback path that survives
+      the router being broken or overwhelmed.
+
+  InvocationThreshold:
+    Type: Number
+    Default: 500
+    Description: >-
+      Lambda invocations per 5-minute period, account-wide, above which this is
+      a runaway rather than work. See the header for the measurements behind
+      this number.
+
+  EventThreshold:
+    Type: Number
+    Default: 500
+    Description: Events published or rules triggered per 5-minute period, account-wide.
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Lambda: the direct compute cost
+  # -------------------------------------------------------------------------
+
+  LambdaInvocationRunawayAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-lambda-invocation-runaway
+      # Capped at 1024 characters by CloudFormation, which is why the detail
+      # lives in docs/runbooks and this says only what a woken person needs in
+      # the first minute.
+      AlarmDescription: >-
+        Account-wide Lambda invocations exceeded the runaway threshold for ten
+        minutes. Almost certainly a feedback loop, not load: a function whose
+        output matches the rule that triggers it, or a retry storm with no
+        backoff.
+
+        Nothing else will alarm. A loop has no errors, no throttles and no dead
+        letters, because every invocation succeeds at doing a small thing it
+        should not be doing at all.
+
+        FIND: CloudWatch Metrics, AWS/Lambda Invocations by FunctionName, last
+        hour. Obvious by magnitude. Then check whether that function's own
+        output matches its triggering rule's pattern - that was B-116.
+
+        STOP: disable the triggering EventBridge rule, not the function. Halts
+        it immediately and preserves everything needed to understand it.
+
+        Runbook: docs/runbooks/runaway.md
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      # No Dimensions, on purpose. See the header: an alarm that must be
+      # extended per function is an alarm with holes shaped like the newest
+      # code.
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref InvocationThreshold
+      ComparisonOperator: GreaterThanThreshold
+      # A period with no invocations is a quiet platform, not a broken one.
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref AlertsTopicArn
+      OKActions:
+        - !Ref AlertsTopicArn
+
+  # -------------------------------------------------------------------------
+  # EventBridge: the cost that is easy to miss
+  # -------------------------------------------------------------------------
+  # Separate from the Lambda alarm rather than folded into it, because a loop
+  # can run entirely between rules and targets that are not Lambdas — a rule
+  # forwarding to another bus, to SQS, to Step Functions — and would move these
+  # metrics while leaving Invocations flat.
+
+  EventPublishRunawayAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-eventbridge-publish-runaway
+      AlarmDescription: >-
+        Account-wide EventBridge publishing exceeded the runaway threshold for
+        ten minutes. Custom events bill per million published, so this is a
+        cost signal as much as a correctness one.
+
+        A loop running between rules and non-Lambda targets moves this and
+        leaves Lambda invocations flat, which is why this alarm is separate.
+
+        FIND: AWS/Events TriggeredRules by RuleName, last hour, then read that
+        rule's event pattern against what its target emits.
+
+        STOP: disable the rule, not the target.
+
+        Runbook: docs/runbooks/runaway.md
+      Namespace: AWS/Events
+      MetricName: PutEventsEntriesCount
+      # Measured: the EventBusName dimension publishes no data on this account,
+      # so a per-bus alarm would never evaluate. Account level is the only
+      # level that carries the signal.
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref EventThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref AlertsTopicArn
+      OKActions:
+        - !Ref AlertsTopicArn
+
+  RuleTriggerRunawayAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-eventbridge-rule-runaway
+      AlarmDescription: >-
+        Account-wide EventBridge rule triggers exceeded the runaway threshold
+        for ten minutes.
+
+        This is the EARLIEST of the three signals for a self-feeding rule: the
+        rule matches its own target's output and triggers before anything
+        downstream runs, so it moves first and by the largest margin. During
+        B-116 it peaked near 5,000 per five minutes against a normal of low
+        single digits.
+
+        FIND and STOP: as for platform-eventbridge-publish-runaway.
+
+        Runbook: docs/runbooks/runaway.md
+      Namespace: AWS/Events
+      MetricName: TriggeredRules
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref EventThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref AlertsTopicArn
+      OKActions:
+        - !Ref AlertsTopicArn
+
+Outputs:
+
+  LambdaAlarmName:
+    Description: Account-wide Lambda invocation runaway alarm.
+    Value: !Ref LambdaInvocationRunawayAlarm
+
+  EventPublishAlarmName:
+    Description: Account-wide EventBridge publish runaway alarm.
+    Value: !Ref EventPublishRunawayAlarm
+
+  RuleTriggerAlarmName:
+    Description: Account-wide EventBridge rule trigger runaway alarm.
+    Value: !Ref RuleTriggerRunawayAlarm
