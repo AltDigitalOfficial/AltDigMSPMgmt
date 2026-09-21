@@ -3908,3 +3908,66 @@ key's prefix matches the script's own name. Two copies is coincidence; four is
 a pattern, and a guard written now would be guessing at what the pattern is.
 
 The stray object has been deleted from the artifact bucket.
+
+## B-105 · The saga is not self-cleaning yet, and that is three of four
+
+**Open** — a known gap in prompt 12.1's own requirements, stated rather than
+implied.
+
+The prompt names four properties. Three are built and tested:
+
+| Property | State |
+|---|---|
+| Idempotent | every step checks before acting; re-runs are no-ops |
+| Resumable | resumption reads the registry, not an execution history |
+| Fails closed | uncertainty drives the record to `blocked`, never `provisioned` |
+| **Self-cleaning** | **not built — the deprovisioning path is prompt 12.4** |
+
+design 13: "failed provisioning is unwound by the deprovisioning path", and
+"Deprovisioning — built at the same time". It was not built at the same time.
+
+**What that means in practice today.** A saga that halts at step 5 having
+created a Truveon tenant, a PagerDuty service and a Jira project leaves all
+three, and the registry record is the only list of them. Unwinding is a human
+reading that record and deleting three things by hand.
+
+**Why that is tolerable now and will not stay so.** No tenant exists, so
+nothing has been half-provisioned. The moment one is attempted, the unwind path
+matters more than any further step implementation — because the failure it
+handles is the likely outcome of a first run, not the exceptional one.
+
+**What the saga already does to make it possible.** Every step writes its
+identifiers back to the registry immediately rather than at the end, precisely
+so that a half-finished provisioning leaves a complete list of what exists.
+That was built for this, and it is the only reason a manual unwind is feasible
+at all.
+
+**Trigger:** before the first real tenant is attempted. Not before the
+remaining step implementations — an unwind path matters more than another step,
+because a step that fails without one leaves somebody deleting resources from
+memory.
+
+## B-106 · Seven of the saga's ten steps have no implementation
+
+**Open, and deliberate** — the engine is prompt 12.1; the steps are 12.2
+onward and later phases.
+
+Steps 2 through 8 raise `StepNotImplemented`, which blocks. That is the correct
+behaviour and not a placeholder: a step treated as a no-op would produce a
+tenant that finished provisioning without a Truveon stream, a Jira project or a
+verification sweep — the "looks supported" failure the saga exists to prevent.
+
+| Step | Waiting on |
+|---|---|
+| 2 Truveon tenant | B-088, the ingestion API |
+| 3 PagerDuty services | prompt 12.2 |
+| 4 Jira project | prompt 12.3 |
+| 5 AWS accounts + baseline | phase 3's vesting pipeline, which exists — needs wiring |
+| 6 Instrumentation and schedules | phase 4 exists — needs per-tenant invocation |
+| 7 Cost Categories and budgets | categories exist (9.2); budgets do not |
+| 8 Verification sweep | design 13's own section, unbuilt |
+
+Steps 5, 6 and 7 are the closest: the machinery exists and what is missing is
+the per-tenant invocation rather than the capability. Step 8 is the one worth
+doing early regardless of the others, because it is what would catch the
+previous seven having gone wrong.
