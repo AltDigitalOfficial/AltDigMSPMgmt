@@ -155,6 +155,24 @@ def to_awareness(detail):
 def classify(event):
     """Which class of client conversation this is, and when it travels."""
     detail = event.get("detail") or {}
+
+    # This router's OWN output must never be routed again. B-116.
+    #
+    # The emitted event carries `commercial_event` so downstream consumers can
+    # see the class, and DeclaredCommercialRule matches on exactly that field
+    # existing -- so the output matches the rule that produced it. Left alone
+    # that is an unbounded loop: rule, function, emit, rule, forever. It had
+    # not fired only because no commercial event had yet occurred, and because
+    # the original verification invoked this function directly rather than
+    # putting an event on the bus, which never exercises the cycle.
+    #
+    # Checked here as well as excluded by the rule's event pattern. The rule is
+    # the cheaper stop -- the loop never reaches Lambda -- but it lives in a
+    # template somebody could widen, and a self-feeding router is not a failure
+    # anyone should be able to reintroduce by editing infrastructure.
+    if detail.get("record_type") == "client-conversation":
+        return None, None
+
     kind = detail.get("commercial_event") or detail.get("record_type")
 
     # An explicit mapping, not a guess. An unrecognised event is NOT routed

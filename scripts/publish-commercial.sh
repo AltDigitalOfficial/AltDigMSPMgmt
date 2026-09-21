@@ -30,7 +30,7 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 > "${BUILD}/.sources"
-for MODULE in route; do
+for MODULE in route notify; do
   cp "${REPO_ROOT}/commercial/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
   printf '%s\n' "$(win_path "${REPO_ROOT}/commercial/src/${MODULE}.py")" \
     >> "${BUILD}/.sources"

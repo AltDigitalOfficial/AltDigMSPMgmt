@@ -4340,15 +4340,37 @@ differ. Anything holding the platform key can page the on-call rotation;
 anything holding this one can raise a low-urgency notification, and a consumer
 needing only the second should not get the first as a side effect.
 
-**Still open: nothing carries the event from the bus to PagerDuty.** Tracing
-the whole path rather than the half that was failing:
+### Closed 2026-09-21 — the whole chain now carries an event
+
+`commercial/src/notify.py` is the missing link, and tracing the path to find it
+also turned up B-116, a live runaway that had been running for at least a day.
+
+A Lambda rather than an EventBridge API Destination, because PagerDuty's Events
+API v2 takes the routing key in the JSON BODY and has no header auth. A
+destination would need the key baked into the rule at deploy time — the exact
+wart `sync-pagerduty-secrets.sh` already warns about for the SNS subscription,
+where rotating the key silently leaves a stale endpoint. Reading the secret at
+invocation makes rotation one command with nothing downstream to remember.
+
+`notify.py` re-checks the awareness allow-list before the payload leaves AWS,
+importing `AWARENESS_FIELDS` from `route.py` rather than copying it. One
+definition, two enforcement points — and the second is the only place the data
+crosses an organisational boundary, which is the last moment the platform can
+refuse.
+
+**Verified live, end to end:** a cost-anomaly emitted onto `platform-alerts`
+reached PagerDuty as incident #115 on the Client Conversations service at LOW
+urgency — notifying, not paging — carrying its figures intact, because for a
+cost anomaly the number is the point. Resolved after the test.
+
+The path as it stood when this was opened:
 
 | link | state |
 |---|---|
 | EventBridge rules match declared commercial events and incident dossiers | built |
 | `route.py` decides awareness-only, withholds notifiable detail, refuses without a notifier | built and verified |
 | `route.py` emits `client-conversation` back onto the alert bus | built |
-| **a rule matching `client-conversation` and forwarding to PagerDuty** | **absent** |
+| a rule matching `client-conversation` and forwarding to PagerDuty | built 2026-09-21 |
 | PagerDuty service to receive it | built 2026-09-21 |
 | routing key in Secrets Manager | built 2026-09-21 |
 
@@ -4372,3 +4394,53 @@ and the next person would have read "B-115 closed" and believed it.
 > A title that says "deployed" needs a verification line that names the thing
 > deployed. "Verified live" covering one of two halves reads as covering both,
 > and the half nobody mentions is the half nobody checks.
+
+## B-116 · The commercial router fed itself, 27,000 times an hour
+
+**Found and stopped 2026-09-21.** Mine, introduced in `f1cf3e7`.
+
+`route.py` emits its routed event back onto the alert bus carrying
+`commercial_event` so downstream consumers can see the class.
+`DeclaredCommercialRule` matches on exactly that field existing. So the
+router's output matched the rule that produced it:
+
+    rule -> function -> emit -> rule -> function -> emit -> ...
+
+**It was running.** 190,672 invocations in 24 hours, a sustained ~475 per
+minute, every one of them re-routing the same `security-incident` class. It
+stopped the instant the fix deployed: 475/min at 16:48, 203 at 16:49 as the
+changeset landed, 1 at 16:51 — the deliberate end-to-end test.
+
+**Why nobody noticed.** Nothing consumed `client-conversation` (B-115), so the
+loop produced no pages, no tickets and no customer-visible effect. It spent
+roughly a dollar a day across Lambda, EventBridge PutEvents and log ingestion,
+which is inside the noise on a bill nobody was yet reading per-service. A loop
+whose only symptom is cost is a loop that runs until somebody looks.
+
+**The near miss is the point.** While nothing listened, this was invisible
+waste. The moment the notifier existed it became **~27,000 PagerDuty incidents
+per hour** on the Client Conversations service. The only reason that did not
+happen is that the loop fix and the notifier went out in the same deploy — and
+that was luck in ordering, not judgement: the loop was found while tracing the
+chain for B-115, not by looking for it.
+
+**Why the original verification missed it.** `f1cf3e7` tested `route.py` by
+invoking the Lambda **directly**, which exercises the function and never
+exercises the rule that triggers it. Every assertion in that commit is true.
+None of them could have caught this, because the cycle only exists on the bus.
+
+> Testing a handler by invoking it proves the handler. It cannot prove what
+> triggers the handler, and a self-feeding rule is invisible to every test
+> that starts after the trigger.
+
+**Fixed in two places, deliberately.** The rule now excludes
+`source: platform.commercial`, which stops the loop before it reaches Lambda;
+and `classify()` declines any event whose `record_type` is already
+`client-conversation`. The rule is the cheaper stop but lives in a template
+somebody could widen, and a self-feeding router should not be reintroducible by
+editing infrastructure.
+
+**Open follow-up:** no alarm would have caught this. An invocation-rate alarm
+on the platform's own Lambdas — or a PutEvents-rate alarm on the alert bus —
+would have. design 06a has no entry for either. Tracked here rather than
+silently accepted.

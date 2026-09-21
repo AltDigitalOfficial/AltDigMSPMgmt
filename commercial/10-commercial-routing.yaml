@@ -52,6 +52,14 @@ Parameters:
       customer, is how a helpful person on a phone call becomes the notifying
       party.
 
+  CommercialRoutingKeySecret:
+    Type: String
+    Default: platform/pagerduty/commercial-routing-key
+    Description: >-
+      Secrets Manager name holding the PagerDuty Events API v2 routing key for
+      the client-conversation service. Read at INVOCATION, not resolved at
+      deploy time, so rotating the key needs no redeploy.
+
   LogsKeyArn:
     Type: String
     Default: ''
@@ -132,6 +140,15 @@ Resources:
       EventBusName: !Ref AlertBusName
       Description: 'Events that name themselves as client conversations.'
       EventPattern:
+        # The router's own output carries commercial_event so downstream
+        # consumers can see the class, which means it matches this pattern --
+        # rule, function, emit, rule, without end. B-116.
+        #
+        # Excluded by SOURCE rather than by adding a field to the payload,
+        # because the source is set by the emitter and cannot be spoofed by a
+        # producer upstream. route.py declines its own output as well; this is
+        # the cheaper stop, since the loop never reaches Lambda.
+        source: [{ 'anything-but': ['platform.commercial'] }]
         detail:
           commercial_event: [{ exists: true }]
       State: ENABLED
@@ -160,6 +177,99 @@ Resources:
         - Id: route
           Arn: !GetAtt RouteFunction.Arn
 
+  # ---------------------------------------------------------------------
+  # The notifier: the link that carries the event to PagerDuty
+  # ---------------------------------------------------------------------
+  # B-115. Before this existed, route.py emitted `client-conversation` onto
+  # the bus and nothing listened -- a router that decided correctly and a
+  # destination that received nothing, with the failure invisible because the
+  # deciding half worked.
+
+  NotifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformCommercialNotifier
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  NotifyPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: NotifyClientConversations
+      Roles: [!Ref NotifyRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # The commercial routing key ONLY. Deliberately not the platform
+          # routing key: anything holding that can page the on-call rotation,
+          # and this function has no business being able to.
+          - Sid: ReadCommercialRoutingKey
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${CommercialRoutingKeySecret}-*'
+
+  NotifyLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-commercial-notifier
+      # Seven years, matching the router. This log is the record of what
+      # actually crossed the boundary to a third party.
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  NotifyFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: NotifyLogGroup
+    Properties:
+      FunctionName: platform-commercial-notifier
+      Runtime: python3.12
+      Handler: notify.handler
+      Role: !GetAtt NotifyRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          COMMERCIAL_ROUTING_KEY_SECRET: !Ref CommercialRoutingKeySecret
+
+  ClientConversationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-notify-client-conversations
+      EventBusName: !Ref AlertBusName
+      Description: >-
+        Routed client-conversation events, on their way to the PagerDuty
+        business service. This is the ONLY rule that should match the
+        router's own output.
+      EventPattern:
+        source: ['platform.commercial']
+        detail-type: ['client-conversation']
+      State: ENABLED
+      Targets:
+        - Id: notify
+          Arn: !GetAtt NotifyFunction.Arn
+
+  NotifyPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt NotifyFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ClientConversationRule.Arn
+
   DeclaredPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -181,6 +291,13 @@ Outputs:
   RouteFunctionName:
     Description: The client-conversation router.
     Value: !Ref RouteFunction
+
+  NotifyFunctionName:
+    Description: >-
+      The client-conversation notifier, which carries a routed event to the
+      PagerDuty business service. Without it the router decides correctly and
+      nothing arrives (B-115).
+    Value: !Ref NotifyFunction
 
   NotifierParam:
     Description: >-
