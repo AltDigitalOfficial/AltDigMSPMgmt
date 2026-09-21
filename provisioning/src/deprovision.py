@@ -123,13 +123,19 @@ UNDO = [
                 "teardown that closed the account could never be re-vested.",
     },
     {
-        "step": 4, "field": "jira_project_key",
-        "what": "Jira project",
+        "step": 4, "field": "jira_tenant_label",
+        "what": "Jira tenant label and the issues carrying it",
         # Change records are the evidence that change management operated.
         "preserve_in": ("dormant", "exit"),
-        "note": "Archived rather than deleted. The change records in it are "
-                "design 08's evidence that change management operated, and "
-                "they outlive the tenant.",
+        "note": "Preserved, not archived, and the distinction now matters. "
+                "Provisioning could not create a per-tenant project (B-108), "
+                "so the tenant's artefacts are LABELLED issues inside the "
+                "SHARED ops project. Nothing here may touch that project: "
+                "removing it would take every other tenant's change records "
+                "with it. Only issues carrying this label are in scope, and "
+                "even those are preserved -- they are design 08's evidence "
+                "that change management operated, and they outlive the "
+                "tenant.",
     },
     {
         "step": 3, "field": "pagerduty_service_id",

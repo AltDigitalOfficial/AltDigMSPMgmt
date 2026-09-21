@@ -274,6 +274,41 @@ def _do_registry(ctx):
     return {"tenant_id": ctx["tenant_id"], "state": "provisioning"}
 
 
+def _do_jira(ctx):
+    """design 13 step 4. The onboarding task set and the recurring obligations.
+
+    Imported lazily and deliberately. `jira_tenant` pulls in the Jira client,
+    which builds a Secrets Manager client at import time; a module-level import
+    would make the whole saga unimportable anywhere that credential is not
+    reachable, including in the tests for steps that never touch Jira.
+
+    What it does NOT create is a project. See jira_tenant's docstring: the
+    platform credential cannot create one (B-108), so tenant separation is a
+    label inside the shared ops project. That is a weaker boundary than design
+    13 assumed and it is recorded as B-109 rather than papered over.
+    """
+    import jira_tenant
+
+    result = jira_tenant.provision(ctx["tenant_id"])
+    now = _iso(_now())
+    dynamodb.update_item(
+        TableName=REGISTRY_TABLE,
+        Key={"PK": {"S": f"TENANT#{ctx['tenant_id']}"}, "SK": {"S": "META"}},
+        UpdateExpression=("SET jira_tenant_label = :l, "
+                          "jira_onboarding_key = :k, updated_at = :u"),
+        ExpressionAttributeValues={
+            ":l": {"S": result["tenant_label"]},
+            ":k": {"S": result["onboarding_key"]},
+            ":u": {"S": now}},
+        # The registry record must already exist -- step 1 created it. If it
+        # does not, something removed it mid-saga and stamping a Jira key onto
+        # a record that is not there would create a half-record describing a
+        # tenant nobody declared.
+        ConditionExpression="attribute_exists(PK)")
+    return {"jira_tenant_label": result["tenant_label"],
+            "jira_onboarding_key": result["onboarding_key"]}
+
+
 STEPS = [
     {
         "number": 0,
@@ -314,11 +349,13 @@ STEPS = [
     },
     {
         "number": 4,
-        "name": "jira-project",
-        # Before reconciliation has a target.
-        "check": lambda ctx: ({"jira_project_key": (record(ctx["tenant_id"]) or {}).get("jira_project_key")}
-                              if (record(ctx["tenant_id"]) or {}).get("jira_project_key") else None),
-        "do": _not_built("Per-tenant Jira project provisioning", "prompt 12.3"),
+        "name": "jira-tenant-artefacts",
+        # Before reconciliation has a target. Confirmed by the onboarding
+        # parent key rather than by the label: the label is derived from the
+        # tenant id and would read as present before anything was created.
+        "check": lambda ctx: ({"jira_onboarding_key": (record(ctx["tenant_id"]) or {}).get("jira_onboarding_key")}
+                              if (record(ctx["tenant_id"]) or {}).get("jira_onboarding_key") else None),
+        "do": _do_jira,
     },
     {
         "number": 5,

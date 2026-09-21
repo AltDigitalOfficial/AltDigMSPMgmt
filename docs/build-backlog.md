@@ -4005,3 +4005,105 @@ are "needed sooner than exit" are the two that are closer.
 **Trigger:** before any exit conversation, and before the first tenant contract
 is signed — design 10 lists a tested exit path as a commitment, so signing
 without one commits to something that does not exist.
+
+## B-108 · A permission probe answered a different question than the one asked
+
+**Closed by re-probing** — 2026-09-21.
+
+Prompt 12.3 says to verify current API capability before building, because this
+area has been changing. So it was verified — against
+`/rest/api/3/mypermissions` with no project scope. That returned:
+
+```
+ADMINISTER           False     <- cannot create projects
+ADMINISTER_PROJECTS  True      <- so a component will work
+```
+
+which led to recommending, and the user selecting, a components-in-one-project
+model. Scoped to the ops project, the same permission reads **False**, and
+component creation returns `You cannot edit the configuration of this project`.
+
+**The failure is not the missing permission, it is the shape of the check.**
+`mypermissions` without `projectKey` answers "does this account hold this
+permission anywhere", and the question being asked was "can it act on AMI".
+Both answers are true statements; only one of them was relevant, and the
+irrelevant one was affirmative.
+
+This is the same family as B-086, B-092 and B-100, but a distinct variant worth
+naming. Those reported a conclusion without having examined anything. This one
+examined something real, and reported the answer to a question nobody asked.
+
+> A check must be scoped to the thing the decision is about. A permission held
+> somewhere is not a permission held here, and an affirmative answer to the
+> wrong question is more expensive than no answer at all.
+
+The cost was one design decision made on a false premise, caught before code
+was written because the first thing built was a capability probe rather than a
+feature. That ordering is worth keeping.
+
+## B-109 · Tenant isolation in Jira is a naming convention, not a boundary
+
+**Open, accepted for now** — 2026-09-21.
+
+design 13 specifies "Project **or component**, inheriting the shared
+configuration scheme". Neither is reachable by the platform credential
+(B-108), so `jira_tenant.py` separates tenants with a label:
+`tenant-<registry-id>`.
+
+What that costs, stated plainly:
+
+| | separate config | own field and filters | confidentiality boundary |
+|---|---|---|---|
+| project | yes | yes | **yes** |
+| component | no | yes | no |
+| label | no | no | no |
+
+The label gives no confidentiality boundary whatsoever. Anyone who can browse
+the ops project sees every tenant's onboarding tasks, obligations and owners.
+Nothing in the code prevents this, and nothing in the code can — it is a
+property of where the issues live.
+
+**Why it is acceptable today.** The only people in the tool are the four
+partners, all of whom are entitled to see every tenant. The isolation that
+matters right now is operational — finding one tenant's work among another's —
+and a label does that adequately.
+
+**Trigger, not a date:** the first time a person who is not an AltDigital
+partner is given access to the ops project. At that moment the label stops
+being a filing convention and becomes a claimed boundary that does not exist.
+That requires a project per tenant, which requires a credential holding site
+ADMINISTER — and granting that credential also grants workflow, screen and
+field reconfiguration, which prompt 12.3 forbids automating. So the resolution
+is a permission question to be answered deliberately, not a code change.
+
+## B-110 · Provisioning has no deployment, and its two dependencies live in different accounts
+
+**Open** — 2026-09-21.
+
+`provisioning/` contains `saga.py`, `deprovision.py` and `jira_tenant.py` and
+**no CloudFormation template**. Nothing is deployed; every test so far has run
+locally against live backends.
+
+Running it live surfaced the reason that matters. Step 4 needs two things:
+
+| dependency | account | placed by |
+|---|---|---|
+| `platform-registry` table | tooling `751479507989` | `registry/10-registry-table.yaml` |
+| `platform/jira/service-account` | audit `692869638531` | `scripts/set-jira-token.sh` |
+
+Step 4 run with tooling credentials blocked with `could not read
+platform/jira/service-account: ResourceNotFoundException`, which is the correct
+behaviour — it wrote nothing and said why — but it means the saga cannot
+execute end to end from either account as things stand.
+
+**This is a placement decision, not a bug.** The options are to put the Jira
+credential in tooling alongside the registry (`set-jira-token.sh --account`
+already takes the argument), to give a provisioning function in tooling a
+cross-account read of the audit secret, or to move the registry. The first is
+simplest and broadens the credential's blast radius to a second account; that
+trade is a security decision and belongs to Art, not to this build.
+
+Deliberately **not** resolved by copying the credential unilaterally.
+
+**Trigger:** before the first real tenant is provisioned — which the user has
+signalled is close.
