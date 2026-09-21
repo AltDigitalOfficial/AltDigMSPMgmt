@@ -3587,3 +3587,64 @@ logic, the downgrade-only rule or B-073's account-tier check applies to them.
 That is correct for platform-health alarms — the platform's own failures are
 not a tenant's and have no tier — but it means "the router never pages for dev"
 is not the same statement as "nothing pages for dev".
+
+## B-097 · Two paths page, and only one of them is governed
+
+**Deferred, to be revisited.** Raised by Jamie 2026-09-20 after B-096.
+
+Diagnosing why each build batch paged him turned up something structural rather
+than a defect: **there are two independent ways to reach PagerDuty, and the
+platform's routing rules apply to only one of them.**
+
+```
+path 1   finding ──> platform-alerts bus ──> router ──> SNS ──> PagerDuty
+path 2   CloudWatch alarm ─────────────────────────────> SNS ──> PagerDuty
+```
+
+Path 1 is `alerting/src/router.py`. Everything the platform has learned about
+not waking people up lives there: design 06a's five routing classes, the
+downgrade-only rule (an emitter may lower its own urgency, never raise it), and
+B-073's account-tier check — the fix made after a dev-sandbox finding raised a
+real incident.
+
+Path 2 is a CloudWatch alarm with the alerts topic as an alarm action. It
+reaches the same pager having consulted none of that.
+
+**This is how B-096 hid.** The router's logs showed zero PagerDuty routings
+while the phone said otherwise, and both were telling the truth.
+
+### Why path 2 is not simply wrong
+
+Platform-health alarms are AltDigital's own failures. They have no tenant, no
+environment tier, and nothing to downgrade — a containment state machine that
+cannot invoke its readout is broken at 3am regardless of whose account it was
+contained in. Forcing those through a tenant-shaped router would mean inventing
+a tier for them.
+
+So the split is defensible. What is not defensible is that it is **invisible**:
+nothing in the codebase says which alarms take which path, and "the router
+never pages for dev" reads as "nothing pages for dev" until somebody's phone
+disagrees.
+
+### What to decide when this is picked up
+
+1. **Which alarms legitimately bypass the router?** Probably: platform
+   component health, DLQ depth, credential expiry. Probably not: anything
+   carrying an account id, because that has a tier and the tier should decide.
+2. **Should path 2 be enumerated somewhere readable**, the way
+   `policies/scp/attachments.tsv` enumerates policy attachment? The current
+   answer is recoverable only by reading every template's `AlarmActions`.
+3. **Does the downgrade-only rule want a counterpart?** Path 2 alarms cannot
+   declare a routing class at all. An alarm that wanted to be a digest line has
+   no way to say so and must either page or be silent.
+
+### Not urgent, and not nothing
+
+Nothing is currently mis-paging: B-096 is fixed and the DLQ is drained. The
+risk is the next platform alarm somebody adds, which will inherit path 2 by
+default — because wiring an alarm action is the obvious thing to do and
+routing through the bus is the thing you have to know about.
+
+**Trigger:** the next time a platform-health alarm is added, or before the
+on-call rota covers anybody but Jamie. A second person on the rota is the point
+at which "I know which alarms mean what" stops being a workable answer.
