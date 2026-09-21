@@ -3777,3 +3777,38 @@ refused.
 analysis over CUR is the likely first), since most of the cost here is the
 first query rather than the tenth. Sooner if a tenant requires SSH-path
 evidence for an audit.
+
+## B-102 · Prompt 11.1 is mostly already built, and one part of it is not
+
+**Noted** — 2026-09-21, before starting Phase 11.
+
+Prompt 11.1 asks for five things. Three exist:
+
+| Asked for | State |
+|---|---|
+| `CommercialReadOnly` permission set | Built — `identity/00-commercial-readonly.yaml` |
+| Monthly per-tenant cost report (raw, flat fee, uplift, separately) | Built in 9.2 — `cost/src/report.py` |
+| Delegated Cost Explorer access | Partly: Cost Categories exist in the payer; delegation does not |
+| CUR export to S3 in a dedicated reporting account | **Not built** |
+| Portfolio view by service model | **Not built** |
+
+The cost report is word-for-word the same deliverable as prompt 9.2's last
+line. Built once, and this records that so nobody builds it twice or assumes
+the second mention means something different.
+
+**What is genuinely outstanding:**
+
+*CUR export to a dedicated reporting account.* design 12 puts commercial access
+in its own account precisely so that billing visibility needs no member account
+access at all — "this grant includes NO member account access of any kind". The
+CUR is what makes that possible; without it, answering a cost question means
+reaching somewhere it should not.
+
+*Portfolio view by service model.* design 12's reporting table marks it
+**AltDigital only** — all partners and clients, by service model, with margin
+analysis. It is the report that would answer whether the percentage uplift
+actually covers shared cost, which is the same question B-090 is about. The two
+should be built together or the second will duplicate the first.
+
+**Trigger:** before the first partner invoice, since the per-partner roll-up
+design 12 lists is AltDigital's own invoicing basis and nothing produces it yet.
