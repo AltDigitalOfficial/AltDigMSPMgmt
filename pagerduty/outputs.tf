@@ -79,3 +79,34 @@ output "commercial_business_service_id" {
   description = "What the commercial team subscribes to."
   value       = pagerduty_business_service.commercial.id
 }
+
+# ---------------------------------------------------------------------------
+# Per-tenant outputs, consumed by sync-pagerduty-secrets.sh
+# ---------------------------------------------------------------------------
+# One map rather than one output per tenant, so adding a tenant changes data
+# and never changes this file.
+#
+# `sensitive` on the whole map because routing keys are inside it. That makes
+# the map unprintable as a unit, which is intentional: the sync script reads it
+# with `terraform output -json` and never displays it, and a person running
+# `terraform output` casually gets a redaction rather than a screenful of
+# credentials.
+
+output "tenants" {
+  description = "Per-client business service id and per-app production services with their routing keys. Read by scripts/sync-pagerduty-tenants.sh."
+  sensitive   = true
+  value = {
+    for id, m in module.tenant : id => {
+      business_service_id = m.business_service_id
+      services            = m.services
+      # Carried so the consumer can tell "no production application" from
+      # "the apply did not create one". See modules/tenant/outputs.tf.
+      production_app_count = m.production_app_count
+    }
+  }
+}
+
+output "tenant_count" {
+  description = "How many clients this configuration manages. Unredacted, so a sync run can report what it examined rather than only what it found."
+  value       = length(module.tenant)
+}
