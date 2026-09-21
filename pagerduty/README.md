@@ -21,11 +21,31 @@ this configuration created them, `terraform destroy` would delete people.
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars   # then edit
-export PAGERDUTY_TOKEN=...                     # not a variable, not a file
+../scripts/set-pagerduty-token.sh              # once; stores the API key
 ../scripts/pagerduty-apply.sh                  # plan
 ../scripts/pagerduty-apply.sh --apply
-../scripts/sync-pagerduty-secrets.sh           # key -> Secrets Manager
+../scripts/sync-pagerduty-secrets.sh           # routing key -> Secrets Manager
 ```
+
+`PAGERDUTY_TOKEN` no longer needs exporting. `pagerduty-apply.sh` reads the
+API key from Secrets Manager (`platform/pagerduty/api-token`) and re-reads it
+on every run, so rotation is one command and nothing downstream redeploys. An
+explicit `PAGERDUTY_TOKEN` in the environment still wins, which is the path
+for running a plan as a different or more restricted identity without
+disturbing the stored value.
+
+**Two different PagerDuty credentials live in Secrets Manager and they are not
+interchangeable.** Confusing them produces errors that point nowhere near the
+cause:
+
+| | secret | direction |
+|---|---|---|
+| **API key** | `platform/pagerduty/api-token` | this repository → PagerDuty, to *manage* configuration |
+| **Routing keys** | `platform/pagerduty/routing-key`, `-low` | alarms → PagerDuty, to *raise* incidents |
+
+The API key is stored once by hand. The routing keys are Terraform *outputs* —
+they exist only after an apply, which is why `sync-pagerduty-secrets.sh` runs
+after it and not before.
 
 Then redeploy `alerting/10-alert-topic.yaml` with
 `PagerDutySecretName=platform/pagerduty/routing-key` so it creates the
