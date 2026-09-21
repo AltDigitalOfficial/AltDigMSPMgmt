@@ -78,6 +78,13 @@ GRACE_MINUTES = int(os.environ.get("TELEMETRY_GRACE_MINUTES", "30"))
 SENTINEL_METRIC = os.environ.get("TELEMETRY_SENTINEL", "mem_used_percent")
 SENTINEL_NAMESPACE = os.environ.get("TELEMETRY_NAMESPACE", "CWAgent")
 
+# How far back to look for evidence that this instance ever published.
+#
+# Fourteen days, comfortably past a long weekend plus a patch cycle. Shorter
+# and a instance that was legitimately quiet gets reported as never having
+# published; longer and CloudWatch's own retention starts to matter.
+EVER_LOOKBACK_DAYS = int(os.environ.get("TELEMETRY_EVER_LOOKBACK_DAYS", "14"))
+
 
 # ---------------------------------------------------------------------------
 # design 11's discriminator table, as data
@@ -112,7 +119,34 @@ SCENARIOS = [
                 "visibility finding on top would double-report one event.",
     },
     {
+        # NOT in design 11's table, and required before any of it works.
+        #
+        # An instance that has NEVER published the sentinel does not have a
+        # killed agent -- it has an agent that was installed and never
+        # configured to publish anything. The baseline's SSM association runs
+        # AWS-ConfigureAWSPackage with action Install, which puts the binary on
+        # disk and does not start it with a configuration. B-103.
+        #
+        # Without this row the detector fires on every healthy instance in the
+        # estate, which is the loudest possible way to be useless.
+        #
+        # design 11: "absence is only detectable against a declared
+        # expectation". The expectation is not "this instance is tagged" -- it
+        # is "this instance has published before". Only then does silence mean
+        # something stopped.
+        "name": "agent-never-published",
+        "alive": True, "status_checks": True,
+        "ever_published": False, "telemetry": False,
+        "alarm": False,
+        "note": "This instance has never published the sentinel metric, so "
+                "its silence is not a change. The CloudWatch agent is "
+                "installed by the baseline association but never configured "
+                "to publish, which is a gap in the baseline rather than "
+                "something somebody did. B-103.",
+    },
+    {
         "name": "cloudwatch-agent-killed",
+        "ever_published": True,
         "alive": True, "status_checks": True,
         "traffic": True, "ssm": True, "telemetry": False,
         "alarm": True,
@@ -122,7 +156,7 @@ SCENARIOS = [
     },
     {
         "name": "both-agents-killed-or-path-broken",
-        "alive": True, "status_checks": True,
+        "alive": True, "status_checks": True, "ever_published": True,
         "traffic": True, "ssm": False, "telemetry": False,
         "alarm": True,
         # The row design 11 splits in two and the signals do not.
@@ -161,6 +195,9 @@ class Signals:
         self.traffic = None
         self.ssm = None
         self.telemetry = None
+        # Has this instance EVER published the sentinel? The expectation
+        # design 11 asks absence to be measured against.
+        self.ever_published = None
         self.unreadable = []
 
     def as_dict(self):
@@ -173,6 +210,7 @@ class Signals:
             "traffic": self.traffic,
             "ssm": self.ssm,
             "telemetry": self.telemetry,
+            "ever_published": self.ever_published,
             "unreadable": self.unreadable,
         }
 
@@ -204,7 +242,8 @@ def classify(signals):
 
 
 def _matches(scenario, signals):
-    for field in ("alive", "status_checks", "traffic", "ssm", "telemetry"):
+    for field in ("alive", "status_checks", "traffic", "ssm", "telemetry",
+                  "ever_published"):
         expected = scenario.get(field)
         if expected is None:
             continue
@@ -268,6 +307,21 @@ def gather(ec2, ssm_client, cw, logs_client, instance, region):
         s.telemetry = bool(points.get("Datapoints"))
     except Exception:                              # noqa: BLE001
         s.unreadable.append("sentinel_metric")
+
+    # Has it ever published? Only asked when the recent window is empty,
+    # because the answer only matters then and the lookback is expensive.
+    if s.telemetry is False:
+        try:
+            history = cw.get_metric_statistics(
+                Namespace=SENTINEL_NAMESPACE, MetricName=SENTINEL_METRIC,
+                Dimensions=[{"Name": "InstanceId", "Value": s.instance_id}],
+                StartTime=_now() - datetime.timedelta(days=EVER_LOOKBACK_DAYS),
+                EndTime=_now(), Period=3600, Statistics=["Average"])
+            s.ever_published = bool(history.get("Datapoints"))
+        except Exception:                          # noqa: BLE001
+            s.unreadable.append("sentinel_history")
+    else:
+        s.ever_published = True
 
     # The second half of the telemetry signal. design 11: "Log stream
     # staleness check on lastIngestionTime per expected stream. CloudWatch

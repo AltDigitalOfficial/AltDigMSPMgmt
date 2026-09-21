@@ -3812,3 +3812,69 @@ should be built together or the second will duplicate the first.
 
 **Trigger:** before the first partner invoice, since the per-partner roll-up
 design 12 lists is AltDigital's own invoicing basis and nothing produces it yet.
+
+## B-103 · The CloudWatch agent is installed and never configured
+
+**Open** — a baseline gap, found while deploying prompt 10.3. Two controls
+depend on it.
+
+`baseline/50-instrumentation.yaml` installs the agent:
+
+```yaml
+Name: AWS-ConfigureAWSPackage
+Parameters:
+  action: ['Install']
+  name: ['AmazonCloudWatchAgent']
+```
+
+That puts the binary on disk. It does not write a configuration and does not
+start it, so **the agent publishes nothing** — no `mem_used_percent`, no disk
+metrics, no guest logs. Nothing else in the repository configures it; the
+search for `AmazonCloudWatch-ManageAgent` and an agent config document returns
+nothing.
+
+### What depends on it
+
+**Prompt 4.1's memory and disk alarms.** The prompt's own justification was
+"memory and disk alarms are useless without it", and the template comment
+directly above the association says an alarm on `mem_used_percent` with no
+agent "sits in INSUFFICIENT_DATA indefinitely, which in a console full of green
+looks near enough to healthy that nobody investigates". Installing the binary
+does not change that — the metric still never arrives.
+
+**Prompt 10.3's telemetry gap detector**, which uses `mem_used_percent` as its
+sentinel precisely because it exists only when the agent runs. With no
+configuration the sentinel is absent on every instance, and the detector would
+have reported a killed agent on every healthy instance in the estate. The
+loudest possible way to be useless.
+
+### What was done about it in 10.3
+
+Not worked around. The detector gained a row design 11's table does not have:
+an instance that has **never** published the sentinel does not have a killed
+agent, it has an agent that was never started. Absence only means something
+stopped if something was previously going.
+
+That is also what design 11 actually asked for — "absence is only detectable
+against a declared expectation" — and the first implementation had the
+expectation wrong. It used "is tagged `platform-managed`", which is a statement
+about intent. The expectation that works is "has published before", which is a
+statement about observed fact.
+
+So the detector is correct either way, and reports the never-published case as
+a configuration gap pointing here rather than as an incident.
+
+### The fix
+
+A second SSM association running `AmazonCloudWatch-ManageAgent` with
+`action: configure` and a config document in Parameter Store, listing at
+minimum `mem_used_percent` and `disk_used_percent`.
+
+Deliberately not bolted on during 10.3. It belongs to the instrumentation layer,
+it wants deciding alongside which guest metrics the baseline actually alarms on,
+and doing it here would have buried a baseline change inside a detector commit.
+
+**Trigger:** before any memory or disk alarm is created, since those are
+inert until it exists — or before the telemetry detector is relied on to
+distinguish a killed agent from one that never ran, since today it can only say
+which by pointing at this entry.

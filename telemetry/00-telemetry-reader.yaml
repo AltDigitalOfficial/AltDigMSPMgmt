@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the read-only role the telemetry gap scan
+  assumes in each account (prompt 10.3). Observes; cannot change anything.
+
+# ---------------------------------------------------------------------------
+# Why this is not PlatformQuorumReader
+# ---------------------------------------------------------------------------
+# The telemetry stack's first draft said the two could share a role, on the
+# reasoning that both need cross-account read and neither should be able to
+# change anything -- so a second role would be a second thing to audit for the
+# same guarantee.
+#
+# That was an assumption made before checking what each actually needs, and it
+# was wrong in both directions:
+#
+#   PlatformQuorumReader holds cloudtrail:LookupEvents and nothing else.
+#   The telemetry scan needs ec2:Describe*, ssm:Describe*, cloudwatch metric
+#   reads and logs:Describe* -- and no CloudTrail at all except for the
+#   Session Manager attribution.
+#
+# Sharing would have meant widening a deliberately minimal role to a general
+# observation grant, which loses the property that made it worth pointing at:
+# that the component checking whether quorum actions were approved can see
+# almost nothing else.
+#
+# Two roles, each minimal, each named for what it does. The cost is one more
+# stack instance per account; the alternative was one role whose name stopped
+# describing it.
+#
+# ---------------------------------------------------------------------------
+# Read-only, and deliberately not "read-only plus restart the agent"
+# ---------------------------------------------------------------------------
+# The obvious next feature is having the scan reinstall an agent it finds
+# stopped. It must not.
+#
+# design 11 frames the finding as something a human acts on, and the reason is
+# in the attribution section: the interesting question is WHO stopped it, not
+# getting it running again. An automated reinstall destroys the state somebody
+# would investigate and turns a signal into a silent self-healing loop -- the
+# agent goes down, comes back, goes down, and nobody ever sees a finding that
+# persisted long enough to matter.
+#
+# The SSM association already reinstalls on a daily schedule. That is the
+# repair path, and a gap surviving it is precisely the escalation signal.
+
+Parameters:
+
+  TelemetryScanRoleArn:
+    Type: String
+    AllowedPattern: '^arn:aws:iam::\d{12}:role/.+$'
+    Description: >-
+      The Audit-account role that runs the scan. Exactly one principal, named
+      in full.
+
+Resources:
+
+  TelemetryReaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformTelemetryReader
+      Description: >-
+        Read-only observation for the telemetry gap scan. Holds no permission
+        to start, stop, restart or reconfigure anything.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OnlyTheTelemetryScan
+            Effect: Allow
+            Principal:
+              AWS: !Ref TelemetryScanRoleArn
+            Action: sts:AssumeRole
+      Tags:
+        - Key: platform:component
+          Value: telemetry
+        - Key: platform:managed-by
+          Value: altdigital
+
+  TelemetryReaderPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ObserveInstanceHealth
+      Roles:
+        - !Ref TelemetryReaderRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+
+          # design 11's signal-dependency table, one permission per signal.
+          #
+          # Describe* only. Not Get*, not Start*, not Send* -- the scan reads
+          # four facts and forms an opinion, and every one of these APIs is a
+          # question rather than an instruction.
+          - Sid: InstanceStateAndStatusChecks
+            Effect: Allow
+            Action:
+              - 'ec2:DescribeInstances'
+              - 'ec2:DescribeInstanceStatus'
+            Resource: '*'
+
+          - Sid: SsmPingAndAssociationHistory
+            Effect: Allow
+            Action:
+              - 'ssm:DescribeInstanceInformation'
+              - 'ssm:DescribeInstanceAssociationsStatus'
+              - 'ssm:DescribeMaintenanceWindows'
+            Resource: '*'
+
+          # The sentinel metric and the hypervisor traffic metric. Both are
+          # CloudWatch reads and neither can be scoped to a resource: metric
+          # data is not an addressable resource, so '*' is the only
+          # expressible form and the action list is the narrowing.
+          - Sid: SentinelAndTrafficMetrics
+            Effect: Allow
+            Action:
+              - 'cloudwatch:GetMetricStatistics'
+              - 'cloudwatch:ListMetrics'
+            Resource: '*'
+
+          # Log stream staleness. Describe only -- the question is whether
+          # anything arrived, which does not need the contents, and granting
+          # the contents would put this role inside the data plane design 11
+          # keeps developers out of.
+          - Sid: LogStreamStalenessOnly
+            Effect: Allow
+            Action:
+              - 'logs:DescribeLogGroups'
+              - 'logs:DescribeLogStreams'
+            Resource: '*'
+
+          # Session Manager attribution. LookupEvents only, which is the one
+          # CloudTrail call that answers "who started a session" without
+          # granting the trail itself.
+          - Sid: SessionAttribution
+            Effect: Allow
+            Action:
+              - 'cloudtrail:LookupEvents'
+            Resource: '*'
+
+Outputs:
+
+  TelemetryReaderRoleArn:
+    Description: Assumed by the telemetry gap scan in the Audit account.
+    Value: !GetAtt TelemetryReaderRole.Arn

@@ -19,12 +19,17 @@ Parameters:
 
   MemberReadRoleName:
     Type: String
-    Default: PlatformQuorumReader
+    Default: PlatformTelemetryReader
     Description: >-
-      The read-only role assumed in each account. Shared with the quorum
-      reverse sweep: both need cross-account read and neither should be able to
-      change anything, so a second role would be a second thing to audit for
-      the same guarantee.
+      The read-only role assumed in each account, from
+      telemetry/00-telemetry-reader.yaml.
+
+      NOT PlatformQuorumReader, though an earlier draft said it could be. That
+      role holds cloudtrail:LookupEvents and nothing else; this scan needs
+      ec2, ssm, cloudwatch and logs describes. Sharing would have meant
+      widening a deliberately minimal role into a general observation grant,
+      losing the property worth having -- that the component checking whether
+      quorum actions were approved can see almost nothing else.
 
   GraceMinutes:
     Type: Number
