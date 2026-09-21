@@ -3683,3 +3683,36 @@ same way `validate-policies.sh` does it. The header is now true.
 only because the RCP was expected to appear in the output and did not —
 somebody comparing an intention against a result. That is the same thing that
 caught B-089, and it is not a check, it is a habit.
+
+## B-099 · design 11's discriminator table has two identical rows
+
+**Open** — a documentation gap, not a defect. Found implementing prompt 10.3.
+
+design 11's table for discriminating telemetry loss:
+
+| Scenario | Status checks | Flow logs | SSM ping | CW telemetry |
+|---|---|---|---|---|
+| Network or IAM path broken | Pass | Traffic | Lost | Stops |
+| **Both agents killed** | **Pass** | **Traffic** | **Lost** | **Stops** |
+
+Identical across all four signals. The prompt says to implement the table
+exactly and that other scenarios must not produce the alarm — which is
+followed — but these two are not separable by the signals the table lists.
+
+**Not a problem for the alarm, and a problem for the readout.** Both are a real
+loss of visibility on an instance that is provably alive and passing traffic,
+so raising a finding is correct either way. What would be wrong is naming one
+cause. The finding says both and marks the cause undetermined.
+
+**What would separate them,** if it turns out to matter: a broken IAM path
+leaves the instance reachable by SSM's *hybrid* channel or shows
+`AccessDenied` in its association history, whereas a killed agent leaves the
+process absent with the role intact. Both need a signal the table does not
+include, and neither is worth building before somebody has actually had the
+ambiguity cost them time.
+
+**Suggested for design 11:** either add a fifth column that separates them, or
+merge the two rows and say the cause is undetermined at this level. The current
+form implies a discrimination the signals cannot make, and somebody
+implementing it will either notice — costing an hour — or not, and write a
+detector that asserts a cause it cannot know.
