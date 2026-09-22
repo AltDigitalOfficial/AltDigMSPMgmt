@@ -1480,6 +1480,19 @@ unarmed default is the correct posture, not a limitation.
 
 ## B-046 · The restore test schedule is not validated against the HOOP
 
+**CLOSED 2026-09-22** by prompt 13.4. `interactions.check_window_conflicts`
+takes a `restore_test` window and reports every day on which it falls outside
+the HOOP, with the consequence attached: the restore test is skipped or fails,
+and a restore path that is never exercised is design 05's whole concern.
+
+It is checked at CONFIGURATION time rather than at run time, which is what the
+original entry asked for -- the arithmetic is over two declared schedules and
+needs nothing to be running, so a conflict is answerable at vesting rather
+than discovered by a missed test. `interactions.validate(strict=True)` raises
+rather than recording a note.
+
+The original entry follows.
+
 **Open** — 2026-09-18.
 
 design/14 line 211: restore testing *"must not collide with a turndown window;
@@ -4106,7 +4119,9 @@ a project per tenant, and with it a credential holding site ADMINISTER.
 
 ## B-110 · Provisioning has no deployment, and its two dependencies live in different accounts
 
-**Open** — 2026-09-21.
+**RESOLVED** — 2026-09-21. See the resolution section below; the original
+statement of the problem is kept because the reasoning that rejected the
+cross-account option is still the reason the current arrangement looks odd.
 
 `provisioning/` contains `saga.py`, `deprovision.py` and `jira_tenant.py` and
 **no CloudFormation template**. Nothing is deployed; every test so far has run
@@ -4301,7 +4316,9 @@ fail part way through provisioning a client.
 
 ## B-115 · The commercial PagerDuty resources were committed as "deployed" and never applied
 
-**Open** — 2026-09-21.
+**CLOSED** — 2026-09-21, and it took two passes. The first fix addressed the
+obviously-suspect link and left a chain that still carried no event; see both
+sections below, because the second pass is the more useful lesson.
 
 Commit `f1cf3e7`, *"The client-conversation destination, deployed and proven"*,
 added five PagerDuty resources for design 12's client-conversation event class:
@@ -4528,6 +4545,28 @@ wrong behaviour here. Revisit trigger is tenant count: when routine operation
 reaches a quarter of the threshold, raise it and re-measure.
 
 ## B-118 · cron() schedules are not cadence-checked
+
+**CLOSED 2026-09-22.** `cadence.py` now enumerates cron firings rather than
+refusing them. AWS cron is always UTC and its fields are small sets, so
+counting days in a bounded window and checking each against the expression is
+exact and cheap -- no library, and no month-length approximation that is wrong
+for February.
+
+The window is probed outward until it contains at least `MIN_INTERVALS`
+firings, giving a monthly cron months and a daily cron days. That is the same
+property `interval * MIN_INTERVALS` gives a `rate()` rule, and it is what keeps
+"did not run" distinguishable from "not due yet".
+
+`L`, `W` and `#` remain refused. Treating `L` as a literal would count firings
+on days the rule never fires, and the original reasoning holds: a gap that says
+so is recoverable, one that returns "fine" is not.
+
+**Option 1 below was rejected on reflection.** Converting the containment
+exercise to `rate(30 days)` would trade a predictable monthly date for one
+that drifts through the month and eventually lands on a weekend -- changing the
+platform to suit the checker, for an exercise people plan around.
+
+The original entry follows.
 
 **Open, narrow** — 2026-09-21.
 

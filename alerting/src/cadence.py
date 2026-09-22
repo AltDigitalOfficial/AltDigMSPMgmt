@@ -47,16 +47,26 @@ That is why a daily rule is reported against three days of history rather than
 being quietly skipped, and why a two-minute rule is not evaluated over three
 days, which would hide a six-hour outage inside an acceptable average.
 
-What it will not do
----------------------
-`cron()` schedules are NOT evaluated. Computing the expected firing count of an
-arbitrary cron expression needs a real cron library, which is not available in
-this runtime without adding a dependency, and an approximation would be wrong
-in the direction that matters: a weekly cron would read as six days of silence.
+cron(), by enumeration rather than by approximation
+-----------------------------------------------------
+B-118. The first version refused cron outright, because approximating it is
+wrong in the direction that destroys the control: a healthy WEEKLY job would
+read as six days of silence, and a check that cries wolf gets muted.
 
-They are reported as `not_evaluated` with the reason, and counted in the
-summary. A gap that says so is recoverable; a gap that returns "fine" is the
-thing this module exists to prevent. B-118.
+The tempting alternative was to convert the one cron rule in the estate to
+`rate(30 days)`. That trades a predictable monthly date for a schedule that
+drifts through the month and eventually lands on a weekend -- changing the
+platform to suit the checker, for a containment exercise people plan around.
+
+So cron is evaluated by ENUMERATING the firings in the window. AWS cron is
+always UTC and its fields are small sets, so counting days in a bounded window
+and checking each against the expression is cheap and exact. No library, no
+approximation, and no arithmetic that is subtly wrong for February.
+
+Anything this parser does not understand -- `L`, `W`, `#` -- is REFUSED rather
+than guessed at, which preserves the original entry's property: a gap that
+says so is recoverable, and one that returns "fine" is what this module exists
+to prevent.
 """
 import datetime
 import json
@@ -97,6 +107,101 @@ UNDER_FRACTION = float(os.environ.get("CADENCE_UNDER_FRACTION", "0.5"))
 MIN_INTERVALS = int(os.environ.get("CADENCE_MIN_INTERVALS", "3"))
 
 _RATE = re.compile(r"^rate\((\d+)\s+(minute|minutes|hour|hours|day|days)\)$")
+_CRON = re.compile(r"^cron\((.+)\)$")
+
+_DOW = {"SUN": 1, "MON": 2, "TUE": 3, "WED": 4, "THU": 5, "FRI": 6, "SAT": 7}
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"])}
+
+# Characters this parser does not implement. Refused rather than ignored: `L`
+# in a day-of-month field means "last day", and silently treating it as a
+# literal would count firings on days the rule never fires.
+_UNSUPPORTED = ("L", "W", "#")
+
+
+class CronUnsupported(Exception):
+    """A cron expression this parser will not guess at."""
+
+
+def _field(spec, low, high, names=None):
+    """One cron field as a set of ints. Raises rather than approximating."""
+    spec = spec.strip().upper()
+    if any(ch in spec for ch in _UNSUPPORTED):
+        raise CronUnsupported(
+            f"'{spec}' uses L, W or #, which this parser does not implement. "
+            "Guessing would count firings on days the rule never fires.")
+    if spec in ("*", "?"):
+        return set(range(low, high + 1))
+
+    out = set()
+    for part in spec.split(","):
+        step = 1
+        if "/" in part:
+            part, raw_step = part.split("/", 1)
+            step = int(raw_step)
+            if part in ("*", "?", ""):
+                part = f"{low}-{high}"
+        if names:
+            for name, value in names.items():
+                part = part.replace(name, str(value))
+        if "-" in part:
+            start, end = part.split("-", 1)
+            values = range(int(start), int(end) + 1, step)
+        else:
+            values = range(int(part), high + 1, step) if step > 1 else [int(part)]
+        out.update(v for v in values if low <= v <= high)
+    return out
+
+
+def cron_fields(expression):
+    """AWS cron, as six sets. Always UTC -- EventBridge cron has no timezone."""
+    match = _CRON.match((expression or "").strip())
+    if not match:
+        return None
+    parts = match.group(1).split()
+    if len(parts) != 6:
+        raise CronUnsupported(
+            f"AWS cron takes six fields and this has {len(parts)}.")
+    minute, hour, dom, month, dow, year = parts
+    return {
+        "minute": _field(minute, 0, 59),
+        "hour": _field(hour, 0, 23),
+        "dom": None if dom.strip() in ("?", "*") else _field(dom, 1, 31),
+        "month": _field(month, 1, 12, _MONTHS),
+        # AWS day-of-week is 1=Sunday.
+        "dow": None if dow.strip() in ("?", "*") else _field(dow, 1, 7, _DOW),
+        "year": _field(year, 1970, 2199),
+    }
+
+
+def cron_firings(expression, start, end):
+    """How many times this cron fires in [start, end).
+
+    Enumerates days and, for each matching day, counts the hour/minute
+    combinations inside the window. A 93-day window is 93 iterations of a few
+    set lookups -- cheap enough that exactness costs nothing.
+    """
+    fields = cron_fields(expression)
+    if fields is None:
+        return None
+
+    count = 0
+    day = start.astimezone(datetime.timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    while day <= end:
+        # AWS: Sunday is 1. Python's isoweekday has Monday 1, Sunday 7.
+        aws_dow = (day.isoweekday() % 7) + 1
+        if (day.year in fields["year"] and day.month in fields["month"]
+                and (fields["dom"] is None or day.day in fields["dom"])
+                and (fields["dow"] is None or aws_dow in fields["dow"])):
+            for hour in fields["hour"]:
+                for minute in fields["minute"]:
+                    moment = day.replace(hour=hour, minute=minute)
+                    if start <= moment < end:
+                        count += 1
+        day += datetime.timedelta(days=1)
+    return count
 
 _UNIT_SECONDS = {
     "minute": 60, "minutes": 60,
@@ -226,12 +331,60 @@ def assess(rule, now=None):
                        "measure, it has outlived the incident."}
 
     if interval is None:
-        return {**rule, "verdict": "not_evaluated", "expected": None,
-                "observed": None,
-                "why": f"cadence not derivable from '{rule['schedule']}'. "
-                       "cron() expressions need a real cron library to expand "
-                       "and an approximation would report a healthy weekly job "
-                       "as six days of silence (B-118)."}
+        # cron. Probe outward until the window contains enough firings to
+        # reason about, the same property `interval * MIN_INTERVALS` gives a
+        # rate() rule: a daily cron gets days and a monthly one gets months,
+        # so "did not run" stays distinguishable from "not due yet".
+        try:
+            window_seconds = None
+            for candidate_days in (1, 2, 8, 35, 100):
+                candidate = candidate_days * 86400
+                firings = cron_firings(
+                    rule["schedule"],
+                    now - datetime.timedelta(seconds=candidate), now)
+                if firings is not None and firings >= MIN_INTERVALS:
+                    window_seconds = candidate
+                    break
+            if window_seconds is None:
+                # Fires less often than roughly monthly. Evaluated over the
+                # widest window rather than skipped -- silence still means
+                # something, there is just less of it to reason from.
+                window_seconds = 100 * 86400
+        except CronUnsupported as exc:
+            return {**rule, "verdict": "not_evaluated", "expected": None,
+                    "observed": None,
+                    "why": f"{exc} Refused rather than approximated (B-118)."}
+
+        start = now - datetime.timedelta(seconds=window_seconds)
+        expected = cron_firings(rule["schedule"], start, now)
+        observed, first_seen = triggered_series(
+            rule["name"], start, now, 3600)
+
+        base = {**rule, "window_seconds": window_seconds,
+                "measured_over_seconds": window_seconds,
+                "expected": expected, "observed": observed}
+
+        if observed is None:
+            return {**base, "verdict": "no_metric",
+                    "why": "CloudWatch has no TriggeredRules datapoints for "
+                           "this rule in the window. That is not zero firings "
+                           "-- a rule that has never fired publishes nothing "
+                           "at all -- so this is an absence of evidence."}
+        if expected and observed == 0:
+            return {**base, "verdict": "silent",
+                    "why": f"expected {expected} firing(s) in "
+                           f"{window_seconds // 86400}d and observed none."}
+        if expected and observed > expected * OVER_MULTIPLE:
+            return {**base, "verdict": "over",
+                    "why": f"fired {observed:.0f} times against {expected} "
+                           f"expected, more than {OVER_MULTIPLE}x."}
+        if expected >= MIN_INTERVALS and observed < expected * UNDER_FRACTION:
+            return {**base, "verdict": "under",
+                    "why": f"fired {observed:.0f} times against {expected} "
+                           f"expected, under {UNDER_FRACTION:.0%}."}
+        return {**base, "verdict": "ok",
+                "why": f"fired {observed:.0f} times against {expected} "
+                       "expected."}
 
     window_seconds = max(interval * MIN_INTERVALS, 3600)
     start = now - datetime.timedelta(seconds=window_seconds)
