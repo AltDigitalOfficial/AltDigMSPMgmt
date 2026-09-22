@@ -815,6 +815,24 @@ def run(event, context=None):
         write_manifest(account_id, manifest)
         out["manifest_written"] = True
 
+    # Publish the state LAST, after the work and the manifest. Everything else
+    # in the platform reads this to decide whether silence is expected
+    # (prompt 13.4), and a state saying `down` while instances were still
+    # stopping would start alarm suppression before the alarms it suppresses.
+    #
+    # Published on a dry run too, with the dry_run flag in the detail, so that
+    # a reader can tell "nothing was scheduled down" from "nothing was
+    # actually done".
+    if not dry_run:
+        import state
+        out["state"] = state.publish(
+            state.DOWN if action == "turndown" else state.UP,
+            reason=f"{action} via {reason}",
+            detail={"tier": tier,
+                    "stopped": {k: len(v) for k, v in out.items()
+                                if k in ("asgs", "ecs", "rds", "ec2")
+                                and isinstance(v, list)}})
+
     print(json.dumps(out, default=str))
     return out
 

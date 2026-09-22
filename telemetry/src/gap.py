@@ -101,13 +101,46 @@ EVER_LOOKBACK_DAYS = int(os.environ.get("TELEMETRY_EVER_LOOKBACK_DAYS", "14"))
 # where design 11's table says a state event settles it before the other
 # columns are consulted.
 
+# Published by the HOOP scheduler in each scheduled account. prompt 13.4: a
+# scheduled stop must be an explicitly recognised state rather than something
+# that merely happens to look benign.
+HOOP_STATE_PARAM = os.environ.get("HOOP_STATE_PARAM", "/platform/hoop/state")
+
 SCENARIOS = [
     {
-        "name": "instance-stopped-or-terminated",
-        "alive": False, "traffic": None, "ssm": None, "telemetry": False,
+        # design 14, prompt 13.4: "a scheduled stop must be an explicitly
+        # recognised state, not left to look like an anomaly."
+        #
+        # The row this replaces already did not alarm, so a turndown was never
+        # a false positive. What it also did not do was distinguish a stop the
+        # platform performed from one nobody can account for -- both were
+        # "expected consequence, not a finding". An instance somebody stopped
+        # by accident, or that crashed into stopped, was exactly as silent as
+        # a scheduled turndown.
+        #
+        # Splitting on the HOOP state fixes both directions at once.
+        "name": "instance-stopped-on-schedule",
+        "alive": False, "scheduled_down": True,
+        "traffic": None, "ssm": None, "telemetry": False,
         "alarm": False,
-        "note": "The instance is not running. Telemetry stopping is the "
-                "expected consequence, not a finding.",
+        "note": "The environment is scheduled down and the instance is "
+                "stopped. Telemetry stopping is the expected consequence of a "
+                "turndown the platform performed, not a finding.",
+    },
+    {
+        "name": "instance-stopped-off-schedule",
+        "alive": False, "scheduled_down": False,
+        "traffic": None, "ssm": None, "telemetry": False,
+        # Reported, not paged. A stopped non-production instance is not an
+        # availability incident, and the tier's own routing decides how loud
+        # this gets -- but it must not be silent, because "nobody knows why
+        # this is off" is the state that persists for weeks.
+        "alarm": True,
+        "note": "The instance is stopped and the environment is NOT scheduled "
+                "down. Something stopped it that the platform did not: a "
+                "person, a failed turnup that left it behind, or a crash that "
+                "ended in the stopped state. Silence here is expected; the "
+                "STOP is not.",
     },
     {
         "name": "os-hung-or-crashed",
@@ -198,6 +231,16 @@ class Signals:
         # Has this instance EVER published the sentinel? The expectation
         # design 11 asks absence to be measured against.
         self.ever_published = None
+        # Is the ENVIRONMENT scheduled down right now? prompt 13.4. Not a
+        # property of the instance: a HOOP applies to the whole account, and
+        # every instance in it shares the answer. Read once per sweep rather
+        # than per instance.
+        #
+        # Defaults False rather than None so that an estate with no scheduler
+        # deployed classifies exactly as it did before -- a stopped instance
+        # nobody scheduled is reported, which is the behaviour that was
+        # missing.
+        self.scheduled_down = False
         self.unreadable = []
 
     def as_dict(self):
@@ -206,6 +249,7 @@ class Signals:
             "account_id": self.account_id,
             "region": self.region,
             "alive": self.alive,
+            "scheduled_down": self.scheduled_down,
             "status_checks": self.status_checks,
             "traffic": self.traffic,
             "ssm": self.ssm,
@@ -242,7 +286,8 @@ def classify(signals):
 
 
 def _matches(scenario, signals):
-    for field in ("alive", "status_checks", "traffic", "ssm", "telemetry",
+    for field in ("alive", "scheduled_down", "status_checks", "traffic",
+                  "ssm", "telemetry",
                   "ever_published"):
         expected = scenario.get(field)
         if expected is None:
@@ -257,7 +302,8 @@ def _matches(scenario, signals):
 # ---------------------------------------------------------------------------
 
 
-def gather(ec2, ssm_client, cw, logs_client, instance, region):
+def gather(ec2, ssm_client, cw, logs_client, instance, region,
+           scheduled_down=False):
     """Observe one instance. Reads only; judges nothing.
 
     A signal that cannot be read is recorded as unreadable rather than assumed.
@@ -265,14 +311,24 @@ def gather(ec2, ssm_client, cw, logs_client, instance, region):
     exact signature this module exists to detect -- the platform reporting an
     agent killed because it could not see the metric. B-042 and its four
     successors, in the place where that mistake would be most expensive.
+
+    `scheduled_down` is passed in rather than read here: it is a property of
+    the account, identical for every instance in the sweep, and reading it per
+    instance would be one Parameter Store call per instance to learn the same
+    fact.
     """
     s = Signals(instance["InstanceId"], instance.get("_account"), region)
+    s.scheduled_down = bool(scheduled_down)
 
     state = (instance.get("State") or {}).get("Name")
     s.alive = state == "running"
     if not s.alive:
         # design 11's first row settles on the state event. No point asking the
         # other three, and asking would produce noise on every scale-in.
+        #
+        # Which of the two stopped rows applies is decided by scheduled_down,
+        # already set above: a stop the platform performed is expected, and a
+        # stop nobody can account for is reported (prompt 13.4).
         s.telemetry = False
         return s
 
@@ -643,6 +699,24 @@ def scan(event=None, context=None):
                                "problem": f"{type(exc).__name__}"})
             continue
 
+        # Once per account, not once per instance. A HOOP applies to the
+        # whole environment, so every instance in this sweep shares the
+        # answer -- and reading it per instance would be one Parameter Store
+        # call each to learn the same fact.
+        #
+        # Absent reads as "up", which is the safe direction: an environment
+        # wrongly believed up reports a stopped instance somebody looks at,
+        # while one wrongly believed down hides it. See scheduling/src/state.py.
+        account_scheduled_down = False
+        try:
+            hoop_state = ssm_c.get_parameter(
+                Name=HOOP_STATE_PARAM).get("Parameter") or {}
+            account_scheduled_down = (
+                json.loads(hoop_state.get("Value") or "{}").get("state")
+                == "down")
+        except Exception:                          # noqa: BLE001
+            pass
+
         for r in reservations:
             for inst in r.get("Instances") or []:
                 inst["_account"] = account_id
@@ -653,7 +727,8 @@ def scan(event=None, context=None):
                     suppressed_count += 1
                     continue
 
-                sig = gather(ec2, ssm_c, cw, logs_c, inst, region)
+                sig = gather(ec2, ssm_c, cw, logs_c, inst, region,
+                             scheduled_down=account_scheduled_down)
                 scenario, note = classify(sig)
                 if not scenario or not scenario.get("alarm"):
                     continue

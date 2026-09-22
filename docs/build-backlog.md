@@ -4685,3 +4685,56 @@ immediately, rather than monthly and by inference.
 
 **Trigger:** the first tenant running a database the platform did not
 provision, or the first monthly cold-cycle exercise, whichever comes first.
+
+## B-123 · Three of design 14's eight scheduling interactions are not wired
+
+**Open** — 2026-09-21.
+
+`scheduling/src/interactions.py` carries a `WIRING` table recording where each
+of design 14's eight interactions is implemented. Three are not, and the table
+says so rather than leaving a reader to conclude from silence.
+
+### canaries — not wired
+
+design 14: *"Paused during down, resumed and used as the turnup validation."*
+
+Pausing needs `synthetics:UpdateCanary` in the tenant account; resume-as-
+validation needs to READ the canary result, which is the same cross-account
+gap as B-112 and the reason `cycle.functional_validation` reports
+undeterminable.
+
+**Cost of leaving it:** a canary running against a scheduled-down environment
+fails every run, all night, every night. That trains people to ignore canary
+alerts — which is worse than the canary not existing, because the canary is
+the only check that says the service *works* rather than that it is running.
+
+### change reconciliation — not wired
+
+design 14: *"A deployment attempted against a stopped environment is a
+legitimate failure, not a finding."*
+
+`change/src/reconcile.py` would need to read the HOOP state and classify a
+deployment failure during scheduled down as expected. Today it reports a
+failed-or-unapproved deployment, which is a finding about a person who did
+nothing wrong.
+
+**Cost of leaving it:** the finding is wrong, and being wrong about somebody's
+deployment is how a compliance control loses the room.
+
+### alarm actions — partial
+
+design 14: *"Suppressed during scheduled down, or every turndown pages."*
+
+The state is published and the gap detector reads it, but alarm *actions* are
+not disabled on turndown. The exposure is narrower than it looks: most alarms
+on a stopped instance go `INSUFFICIENT_DATA` and do not fire.
+
+The exception is any alarm with `TreatMissingData: breaching` — which now
+includes `platform-cadence-sweep-stalled`, deliberately. That one lives in
+Audit and is not affected by a tenant turndown, but the pattern will recur the
+moment a tenant-side absence alarm is written.
+
+**Trigger for all three:** the first tenant with a HOOP. None of them is
+reachable before that — there is no tenant canary, no tenant deployment and no
+tenant alarm to suppress — which is why they are recorded rather than built
+against an environment that cannot exercise them.

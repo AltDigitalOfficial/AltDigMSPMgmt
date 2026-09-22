@@ -81,6 +81,15 @@ Parameters:
       Where turndown records what it stopped. Read by the turnup verification
       to assert the full expected set rather than merely the absence of errors.
 
+  StateParam:
+    Type: String
+    Default: /platform/hoop/state
+    Description: >-
+      Whether this environment is scheduled down. Published by the scheduler
+      and read by everything else that needs to know, rather than each system
+      computing the window itself — see scheduling/src/state.py on why eight
+      independent readings of one HOOP disagree.
+
   AlertBusName:
     Type: String
     Default: platform-alerts
@@ -190,12 +199,18 @@ Resources:
           # at all, which is the point: a cross-account role able to write the
           # registry from every scheduled account in the estate is a large
           # trust relationship to buy one lookup.
-          - Sid: Manifest
+          - Sid: ManifestAndState
             Effect: Allow
             Action:
               - ssm:GetParameter
               - ssm:PutParameter
-            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ManifestParam}'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ManifestParam}'
+              # The published state, read by alarm suppression, the telemetry
+              # gap detector and cost reporting (prompt 13.4). Two parameters
+              # named individually rather than a path wildcard: the scheduler
+              # writes exactly these two and nothing else under /platform.
+              - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${StateParam}'
 
           - Sid: EmitFindings
             Effect: Allow
@@ -245,6 +260,7 @@ Resources:
           HOOP_ACCOUNT_TIER: !Ref AccountTier
           HOOP_ACCOUNT_KIND: !Ref AccountKind
           HOOP_MANIFEST_PARAM: !Ref ManifestParam
+          HOOP_STATE_PARAM: !Ref StateParam
           ALERT_BUS_NAME: !Ref AlertBusName
           HOOP_EXERCISE_ACCOUNT_ID: !Ref ExerciseAccountId
 
@@ -278,6 +294,7 @@ Resources:
           HOOP_ACCOUNT_TIER: !Ref AccountTier
           HOOP_ACCOUNT_KIND: !Ref AccountKind
           HOOP_MANIFEST_PARAM: !Ref ManifestParam
+          HOOP_STATE_PARAM: !Ref StateParam
           ALERT_BUS_NAME: !Ref AlertBusName
           HOOP_EXERCISE_ACCOUNT_ID: !Ref ExerciseAccountId
 

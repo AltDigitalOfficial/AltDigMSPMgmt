@@ -37,7 +37,7 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 
-for MODULE in hoop cycle; do
+for MODULE in hoop cycle state interactions; do
   cp "${REPO_ROOT}/scheduling/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
 done
 
