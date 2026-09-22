@@ -134,11 +134,90 @@ def build(records, org_accounts):
     return definitions, unregistered
 
 
+
+# The two dimensions the bill rolls up along. design 15, "Billing rolls up
+# twice": by client, for the partner's invoicing to their clients, and by
+# partner, for AltDigital's invoicing to the partner.
+#
+# Named here rather than inferred from DIMENSIONS because the roll-up pair is a
+# commercial fact, not a property of the dimension list. Adding a seventh
+# dimension should not silently enrol it in an invoice.
+ROLLUP_DIMENSIONS = ("Tenant", "Partner")
+
+
+def rollup_check(records, org_accounts):
+    """Does every account appear in BOTH roll-ups, and over what population?
+
+    An account carrying a `client` but no `partner` is not an error anywhere in
+    this file's existing output -- it lands in `Tenant$<client>` and in
+    `Partner$unregistered`, and both categories look healthy. The bill still
+    reaches the partner's client and silently leaves AltDigital's invoice to
+    the partner. Nothing else in the platform would notice: the spend is
+    allocated, just to the wrong one of two invoices.
+
+    Why the population is returned and not just the verdict
+    --------------------------------------------------------
+    Run today this returns zero gaps, and it will keep returning zero gaps
+    until the first tenant account is vested, because every account in the
+    Organization is one of AltDigital's own. "Zero gaps across 0 tenant
+    accounts" and "zero gaps across 40" are the same verdict and completely
+    different facts, and a check that cannot tell them apart is the failure
+    this codebase keeps meeting -- it reports `checked and fine` when it means
+    `there was nothing to check`.
+
+    So the caller gets the counts and prints them. A reader seeing
+    `0 gap(s) across 0 tenant account(s)` knows to disbelieve the reassurance.
+    """
+    by_account = {}
+    for item in records:
+        if _value(item, "record_type") != "ACCOUNT":
+            continue
+        account_id = _value(item, "account_id")
+        if account_id:
+            by_account[account_id] = item
+
+    gaps = []
+    for account_id, record in sorted(by_account.items()):
+        client = _value(record, "client")
+        partner = _value(record, "partner")
+        if bool(client) == bool(partner):
+            continue
+        present, absent = (("client", "partner") if client
+                           else ("partner", "client"))
+        gaps.append({
+            "account_id": account_id,
+            "has": present,
+            "missing": absent,
+            "why": "this account rolls up by %s and not by %s, so its spend "
+                   "appears on one of the two invoices and falls into "
+                   "`%s` on the other."
+                   % (present, absent, UNREGISTERED),
+        })
+
+    # `shared` is AltDigital's own platform cost, which design 10 absorbs into
+    # the uplift rather than allocating. Counted separately so that a estate
+    # made entirely of shared accounts cannot be mistaken for a tenant estate
+    # with nothing wrong with it.
+    tenant_accounts = [a for a, r in by_account.items()
+                       if _value(r, "kind") != "shared"]
+
+    return {
+        "dimensions": list(ROLLUP_DIMENSIONS),
+        "accounts_examined": len(by_account),
+        "tenant_accounts": len(tenant_accounts),
+        "shared_accounts": len(by_account) - len(tenant_accounts),
+        "unregistered_accounts": len(set(org_accounts) - set(by_account)),
+        "gaps": gaps,
+    }
+
+
 def main():
     payload = json.load(sys.stdin)
-    definitions, unregistered = build(
-        payload.get("registry") or [], payload.get("org_accounts") or [])
-    json.dump({"definitions": definitions, "unregistered": unregistered},
+    registry = payload.get("registry") or []
+    org_accounts = payload.get("org_accounts") or []
+    definitions, unregistered = build(registry, org_accounts)
+    json.dump({"definitions": definitions, "unregistered": unregistered,
+               "rollup": rollup_check(registry, org_accounts)},
               sys.stdout)
 
 

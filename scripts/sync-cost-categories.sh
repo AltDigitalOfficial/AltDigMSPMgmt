@@ -101,6 +101,44 @@ log "  account    : management (${PLATFORM_MGMT_ACCOUNT_ID})"
 log "  categories : ${NAMES}"
 hr
 
+# --- the two-level roll-up ------------------------------------------------
+#
+# design 15: the bill rolls up twice, by client for the partner's invoicing and
+# by partner for AltDigital's. An account carrying one and not the other is
+# allocated on both categories and wrong on one invoice, which no other check
+# here would report.
+#
+# The POPULATION is printed alongside the verdict deliberately. Until the first
+# tenant account is vested this reports zero gaps over zero tenant accounts,
+# and a reader needs to see the second number to know what the first one is
+# worth.
+"${PY}" -c "
+import json,sys
+r=json.load(open(sys.argv[1],encoding='utf-8'))['rollup']
+print('%d|%d|%d|%d' % (len(r['gaps']), r['tenant_accounts'],
+                       r['shared_accounts'], r['accounts_examined']))
+for g in r['gaps']:
+    print('GAP %s has %s, missing %s' % (g['account_id'], g['has'], g['missing']))
+" "$(win_path "${WORK}/out.json")" > "${WORK}/rollup.txt"
+
+ROLLUP_HEAD="$(head -n 1 "${WORK}/rollup.txt" | no_cr)"
+IFS='|' read -r R_GAPS R_TENANT R_SHARED R_TOTAL <<<"${ROLLUP_HEAD}"
+
+log "  roll-up    : ${R_GAPS} gap(s) across ${R_TENANT} tenant and ${R_SHARED} shared account(s)"
+if [[ "${R_GAPS}" != "0" ]]; then
+  warn "Accounts that roll up on one invoice and not the other:"
+  grep '^GAP ' "${WORK}/rollup.txt" | no_cr | while read -r _ ACC _ HAS _ MISSING; do
+    warn "    ${ACC}  has ${HAS}, missing ${MISSING}"
+  done
+  warn "Their spend reaches one of the two invoices and lands in"
+  warn "'unregistered' on the other. Fix with scripts/registry.sh put-account."
+  hr
+elif [[ "${R_TENANT}" == "0" ]]; then
+  # Not a warning. A statement of what the zero above is worth.
+  info "No tenant accounts exist yet, so the roll-up check passed over"
+  log "  AltDigital's own ${R_SHARED} shared account(s) and nothing else."
+fi
+
 if [[ -n "${UNREGISTERED}" ]]; then
   # Loud, and not fatal. An unregistered account is a real finding -- newly
   # vested and not yet recorded, or something nobody meant to create -- but
