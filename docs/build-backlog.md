@@ -4658,3 +4658,30 @@ which is exactly what happened here.
 **Trigger:** before the first UAT environment is vested, or at the third
 template that enumerates tier names, whichever comes first. Two is a
 coincidence; three is a convention nobody decided on.
+
+## B-122 · Data integrity across a HOOP cycle needs a per-tenant query set
+
+**Open** — 2026-09-21.
+
+design 14 requires, monthly: *"Row counts and checksums consistent before and
+after"* a full turndown/turnup cycle.
+
+`scheduling/src/cycle.py` reports this as **undeterminable** rather than
+implementing it. Checking integrity requires knowing which tables matter in an
+application the platform did not build and cannot introspect safely, and a
+generic implementation would check whatever happened to be easy to count —
+then report consistency, which is worse than reporting nothing.
+
+**What it needs.** A per-tenant query set supplied at onboarding: a handful of
+statements whose results should be stable across a stop and start. That is
+questionnaire territory rather than code, and the customer's engineers are the
+only people who know which tables answer the question.
+
+**Why it is not urgent.** A HOOP stops compute and leaves storage untouched;
+there is no mechanism by which a correct turndown loses rows. The check exists
+to catch the *incorrect* turndown — a terminated instance, a volume detached —
+and `validate_turndown` already catches both of those directly and
+immediately, rather than monthly and by inference.
+
+**Trigger:** the first tenant running a database the platform did not
+provision, or the first monthly cold-cycle exercise, whichever comes first.

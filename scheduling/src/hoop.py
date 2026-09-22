@@ -604,6 +604,67 @@ def _emit(account_id, name, cause, detail):
 
 
 # ---------------------------------------------------------------------------
+# The manifest: what turndown did, so turnup can be verified against it
+# ---------------------------------------------------------------------------
+# scheduling/src/cycle.py asserts the FULL expected set after a turnup,
+# because "no errors" is satisfied by a turnup that started three of five
+# services. Asserting a full set needs the set declared, and this is the
+# declaration -- derived from what turndown actually recorded rather than
+# maintained beside it, so it cannot drift and a resource added between
+# turndown and turnup is correctly absent from the expectation.
+
+def write_manifest(account_id, manifest):
+    """Record what turndown stopped, and what it left alone.
+
+    Written to the registry rather than held in the invocation, because turnup
+    happens hours later in a different execution and frequently on a different
+    day.
+    """
+    dynamodb.update_item(
+        TableName=REGISTRY_TABLE,
+        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "META"}},
+        UpdateExpression=("SET hoop_manifest = :m, hoop_manifest_at = :t, "
+                          "updated_at = :t"),
+        ExpressionAttributeValues={
+            ":m": {"S": json.dumps(manifest, default=str, sort_keys=True)},
+            ":t": {"S": _iso(_now())}},
+        ConditionExpression="attribute_exists(PK)")
+
+
+def read_manifest(account_id):
+    got = dynamodb.get_item(
+        TableName=REGISTRY_TABLE,
+        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "META"}})
+    item = got.get("Item") or {}
+    raw = (item.get("hoop_manifest") or {}).get("S")
+    if not raw:
+        return None, None
+    return json.loads(raw), (item.get("hoop_manifest_at") or {}).get("S")
+
+
+def build_manifest(turndown_result):
+    """The expected set, derived from what turndown actually did.
+
+    Includes resources turndown SKIPPED because they were already stopped:
+    they are still expected to be running after a turnup if they were running
+    before... which they were not. So they are recorded separately and
+    explicitly excluded from the turnup expectation, because bringing up
+    something that was deliberately stopped is its own kind of wrong.
+    """
+    return {
+        "recorded_at": _iso(_now()),
+        "asgs": {a["asg"]: a["prior"] for a in turndown_result.get("asgs") or []},
+        "ecs": {s["service"]: s["prior_desired"]
+                for s in turndown_result.get("ecs") or []},
+        "rds": [d["db"] for d in turndown_result.get("rds") or []],
+        "ec2": [i["instance"] for i in turndown_result.get("ec2") or []],
+        # Not expected back up. Recorded so the difference between "we did not
+        # start it" and "we failed to start it" is answerable later.
+        "left_stopped": turndown_result.get("skipped") or {},
+    }
+
+
+# ---------------------------------------------------------------------------
 # The two operations, which are one code path
 # ---------------------------------------------------------------------------
 
@@ -635,9 +696,10 @@ def run(event, context=None):
         action = "turnup" if up else "turndown"
         reason = f"schedule ({detail['local_time']})"
 
+    started = _now()
     out = {"record_type": "hoop-run", "account_id": account_id, "tier": tier,
            "action": action, "reason": reason, "dry_run": dry_run,
-           "ran_at": _iso(_now())}
+           "ran_at": _iso(started)}
 
     if action == "turndown":
         # ASGs before their instances: zeroing the group first stops it
@@ -675,6 +737,35 @@ def run(event, context=None):
     # Always, in both directions. An auto-restart is discovered by looking, and
     # the only reliable time to look is whenever this runs.
     out["auto_restart"] = sweep_auto_restarts(account_id, dry_run)
+
+    # Elapsed time is carried out so the verification step can trend it.
+    # design 14 asks for turnup duration to be trended so that creep is
+    # visible before it is a complaint -- a turnup that has gone from four
+    # minutes to nineteen is not an incident on any single morning.
+    out["elapsed_seconds"] = round((_now() - started).total_seconds(), 1)
+
+    # The manifest is written on TURNDOWN only, and only when something was
+    # actually done. It is what the turnup verification asserts against: see
+    # scheduling/src/cycle.py on why "no errors" is not a sufficient check.
+    #
+    # Written after the work rather than before, because a manifest describing
+    # a turndown that did not happen would have the verification looking for
+    # resources that were never stopped.
+    if action == "turndown" and not dry_run:
+        manifest = build_manifest(out)
+        # What must SURVIVE, recorded alongside what was stopped. Without this
+        # the completeness check has no baseline to compare against, and a
+        # volume that disappeared during the HOOP is undetectable.
+        try:
+            manifest["persisted"] = {
+                "volumes": len(ec2.describe_volumes().get("Volumes") or [])}
+        except Exception as exc:                      # noqa: BLE001
+            # Recorded as unknown rather than omitted. An absent key reads as
+            # "nothing to check"; an explicit null reads as "could not look".
+            manifest["persisted"] = {"volumes": None,
+                                     "why": f"{type(exc).__name__}"}
+        write_manifest(account_id, manifest)
+        out["manifest_written"] = True
 
     print(json.dumps(out, default=str))
     return out
