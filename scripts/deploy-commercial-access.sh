@@ -322,7 +322,9 @@ if [[ -n "${GROUP_ID}" && "${DRY_RUN}" != "1" ]]; then
   while read -r member_username; do
     [[ -n "${member_username}" ]] || continue
     # -F -x: the whole line, literally. A substring or regex match would treat
-    # jamie@altdigital.ai as covering notjamie@altdigital.ai.
+    # a.person@example.com as covering not.a.person@example.com. A real
+    # address is not needed to make the point, and CLAUDE.md keeps direct
+    # emails out of the repository.
     if ! printf '%s\n' "${CONFIGURED}" | grep -Fxq -- "${member_username}"; then
       warn "In the group but not in config/identity.env: ${member_username}"
       warn "  Not removed. Remove deliberately if this is a leaver."
