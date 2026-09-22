@@ -281,6 +281,39 @@ def _do_registry(ctx):
     return {"tenant_id": ctx["tenant_id"], "state": "provisioning"}
 
 
+def _do_pagerduty(ctx):
+    """design 13 step 3. Blocks, and the block is the design (D-018, B-110).
+
+    This does NOT call the PagerDuty API. design 13 asks for PagerDuty to be
+    treated "exactly like the AWS baseline: versioned, staged, drift-detected",
+    and the AWS baseline is applied by scripts a person runs. Two consequences
+    follow, and the second is the one that matters:
+
+      - a Lambda cannot write pagerduty/tenants.json into the repository, so
+        the rendering step cannot live here.
+      - a Lambda calling the API directly would create every tenant service
+        OUTSIDE Terraform state, which makes each one drift relative to the
+        configuration -- and the drift detector design 13 asks for would then
+        fire on the platform's own provisioning.
+
+    So this is a blocking human step, the same shape as step 9's go-live gate:
+    inside the workflow rather than beside it. It names the three commands and
+    stops. When they have been run, `sync-pagerduty-tenants.sh` stamps the
+    registry and the check above finds it, so a re-run advances.
+    """
+    raise StepNotImplemented(
+        "PagerDuty provisioning is a staged apply, not an API call from here. "
+        "Run, in order:\n"
+        "  scripts/render-pagerduty-tenants.sh   # registry -> tenants.json\n"
+        "  scripts/pagerduty-apply.sh            # read the plan\n"
+        "  scripts/pagerduty-apply.sh --apply\n"
+        "  scripts/sync-pagerduty-tenants.sh     # keys + registry write-back\n"
+        "then re-run this saga. design 13 requires PagerDuty to be versioned "
+        "and drift-detected like the AWS baseline; creating services from "
+        "here would put every one of them outside Terraform state and make "
+        "the drift detector fire on our own provisioning.")
+
+
 def _do_jira(ctx):
     """design 13 step 4. The onboarding task set and the recurring obligations.
 
@@ -372,9 +405,16 @@ STEPS = [
         "number": 3,
         "name": "pagerduty-services",
         # Before alarms exist, "or they fire into the void".
-        "check": lambda ctx: ({"pagerduty_service_id": (record(ctx["tenant_id"]) or {}).get("pagerduty_service_id")}
-                              if (record(ctx["tenant_id"]) or {}).get("pagerduty_service_id") else None),
-        "do": _not_built("Per-tenant PagerDuty provisioning", "prompt 12.2"),
+        #
+        # Confirmed by the business service id rather than a paging service id.
+        # Every tenant has exactly one client-conversation business service
+        # regardless of which tiers it runs, so its presence is a reliable
+        # "this tenant has a PagerDuty footprint"; a paging service id would be
+        # absent for a client with no accounts yet, which is a legitimate state
+        # and would read as step 3 never having run.
+        "check": lambda ctx: ({"pagerduty_business_service_id": (record(ctx["tenant_id"]) or {}).get("pagerduty_business_service_id")}
+                              if (record(ctx["tenant_id"]) or {}).get("pagerduty_business_service_id") else None),
+        "do": _do_pagerduty,
     },
     {
         "number": 4,

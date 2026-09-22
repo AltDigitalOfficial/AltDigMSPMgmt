@@ -4557,3 +4557,65 @@ of the estate's ten scheduled rules are `rate()` and are checked.
 **Trigger:** when a second cron rule appears. One unevaluated rule is a
 footnote; two is a pattern, and the third will arrive without anybody noticing
 the list has grown.
+
+## B-119 · Tenant routing keys are written to Audit, not to the tenant's account
+
+**Open** — 2026-09-21.
+
+`sync-pagerduty-tenants.sh` writes each tenant's PagerDuty routing key to
+`platform/pagerduty/tenant/<client>/<tier>/<object>` in the **Audit** account,
+alongside the platform's own routing keys.
+
+That is not where they finally belong. A tenant's alarms fire in the tenant's
+own account, and the SNS subscription carrying them to PagerDuty is created by
+the baseline **in that account** — so the key has to be readable there.
+Distributing it is part of provisioning step 6 (instrumentation), which is not
+built.
+
+**Why Audit is the right interim home rather than a wrong one.** It is where
+the alerting layer already lives; the keys are inert until something
+subscribes using them; and leaving them unwritten would mean the apply's only
+durable output existed solely in local Terraform state, which is gitignored,
+unbacked-up and on one workstation.
+
+**Trigger:** when the vesting pipeline first produces tenant accounts. The key
+must land in the account before its baseline deploys, or the SNS subscription
+resolves an absent secret and the tenant's alarms reach nobody — silently,
+because a subscription to nowhere looks exactly like a subscription.
+
+## B-120 · Nothing schedules the PagerDuty drift check
+
+**Open** — 2026-09-21.
+
+`scripts/pagerduty-drift.sh` is built and works: `terraform plan
+-detailed-exitcode` against the live account, reporting rather than
+correcting. It found real drift on its first run.
+
+Nothing runs it. There is no CI in this repository (see B-110's correction),
+so it executes when somebody types it — which means a console edit is detected
+whenever the next person happens to look, not when it happens.
+
+prompt 12.2 asks for drift detection as a property of the system, not as a
+command that exists.
+
+**Options:**
+
+1. **A scheduled job on a workstation.** Cheapest and least reliable; it
+   detects nothing while the machine is off.
+2. **CI.** Would also serve the AWS baseline, `cfn-lint`, `cfn-guard` and the
+   test suites, all of which are equally manual today. The largest piece of
+   work and the one with the broadest payoff.
+3. **A Lambda that checks existence only** — services carrying the platform
+   provenance marker against what the registry says should exist. Schedulable
+   today, and materially weaker: it catches a deleted service, not an
+   escalation policy quietly retargeted. It would also be a second
+   implementation of "what should exist", which is exactly what using
+   `terraform plan` avoids.
+
+Option 2 is the honest answer and the one to plan for. Option 3 is a
+consolation prize that adds a second source of truth to a design built to have
+one.
+
+**Trigger:** before the first client tenant is live in PagerDuty. Until then
+the only services are the platform's own and a drift window measured in days
+is tolerable; once a client's paging depends on it, it is not.

@@ -138,9 +138,15 @@ UNDO = [
                 "tenant.",
     },
     {
-        "step": 3, "field": "pagerduty_service_id",
-        "what": "PagerDuty service, escalation policy and routing keys",
+        "step": 3, "field": "pagerduty_business_service_id",
+        "what": "PagerDuty services, business services and routing keys",
         "preserve_in": (),
+        "note": "Removed by re-rendering pagerduty/tenants.json without this "
+                "client and applying, NOT by calling the PagerDuty API. The "
+                "configuration is the source of truth (D-018), so deleting a "
+                "service out from under Terraform would leave state claiming "
+                "it exists and the drift detector reporting it missing "
+                "forever.",
     },
     {
         "step": 2, "field": "truveon_tenant_id",

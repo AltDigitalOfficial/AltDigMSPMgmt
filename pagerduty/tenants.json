@@ -1,11 +1,3 @@
 {
-  "tenants": {
-    "zzprobe": {
-      "partner": "regtest",
-      "tiers": {
-        "prod": { "objects": ["", "billing"] },
-        "dev":  { "objects": [""] }
-      }
-    }
-  }
+  "tenants": {}
 }
