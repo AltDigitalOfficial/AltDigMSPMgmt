@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — HOOP scheduler (prompt 13.2) and its
+  turndown/turnup verification (13.3). Deploys INTO the account it schedules.
+
+# ---------------------------------------------------------------------------
+# Deployed into the account it acts on, deliberately
+# ---------------------------------------------------------------------------
+# The alternative is a central scheduler assuming a role into each member
+# account, and it is worse here for one reason: the blast radius of a bug.
+#
+# A central scheduler holds stop permissions across every account in the
+# estate. A bug in its account-selection logic stops the wrong environment,
+# and the wrong environment could be anybody's. This stack has permission in
+# exactly one account and none anywhere else, so the same bug stops the
+# environment it was already allowed to stop.
+#
+# That is the second layer of the enforcement hoop.py describes: the code
+# refuses production, and the deployment never puts the code where production
+# is. Neither layer alone would be enough -- a check is one edit from removal,
+# and a permission boundary is one StackSet target from being widened.
+#
+# A third layer sits above both: AccountTier does not accept `prod` as a
+# value, so CloudFormation rejects the stack before any code runs. It is the
+# only one of the four refusals that does not require the Lambda to execute.
+#
+# ---------------------------------------------------------------------------
+# Two functions, one package
+# ---------------------------------------------------------------------------
+#   hoop.handler    turndown and turnup, scheduled or manual, one code path
+#   cycle.handler   verifies what just happened, and routes a failure
+#
+# Separate functions rather than one, because they have different failure
+# modes and the verification must be able to run when the scheduler did not.
+# A turnup that timed out leaves an environment nobody has checked, and the
+# check is the thing that says so.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  AccountId:
+    Type: String
+    Description: >-
+      The account this stack schedules — its own. Passed explicitly rather
+      than read from AWS::AccountId so that the value in the schedule payload
+      is visible in the template and in the stack's parameters, where somebody
+      auditing what may be turned down can read it without inspecting code.
+
+  AccountTier:
+    Type: String
+    AllowedValues: [dev, test, uat]
+    Description: >-
+      This account's environment tier, read from the registry by the deploy
+      script and fixed here at deploy time.
+
+      `prod` is not an allowed value. CloudFormation refuses the stack before
+      any code runs — which is the earliest of the four places production is
+      refused, and the only one that does not require the Lambda to execute.
+
+  AccountKind:
+    Type: String
+    Default: tenant
+    AllowedValues: [tenant, shared]
+    Description: >-
+      Whether this is a customer environment or one of AltDigital's own. A
+      `shared` account is refused unless it is the single designated exercise
+      account: found while deploying this, because both sandboxes are
+      registered `dev` and the scheduler would otherwise have turned down the
+      account the canaries run in.
+
+  ManifestParam:
+    Type: String
+    Default: /platform/hoop/manifest
+    Description: >-
+      Where turndown records what it stopped. Read by the turnup verification
+      to assert the full expected set rather than merely the absence of errors.
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  AlertBusArn:
+    Type: String
+    Description: Cross-account ARN of the alert bus, for findings.
+
+  HoopConfig:
+    Type: String
+    Default: '{}'
+    Description: >-
+      The HOOP as JSON — timezone and windows. questionnaire 3a.7 supplies the
+      timezone and it is NEVER defaulted: an empty config means this
+      environment is not scheduled, which is a legitimate state, and the
+      scheduler refuses rather than assuming UTC.
+
+  ExerciseAccountId:
+    Type: String
+    Default: ''
+    Description: >-
+      Set ONLY in the exercise deployment. Names the single platform-owned
+      account whose environment may be cycled to prove the path works. Empty
+      in every tenant deployment, which is what makes it an absent capability
+      rather than a guarded one.
+
+  ScheduleExpression:
+    Type: String
+    Default: rate(15 minutes)
+    Description: >-
+      How often the window is evaluated, NOT the HOOP itself. The scheduler
+      asks "should this be up now" and acts on the answer, so a 15-minute
+      evaluation means an environment comes up within 15 minutes of its window
+      opening. Finer costs more invocations; coarser makes somebody wait.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+  IsExercise: !Not [!Equals [!Ref ExerciseAccountId, '']]
+
+Resources:
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformHoopScheduler
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  SchedulerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: HoopSchedule
+      Roles: [!Ref SchedulerRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Reads are broad because the scheduler has to find what exists.
+          - Sid: Discover
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeVolumes
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusters
+              - rds:ListTagsForResource
+              - ecs:ListClusters
+              - ecs:ListServices
+              - ecs:DescribeServices
+              - autoscaling:DescribeAutoScalingGroups
+            Resource: '*'
+
+          # Writes are narrow in KIND rather than in resource: stop and start,
+          # never terminate, never delete. There is no ec2:TerminateInstances,
+          # no rds:DeleteDBInstance and no autoscaling:DeleteAutoScalingGroup
+          # here, so CLAUDE.md's rule is enforced by the role and not only by
+          # the code. A bug cannot destroy what the role cannot call.
+          - Sid: StopAndStart
+            Effect: Allow
+            Action:
+              - ec2:StartInstances
+              - ec2:StopInstances
+              - ec2:CreateTags
+              - rds:StartDBInstance
+              - rds:StopDBInstance
+              - rds:StartDBCluster
+              - rds:StopDBCluster
+              - rds:AddTagsToResource
+              - ecs:UpdateService
+              - ecs:TagResource
+              - autoscaling:UpdateAutoScalingGroup
+              - autoscaling:CreateOrUpdateTags
+            Resource: '*'
+
+          # The manifest, in THIS account's parameter store. Scoped to the
+          # one path. The scheduler needs no access to the platform registry
+          # at all, which is the point: a cross-account role able to write the
+          # registry from every scheduled account in the estate is a large
+          # trust relationship to buy one lookup.
+          - Sid: Manifest
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:PutParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ManifestParam}'
+
+          - Sid: EmitFindings
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Ref AlertBusArn
+
+          - Sid: PublishDuration
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: '*'
+            Condition:
+              StringEquals:
+                cloudwatch:namespace: Platform/HOOP
+
+  SchedulerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-hoop-scheduler
+      # A year. What was stopped and when is the answer to "why was the
+      # environment down" and to "why is this month's bill different".
+      RetentionInDays: 365
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  SchedulerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SchedulerLogGroup
+    Properties:
+      FunctionName: platform-hoop-scheduler
+      Runtime: python3.12
+      Handler: hoop.handler
+      Role: !GetAtt SchedulerRole.Arn
+      # A turndown walks every ASG, service, database and instance in the
+      # account. Five minutes is generous for a non-production environment and
+      # cheap to leave generous.
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          HOOP_ACCOUNT_TIER: !Ref AccountTier
+          HOOP_ACCOUNT_KIND: !Ref AccountKind
+          HOOP_MANIFEST_PARAM: !Ref ManifestParam
+          ALERT_BUS_NAME: !Ref AlertBusName
+          HOOP_EXERCISE_ACCOUNT_ID: !Ref ExerciseAccountId
+
+  VerifyLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-hoop-verify
+      RetentionInDays: 365
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  VerifyFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: VerifyLogGroup
+    Properties:
+      FunctionName: platform-hoop-verify
+      Runtime: python3.12
+      Handler: cycle.handler
+      Role: !GetAtt SchedulerRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          HOOP_ACCOUNT_TIER: !Ref AccountTier
+          HOOP_ACCOUNT_KIND: !Ref AccountKind
+          HOOP_MANIFEST_PARAM: !Ref ManifestParam
+          ALERT_BUS_NAME: !Ref AlertBusName
+          HOOP_EXERCISE_ACCOUNT_ID: !Ref ExerciseAccountId
+
+  # -------------------------------------------------------------------------
+  # The evaluation schedule
+  # -------------------------------------------------------------------------
+  # Fires regardless of the window and asks the scheduler what the window
+  # implies. That is why there is one rule rather than a pair of cron rules at
+  # the window's edges: a pair would drift out of step with a HOOP edited in
+  # the registry, and an environment whose HOOP changed would keep coming up
+  # at the old time with nothing reporting why.
+
+  EvaluationSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-hoop-evaluate
+      Description: >-
+        Evaluate this environment's HOOP window and turn down or up
+        accordingly. Deliberately not two cron rules at the window edges — the
+        window is data and this asks it every time.
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: scheduler
+          Arn: !GetAtt SchedulerFunction.Arn
+          Input: !Sub '{"account_id": "${AccountId}", "hoop": ${HoopConfig}}'
+
+  EvaluationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SchedulerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EvaluationSchedule.Arn
+
+Outputs:
+
+  SchedulerFunctionName:
+    Description: Turndown and turnup. Manual invocation uses this same function.
+    Value: !Ref SchedulerFunction
+
+  VerifyFunctionName:
+    Description: Verifies a cycle and routes a failure.
+    Value: !Ref VerifyFunction
+
+  ExerciseMode:
+    Description: Whether this deployment may cycle a platform-owned account.
+    Value: !If [IsExercise, !Ref ExerciseAccountId, 'no']

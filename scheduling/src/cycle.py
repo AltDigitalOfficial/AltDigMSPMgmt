@@ -52,10 +52,8 @@ import boto3
 import hoop
 
 cloudwatch = boto3.client("cloudwatch")
-dynamodb = boto3.client("dynamodb")
 events_client = boto3.client("events")
 
-REGISTRY_TABLE = os.environ.get("REGISTRY_TABLE", "platform-registry")
 ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
 METRIC_NAMESPACE = os.environ.get("HOOP_METRIC_NAMESPACE", "Platform/HOOP")
 

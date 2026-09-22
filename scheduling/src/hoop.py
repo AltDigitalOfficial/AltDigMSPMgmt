@@ -37,8 +37,11 @@ edit away from being removed:
   2. the execution role is granted no ec2:StopInstances, rds:Stop* or
      autoscaling:UpdateAutoScalingGroup in a production account, because the
      stack is not deployed there
-  3. the resolved tier comes from the account's own registry record, not from
-     the invocation payload -- a caller cannot assert its way into a turndown
+  3. the tier comes from the stack's own parameters, not from the invocation
+     payload -- a caller cannot assert its way into a turndown, and changing
+     it is a CloudFormation update rather than a JSON field
+  4. an account AltDigital owns is refused even at a non-production tier, so
+     the scheduler cannot switch off the platform's own monitoring
 
 The seven-day problem is a reporting problem, not just a re-stop
 ------------------------------------------------------------------
@@ -76,10 +79,32 @@ rds = boto3.client("rds")
 ecs = boto3.client("ecs")
 autoscaling = boto3.client("autoscaling")
 events_client = boto3.client("events")
-dynamodb = boto3.client("dynamodb")
+ssm = boto3.client("ssm")
 
 ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
-REGISTRY_TABLE = os.environ.get("REGISTRY_TABLE", "platform-registry")
+
+# The tier and kind this stack was deployed for.
+#
+# Set as stack PARAMETERS by the platform's deploy script, which reads them
+# from the registry. Deliberately not read from the registry at runtime: the
+# registry lives in Platform Tooling and this function runs in the member
+# account, so consulting it would need a cross-account role able to read --
+# and, for the manifest, WRITE -- the registry from every scheduled account in
+# the estate. That is a large new trust relationship to buy one lookup.
+#
+# The property that actually mattered is preserved. hoop refuses to take the
+# tier from the INVOCATION payload, so a caller still cannot assert its way
+# into stopping production. Changing these means updating a CloudFormation
+# stack, which is an auditable platform action rather than a JSON field.
+ACCOUNT_TIER = os.environ.get("HOOP_ACCOUNT_TIER", "")
+ACCOUNT_KIND = os.environ.get("HOOP_ACCOUNT_KIND", "")
+
+# The manifest lives in this account's own Parameter Store rather than in the
+# registry, for the same reason. It describes local resources, it is read by a
+# local function, and keeping it local means the scheduler needs no write
+# access to the platform's registry at all.
+MANIFEST_PARAM = os.environ.get("HOOP_MANIFEST_PARAM",
+                                "/platform/hoop/manifest")
 
 # Tags carrying the state turndown must restore. On the resource rather than in
 # a table on purpose: they travel with the thing, survive this function being
@@ -92,6 +117,15 @@ TAG_STOPPED_AT = "platform:hoop:stopped-at"
 
 # design 14: available for all three non-production tiers, never production.
 SCHEDULABLE_TIERS = ("dev", "test", "uat")
+
+# The one account where a platform-owned environment may be scheduled, so the
+# turndown/turnup path can be exercised against something real (design 14's P4:
+# an untested turnup is an outage waiting for a Monday morning).
+#
+# Empty in the tenant-facing deployment, which is what makes this not a
+# backdoor: the capability is absent rather than guarded. Only the exercise
+# stack sets it, and it names exactly one account.
+EXERCISE_ACCOUNT_ID = os.environ.get("HOOP_EXERCISE_ACCOUNT_ID", "")
 
 
 class NotSchedulable(Exception):
@@ -119,24 +153,19 @@ def _iso(when):
 # ---------------------------------------------------------------------------
 
 
-def account_tier(account_id):
-    """The tier, from the registry, not from the caller.
+def account_record(account_id):
+    """The tier and kind this stack was deployed for.
 
-    Read here rather than taken from the invocation payload so that a caller
-    cannot assert its way into stopping production by passing tier='dev'.
+    From the deployment, never from the invocation payload -- see the constants
+    above. An unset tier returns None and every caller refuses, which is the
+    same answer an unregistered account used to produce.
     """
-    got = dynamodb.get_item(
-        TableName=REGISTRY_TABLE,
-        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "META"}})
-    item = got.get("Item")
-    if not item:
-        return None
-    return (item.get("environment") or {}).get("S")
+    return (ACCOUNT_TIER or None, ACCOUNT_KIND or "tenant")
 
 
 def assert_schedulable(account_id):
-    """Refuse production, and refuse not knowing. Returns the tier."""
-    tier = account_tier(account_id)
+    """Refuse production, platform accounts, and not knowing. Returns the tier."""
+    tier, kind = account_record(account_id)
 
     if tier is None:
         raise NotSchedulable(
@@ -153,6 +182,23 @@ def assert_schedulable(account_id):
             "production. This refusal does not consult any HOOP "
             "configuration, because configuration is what a mistake looks "
             "like.")
+
+    # AltDigital's OWN accounts are not schedulable, even the ones registered
+    # at a non-production tier. Found while deploying this: both sandboxes are
+    # `dev`, so every check above passed and the scheduler would happily have
+    # turned down the account the canaries run in -- switching off the
+    # monitoring that would have reported it.
+    #
+    # A HOOP is a customer-facing cost lever for a TENANT environment. The
+    # platform's own dev accounts are infrastructure, and their cost is
+    # AltDigital's problem to solve some other way.
+    if kind != "tenant" and account_id != EXERCISE_ACCOUNT_ID:
+        raise NotSchedulable(
+            f"account {account_id} is kind '{kind}', not a tenant "
+            "environment. design 14's HOOPs are a lever a CUSTOMER pulls to "
+            "manage their own spend; the platform's own accounts are "
+            "infrastructure. Scheduling one would switch off the thing that "
+            "reports on everything else.")
 
     return tier
 
@@ -616,30 +662,32 @@ def _emit(account_id, name, cause, detail):
 def write_manifest(account_id, manifest):
     """Record what turndown stopped, and what it left alone.
 
-    Written to the registry rather than held in the invocation, because turnup
-    happens hours later in a different execution and frequently on a different
-    day.
+    Persisted rather than held in the invocation, because turnup happens hours
+    later in a different execution and frequently on a different day.
     """
-    dynamodb.update_item(
-        TableName=REGISTRY_TABLE,
-        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "META"}},
-        UpdateExpression=("SET hoop_manifest = :m, hoop_manifest_at = :t, "
-                          "updated_at = :t"),
-        ExpressionAttributeValues={
-            ":m": {"S": json.dumps(manifest, default=str, sort_keys=True)},
-            ":t": {"S": _iso(_now())}},
-        ConditionExpression="attribute_exists(PK)")
+    payload = dict(manifest)
+    payload["recorded_at"] = _iso(_now())
+    ssm.put_parameter(
+        Name=MANIFEST_PARAM,
+        Value=json.dumps(payload, default=str, sort_keys=True),
+        Type="String", Overwrite=True,
+        Description="What the last HOOP turndown stopped. Read by the turnup "
+                    "verification to assert the full expected set.")
 
 
 def read_manifest(account_id):
-    got = dynamodb.get_item(
-        TableName=REGISTRY_TABLE,
-        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "META"}})
-    item = got.get("Item") or {}
-    raw = (item.get("hoop_manifest") or {}).get("S")
+    try:
+        got = ssm.get_parameter(Name=MANIFEST_PARAM)
+    except Exception:                                 # noqa: BLE001
+        # Absent is a real answer -- this environment has never been turned
+        # down by the scheduler -- and is distinguished from a manifest that
+        # exists by the caller, which refuses rather than concluding success.
+        return None, None
+    raw = (got.get("Parameter") or {}).get("Value")
     if not raw:
         return None, None
-    return json.loads(raw), (item.get("hoop_manifest_at") or {}).get("S")
+    parsed = json.loads(raw)
+    return parsed, parsed.get("recorded_at")
 
 
 def build_manifest(turndown_result):
