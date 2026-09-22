@@ -209,6 +209,113 @@ def ordering_problem(altdig_hours, partner_hours):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Recording that a notification HAPPENED
+# ---------------------------------------------------------------------------
+# Until this existed the clock could only count down. An incident where
+# AltDigital notified the partner on time still escalated, still read as
+# approaching breach, and still paged -- because nothing could say the
+# obligation had been discharged.
+#
+# prompt 14.4: "it must not be possible for the system to record AltDigital as
+# having notified a client."
+#
+# That is enforced here, and the enforcement is the SHAPE rather than a check
+# on a free-text field. Each leg has exactly one legitimate notifier, and the
+# pair is an allow-list:
+#
+#   altdigital_to_partner   notifier: altdigital    recipient: partner
+#   partner_to_client       notifier: PARTNER       recipient: client
+#
+# There is no (altdigital, client) pair, so it cannot be expressed. A validated
+# string field would have let somebody pass "altdigital" with a comment
+# explaining why it was fine this once; an allow-list of pairs has nowhere to
+# put that.
+#
+# The reason this matters is contractual rather than tidy. AltDigital is a
+# subcontractor business associate (design 15): its obligation runs to the
+# business associate above it, not to the covered entity. Notifying a partner's
+# client directly -- or recording that it did -- asserts a relationship that
+# does not exist, and it is the kind of mistake that looks like helpfulness at
+# the time.
+
+LEG_NOTIFIERS = {
+    "altdigital_to_partner": {"notifier": "altdigital", "recipient": "partner"},
+    "partner_to_client": {"notifier": "partner", "recipient": "client"},
+}
+
+
+class NotifierRefused(Exception):
+    """The named notifier does not own that leg of the chain."""
+
+
+def record_notification(incident_id, leg, notifier, notified_at=None,
+                        recorded_by=None):
+    """Mark one leg of the chain discharged.
+
+    Refuses any (leg, notifier) pair the chain does not contain. In particular
+    AltDigital cannot discharge the partner->client leg: that obligation is the
+    partner's, and recording otherwise would put a false statement in the
+    evidence an auditor reads.
+    """
+    expected = LEG_NOTIFIERS.get(leg)
+    if expected is None:
+        raise NotifierRefused(
+            f"'{leg}' is not a leg of the notification chain. Known: "
+            f"{', '.join(LEG_NOTIFIERS)}.")
+
+    if notifier != expected["notifier"]:
+        raise NotifierRefused(
+            f"'{notifier}' cannot discharge the '{leg}' leg -- that obligation "
+            f"belongs to '{expected['notifier']}', who notifies the "
+            f"{expected['recipient']}. design 15 makes AltDigital a "
+            "subcontractor business associate whose obligation runs to the "
+            "party above it, so recording AltDigital as having notified a "
+            "client would assert a relationship that does not exist.")
+
+    when = notified_at or _iso(_now())
+    dynamodb.put_item(
+        TableName=INCIDENT_TABLE,
+        Item={
+            "PK": {"S": f"incident#{incident_id}"},
+            "SK": {"S": f"notified#{leg}"},
+            "leg": {"S": leg},
+            "notifier": {"S": expected["notifier"]},
+            "recipient": {"S": expected["recipient"]},
+            "notified_at": {"S": when},
+            # Who told the platform, as distinct from who did the notifying.
+            # A partner's notification is recorded BY AltDigital and performed
+            # BY the partner, and collapsing those two would lose exactly the
+            # distinction this function exists to keep.
+            "recorded_by": {"S": str(recorded_by or "unrecorded")},
+        },
+        # One record per leg. A second attempt is not an error -- somebody
+        # confirming twice is harmless -- but it must not overwrite the first
+        # timestamp, which is the one that proves the deadline was met.
+        ConditionExpression="attribute_not_exists(SK)")
+    return {"incident_id": incident_id, "leg": leg,
+            "notifier": expected["notifier"],
+            "recipient": expected["recipient"], "notified_at": when}
+
+
+def discharged(incident_id):
+    """Which legs have been notified, keyed by leg."""
+    got = dynamodb.query(
+        TableName=INCIDENT_TABLE,
+        KeyConditionExpression="PK = :p AND begins_with(SK, :s)",
+        ExpressionAttributeValues={
+            ":p": {"S": f"incident#{incident_id}"},
+            ":s": {"S": "notified#"}})
+    out = {}
+    for item in got.get("Items") or []:
+        out[(item.get("leg") or {}).get("S")] = {
+            "notified_at": (item.get("notified_at") or {}).get("S"),
+            "notifier": (item.get("notifier") or {}).get("S"),
+            "recorded_by": (item.get("recorded_by") or {}).get("S"),
+        }
+    return out
+
+
 def open_incidents(max_age_hours):
     """Incident headers recent enough that a deadline could still be live.
 
@@ -335,7 +442,24 @@ def evaluate(incident):
             "This is a blocking finding at vesting (prompt 7.3), surfaced here "
             "because it was not caught there.")
 
-    live = [l for l in legs if not l.get("unset")]
+    # A leg somebody has discharged stops counting. Before this existed the
+    # clock escalated an obligation that had been met -- which teaches people
+    # that the countdown is noise, on the one signal that must never be.
+    done = discharged(incident_id) if INCIDENT_TABLE else {}
+    for leg in legs:
+        satisfied = done.get(leg["leg"])
+        leg["discharged"] = bool(satisfied)
+        if satisfied:
+            leg["notified_at"] = satisfied["notified_at"]
+            leg["notified_by"] = satisfied["notifier"]
+            # Whether the obligation was MET is a different question from
+            # whether it is still running, and both are recorded: a leg
+            # notified after its deadline is discharged and late.
+            leg["met_deadline"] = bool(
+                leg.get("deadline") and satisfied["notified_at"] <= leg["deadline"])
+
+    live = [l for l in legs
+            if not l.get("unset") and not l.get("discharged")]
     next_due = min((l for l in live if not l["breached"]),
                    key=lambda l: l["seconds_remaining"], default=None)
 
@@ -346,6 +470,11 @@ def evaluate(incident):
         "chain": legs,
         "next_deadline": next_due,
         "breached_legs": [l["leg"] for l in live if l["breached"]],
+        # Reported separately from breached. An obligation discharged late is
+        # a fact an auditor needs and is not the same as one still outstanding.
+        "discharged_legs": [l["leg"] for l in legs if l.get("discharged")],
+        "discharged_late": [l["leg"] for l in legs
+                            if l.get("discharged") and l.get("met_deadline") is False],
         "findings": findings,
         "computed_at": _iso(_now()),
     }
