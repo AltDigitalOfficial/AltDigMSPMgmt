@@ -10,7 +10,7 @@ Status as of v0.1. Items are grouped by whether they block build work.
 |---|---|---|---|
 | B1 | **Default primary region** — us-east-2 or us-west-2 | Jamie | Vesting parameter default; trivial to decide, blocks Phase 3 |
 | B2 | **CVE remediation SLAs** per severity | Jamie | Committing beyond capability is worse than committing conservatively |
-| B3 | **Restore duration warning/breach thresholds** | Jamie | DECIDED 2026-09-18 as 50%/80% of RTO and built on. design 05 (2026-09-22) restates them as undecided with a different indicative pair — see B-124, which must be resolved rather than left as three answers |
+| B3 | **Restore duration warning/breach thresholds** | ~~Jamie~~ CLOSED | **50% warning / 80% breach of RTO.** Decided 2026-09-18, reconfirmed 2026-09-22 against design 05's indicative 75%/100%. A breach alarm at 100% fires when the commitment is already missed; 80% leaves budget to act. Recorded as D-019. Values remain per-tenant parameters |
 | B4 | **Circuit breaker and rate limit values** | Jamie | Now specified in [06a](design/06a-alarm-specification.yaml) `safety_rails` — 3x/hour, 20 actions/hour. Confirm or adjust. |
 | B16 | **`[TUNE]` alarm thresholds** | Jamie | [06a](design/06a-alarm-specification.yaml) marks ~12 thresholds as workload-specific. Null ones block alarm creation and raise exceptions by design. |
 | B5 | **Second baseline approver** (named) | Jamie | For periods of unavailability; needs occasional exercise |

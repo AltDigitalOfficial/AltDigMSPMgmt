@@ -1169,3 +1169,45 @@ exactly the reason design 13 gives, and it is mitigated for now by urgency:
 low-urgency incidents notify rather than page. Jamie and Wayne own the real
 answer. `tier_escalation_policy_ids` exists so that answering it is a data
 change rather than a restructuring.
+
+## D-019 · Restore thresholds are 50%/80% of RTO, not design 05's indicative 75%/100%
+
+**Accepted.** Prompt 6.2, decided 2026-09-18, confirmed against design 05 on
+2026-09-22 by Jamie.
+
+design 05, "Threshold alerting":
+
+> **Design note — thresholds not yet set.** The *principle* is two tiers with
+> differentiated routing. The actual percentages are set per application once
+> the workload is understood. Indicative discussion suggested warning around
+> 75% of RTO and breach at or near 100%, but these are not decided.
+
+`recovery/` uses **warning at 50% of RTO, breach at 80%**.
+
+### Why
+
+A breach alarm at 100% of RTO fires when the commitment has **already been
+missed**. It is a lagging indicator: by the time it pages, the restore in
+progress has nothing left to spend, and the page announces a fact rather than
+creating an opportunity. At 80% there is still a fifth of the budget to
+escalate, add capacity or start a parallel path.
+
+The same argument applies to the warning tier. design 05 asks it to produce "an
+owned, dated ticket — not an item in a queue", which is a capacity
+conversation; at 75% the conversation is about an incident. At 50% the trend is
+visible with half the budget intact, which is the point in the curve where
+somebody can still act on it cheaply.
+
+### What is unchanged
+
+05's substance is adopted in full: two tiers, differentiated routing, warning
+to an owned and dated Jira ticket with no page, breach to PagerDuty. And 05's
+point that the values are per-application stands — both remain **parameters**,
+because the RTO they are a percentage of is per tenant. A workload with a
+30-minute RTO may well want different fractions.
+
+### Where this is recorded
+
+`recovery/src/worker.py`, `recovery/10-restore-workflow.yaml`,
+`recovery/20-restore-schedule.yaml`, and `design/open-items.md` B3. All four now
+agree; before this they did not, which is what B-124 recorded.
