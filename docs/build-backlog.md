@@ -4905,6 +4905,61 @@ wrong.
 
 ## B-125 · A deny keyed on a role ARN is only as strong as control over role creation
 
+**CLOSED 2026-09-22**, and the investigation changed what the finding was.
+
+The proposed fix was "write an SCP denying `iam:CreateRole` for
+`PlatformQuorumExecutor`". That SCP **already existed** —
+`03-protect-platform-identity.json`, statement `DenyPlatformRoleNameSquatting`,
+denying creation of any `role/Platform*`. It was attached to the Security OU,
+where the backup account lives. It should have stopped the attack and did not.
+
+**Because it exempts `OrganizationAccountAccessRole`, which is what the attack
+used.** The exemption is necessary and not a mistake: the platform deploys
+through that role, and without the exemption no `Platform*` role could be
+created at all. So the real shape of the gap was never "the control is
+missing" — it was that the control's scope and the threat model had drifted
+apart:
+
+| principal | vault policy | SCP | holds |
+|---|---|---|---|
+| compromised tenant principal | denies | denies | **yes** |
+| operator with `OrganizationAccountAccessRole` | defeated by minting the role | exempt | **no** |
+
+design 05 puts vault deletion under quorum (design 03) precisely because a
+trusted operator is not supposed to be sufficient. That is the whole content of
+"quorum": one person cannot do it alone. An exemption that lets one person mint
+the quorum role does not weaken the vault policy — it removes the quorum.
+
+**The fix is one narrow statement**, added beside the one it qualifies:
+`DenyQuorumExecutorCreationEvenByOperators` denies create-and-modify on
+`role/PlatformQuorumExecutor` exactly, exempting **only** `stacksets-exec-*`.
+`OrganizationAccountAccessRole` is deliberately absent from that list, unlike
+every other statement in the policy.
+
+Scoped to the one role rather than widened across `Platform*`, because the
+broad exemption is load-bearing everywhere else — removing it would break
+deployment for a problem that exists for exactly one role name.
+
+**Verified by re-running the attack.** `iam:CreateRole` for
+`PlatformQuorumExecutor` through `OrganizationAccountAccessRole` now returns
+`explicit deny in a service control policy`, and creating an unrelated
+`Platform*` role through the same principal still succeeds — so the platform's
+deployment path is intact.
+
+**A consequence worth knowing.** The backup account now has no principal able
+to delete the copy vault, because `PlatformQuorumExecutor` does not exist there
+and can no longer be created by hand. The recovery path is to deploy the quorum
+stack to that account via StackSets, which creates the role properly. That is
+not an obstacle — it is the control doing its job: replacing that vault is now
+a deliberate, auditable act rather than something one person does in a
+terminal.
+
+**The KMS concern in the original entry stands and is now also covered**, since
+the same statement prevents minting the role that the key policy's `ArnNotLike`
+names.
+
+The original entry follows.
+
 **Open** — 2026-09-22. Found by locking myself out of a vault I had just made.
 
 `recovery/40-backup-vault.yaml` and `30-backup-policy.yaml` both express design

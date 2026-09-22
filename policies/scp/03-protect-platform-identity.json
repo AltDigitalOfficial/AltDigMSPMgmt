@@ -29,6 +29,28 @@
       }
     },
     {
+      "Sid": "DenyQuorumExecutorCreationEvenByOperators",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePermissionsBoundary"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/PlatformQuorumExecutor"
+      ],
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:sts::*:assumed-role/stacksets-exec-*/*"
+          ]
+        }
+      }
+    },
+    {
       "Sid": "DenyPlatformRoleModification",
       "Effect": "Deny",
       "Action": [
