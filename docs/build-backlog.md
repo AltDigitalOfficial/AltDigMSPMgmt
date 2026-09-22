@@ -5038,3 +5038,31 @@ deleting the KEY destroys every copy encrypted under it — which Vault Lock doe
 not prevent.
 
 **Trigger:** before the first tenant's backups land in the copy vault.
+
+## B-126 · Partner cost isolation needs a generated report, not a permission set
+
+**Open** — 2026-09-22. Replaces the unbuildable half of prompt 14.5; see D-020.
+
+Cost Explorer authorises the call and not the data (proven — D-020 carries the
+evidence), so a partner business user either sees the whole estate's spend or
+none of it. Isolation has to happen before the data reaches them.
+
+**What to build.** A partner-scoped run of `cost/src/report.py` that produces
+one partner's figures as a document, delivered to them. The partner receives
+the output, not the query interface — the same shape as design 12's commercial
+router, which sends a payload rather than granting a query.
+
+**What makes it testable**, which the permission-set version never could be:
+a generated document either contains another partner's account ids or it does
+not, and that is assertable in a unit test rather than by attempting an access
+and hoping the denial holds.
+
+**Related:** B-090 records the three per-audience cost reports Jamie asked for
+(cost by account by tier; by tier by object type; shared-services cost). This
+is a fourth audience with a harder requirement — the others are internal, and
+this one is the only report where including a row by mistake is a commercial
+incident rather than noise.
+
+**Trigger:** before the first partner business user is given any commercial
+access. There is currently nobody it would be wrong to show the portfolio to,
+which is the only reason this is not urgent.

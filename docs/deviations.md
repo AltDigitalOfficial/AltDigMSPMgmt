@@ -1211,3 +1211,76 @@ because the RTO they are a percentage of is per tenant. A workload with a
 `recovery/src/worker.py`, `recovery/10-restore-workflow.yaml`,
 `recovery/20-restore-schedule.yaml`, and `design/open-items.md` B3. All four now
 agree; before this they did not, which is what B-124 recorded.
+
+## D-020 · A partner-scoped CommercialReadOnly cannot be built on Cost Explorer
+
+**Accepted, and the prompt's instruction cannot be followed as written.**
+Prompt 14.5, 2026-09-22.
+
+Prompt 14.5 asks for:
+
+> a partner-scoped variant of CommercialReadOnly: same permission set, scoped
+> to a single partner OU. Partner business users see their own book and nothing
+> else — no other partner's data, no portfolio view.
+
+and then, correctly:
+
+> Test the isolation explicitly. A partner seeing another partner's spend is a
+> commercial incident.
+
+**It was tested, and the isolation is not achievable through IAM.**
+
+### The evidence
+
+A role in the management account was granted `ce:GetCostAndUsage` scoped to a
+cost-category resource ARN. The call was denied, and the denial names the
+resource Cost Explorer actually uses:
+
+```
+not authorized to perform: ce:GetCostAndUsage on resource:
+arn:aws:ce:us-east-1:738815759702:/GetCostAndUsage
+```
+
+That is an **operation-level ARN**. Cost Explorer authorises the *call*, not
+the *data* the call returns. There is no resource, condition key or policy
+shape that expresses "this principal may query cost, but only rows where
+Partner = oeight".
+
+The same role, regranted with `Resource: "*"`, returned every cost category
+value and all **seven** linked accounts — the entire estate.
+
+So the two available states are "no cost access" and "all cost access". A
+partner-scoped variant of the permission set would be the second one wearing
+the first one's name, which is worse than not building it: the name asserts an
+isolation that the grant does not provide, and the first person to check would
+be a partner.
+
+### What the mechanism has to be instead
+
+Isolation has to happen **before** the data reaches the user, not through their
+permissions on it:
+
+1. **A generated, pre-scoped report.** `cost/src/report.py` already queries by
+   Cost Category; a partner-scoped run produces a document containing one
+   partner's figures and nothing else. The partner receives the document, not
+   the query interface. This is the same shape as B-090's per-audience reports
+   and is the natural home for it.
+2. A separate Cost Explorer-capable AWS account per partner, with only their
+   accounts linked. Correct isolation and an entirely different billing
+   architecture — the partner would no longer be under AltDigital's payer.
+3. QuickSight row-level security over a CUR dataset. Real, and a substantial
+   piece of infrastructure to stand up for one report.
+
+Option 1 is the proportionate answer and matches what the platform already
+does elsewhere: the commercial router (design 12) also sends a payload rather
+than granting a query.
+
+### What was built for 14.5
+
+The Cost Category half of the prompt was already satisfied — `Partner` and
+`Tenant` dimensions both exist and derive from the account id, which is what
+"both dimensions from the account ID" asks for. Verified live: a query grouped
+by `Partner` returns `Partner$altdigital` with a figure.
+
+The permission set half is **not built**, deliberately, and B-126 records the
+report that replaces it.
