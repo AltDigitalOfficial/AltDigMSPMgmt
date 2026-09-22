@@ -49,6 +49,9 @@ resilience:
   rto_hours: 4
   rpo_hours: 2
   sla_tier: standard
+  # null takes the platform default of 35 days. A client wanting longer says so
+  # here; 35 is a floor rather than a starting point, because the copy vault's
+  # Vault Lock rejects anything shorter.
   backup_retention_days: null
   maintenance_window: { days: [tue], start: "08:00", end: "10:00" }
 

@@ -94,7 +94,7 @@ change.
 | 4.1 | RTO | [A] | Default 4 hours; drives restore test thresholds |
 | 4.2 | RPO | [A] | Default 2 hours; drives backup frequency and PITR |
 | 4.3 | SLA tier: standard / multi-region premium | [A] | Architecture and pricing |
-| 4.4 | Backup retention beyond platform default? | [A] | Backup plan |
+| 4.4 | Backup retention beyond the platform default of 35 days? | [A] | Drives copy retention in the cross-account vault. **Floor is 35 days** — the destination is under Vault Lock and a shorter copy is rejected. Longer is a conversation; shorter is not available. Distinct from the local vault's retention, which follows the tier and is a cost decision rather than a commitment. |
 | 4.5 | Agreed maintenance window | [A] | Patch Manager, SLA exclusion. **Must fall inside the HOOP** for scheduled environments, or patching silently never runs. |
 
 ---
