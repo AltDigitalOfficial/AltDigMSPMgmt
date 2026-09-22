@@ -49,6 +49,14 @@ B-043 (no backup infrastructure), B-044 (in-guest validation) and open item V4
   `config/identity.env` (Identity Center group membership). Both are gitignored
   and blocked by the pre-commit hook. Group and permission set *names* are not
   personal data and do live in the repository.
+- **Everything the platform builds carries `platform-layer: infrastructure`.**
+  Jamie, 2026-09-22. Two teams own resources inside a single tenant account —
+  AltDigital owns the AWS infrastructure and a separate team owns the
+  application — and they page differently even when both teams work for the
+  same company. The tag is what tells them apart at alarm time, and a resource
+  the platform created without it routes to the application team. Entity-blind
+  by design: the tag names the layer, never the team, and the tenant's registry
+  record maps layer to PagerDuty service. B-127 carries the enforcement.
 
 ## Windows / Git Bash traps
 

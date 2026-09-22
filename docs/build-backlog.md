@@ -4710,30 +4710,64 @@ of the estate's ten scheduled rules are `rate()` and are checked.
 footnote; two is a pattern, and the third will arrive without anybody noticing
 the list has grown.
 
-## B-119 · Tenant routing keys are written to Audit, not to the tenant's account
+## B-119 · The router picks a PagerDuty key by tier, and knows nothing about tenants or layers
 
-**Open** — 2026-09-21.
+**Open** — rewritten 2026-09-22. The original entry was wrong in a way that
+would have cost somebody a day, so what it said is kept here rather than
+deleted.
 
-`sync-pagerduty-tenants.sh` writes each tenant's PagerDuty routing key to
-`platform/pagerduty/tenant/<client>/<tier>/<object>` in the **Audit** account,
-alongside the platform's own routing keys.
+**What it said, and why it was wrong.** It said each tenant's routing key had
+to be distributed into the tenant's own AWS account, because "the SNS
+subscription carrying them to PagerDuty is created by the baseline in that
+account".
 
-That is not where they finally belong. A tenant's alarms fire in the tenant's
-own account, and the SNS subscription carrying them to PagerDuty is created by
-the baseline **in that account** — so the key has to be readable there.
-Distributing it is part of provisioning step 6 (instrumentation), which is not
-built.
+The baseline creates no PagerDuty subscription. Member alarms publish to
+`AlertTopicArn` and `LowUrgencyTopicArn`, both of which are cross-account SNS
+topics **in Audit**; `70-event-forwarding.yaml` sends everything else to the
+central bus **in Audit**; and every consumer of a routing key in this
+repository lives in `alerting/` or `commercial/`, which deploy to Audit.
+Verified live: the `platform-alerting` stack exists in 692869638531 and does
+not exist in tooling. No member account ever talks to PagerDuty.
 
-**Why Audit is the right interim home rather than a wrong one.** It is where
-the alerting layer already lives; the keys are inert until something
-subscribes using them; and leaving them unwritten would mean the apply's only
-durable output existed solely in local Terraform state, which is gitignored,
-unbacked-up and on one workstation.
+So the keys are already in the account they belong in, the "interim home" was
+the permanent one, and the trigger the entry was waiting on would never have
+fired. Anyone picking this up would have built key distribution into tenant
+accounts that nothing needs.
 
-**Trigger:** when the vesting pipeline first produces tenant accounts. The key
-must land in the account before its baseline deploys, or the SNS subscription
-resolves an absent secret and the tenant's alarms reach nobody — silently,
-because a subscription to nowhere looks exactly like a subscription.
+**The actual gap**, which is in Audit and is one function. `alerting/src/router.py`:
+
+    def routing_key(tier):
+        name = PD_SECRET_NAME_LOW if tier in ("dev", "test") ... else PD_SECRET_NAME
+
+Two secrets, both AltDigital's own services, and the word `tenant` does not
+appear in the file. Every tenant's alarm would page AltDigital. The per-tenant
+keys `sync-pagerduty-tenants.sh` writes under
+`platform/pagerduty/tenant/<client>/<tier>/<object>` have no consumer at all —
+the services built in 12.2 exist in PagerDuty and nothing routes to them.
+
+**What it has to become.** Key selection on **(tenant, tier, layer)**:
+
+| dimension | where it comes from |
+|---|---|
+| tenant | the alarm's account id, through the tenant fact map in SSM |
+| tier | the alarm's own `platform-tier` tag, as today |
+| layer | the alarm's `platform-layer` tag — B-127 |
+
+The layer dimension is Jamie's requirement of 2026-09-22: AltDigital owns the
+AWS infrastructure and a separate team owns the application, and they page
+differently even when both teams work for the same company. Arc8 is exactly
+that case and is the first tenant.
+
+**The SNS fallback stays pointed at AltDigital, deliberately.** The
+subscription in `alerting/10-alert-topic.yaml` resolves one key at deploy time
+and cannot be made tenant-aware without a topic per tenant. It does not need
+to be: it is the fallback for a broken router, and a broken router is
+AltDigital's incident. Waking a client's on-call because our routing layer
+failed is the wrong page, and the fallback firing at all is itself the signal.
+
+**Trigger:** before the first tenant account's baseline deploys. Until then
+every alarm in the estate is AltDigital's own and the tier-only selection is
+correct for the population it runs over.
 
 ## B-120 · Nothing schedules the PagerDuty drift check
 
@@ -5066,3 +5100,94 @@ incident rather than noise.
 **Trigger:** before the first partner business user is given any commercial
 access. There is currently nobody it would be wrong to show the portfolio to,
 which is the only reason this is not urgent.
+
+## B-127 · Nothing records which team owns a resource
+
+**Open** — 2026-09-22. Decided with Jamie the same day.
+
+Within one tenant account, two teams own resources. The baseline puts the VPC,
+KMS keys, log groups, Config recorder and backup vault into the account —
+AltDigital's. The application's RDS, ALB and ECS services sit in the same
+account and belong to whoever owns the application. For Arc8 that is Wayne's
+dev team; for a later client it is the client's own developers. Same account,
+same tier, different people to wake.
+
+Nothing distinguishes them. No tag, no registry field, no alarm dimension.
+
+**The tag.** `platform-layer`, values `infrastructure` and `application`.
+
+Named for the layer rather than the owner because a required free-text `Owner`
+tag already exists on every resource and means a *person*. Two tags called
+owner meaning different things is the failure this codebase keeps writing
+comments about.
+
+Entity-blind, in the same sense as B12: the tag never names a team. It says
+which layer the resource is, and the tenant's registry record says which
+PagerDuty service that layer maps to. So the identical tag value means
+"Wayne's team" for Arc8 and "the client's developers" for the next tenant,
+with no code change.
+
+**Hard rule, Jamie 2026-09-22: everything the platform builds carries
+`platform-layer: infrastructure`.** Recorded in CLAUDE.md, because it binds
+every template written from here on and not just this item.
+
+**A tag is a claim, not provenance.** The router sees an alarm, not a
+CloudTrail event, so at alarm time a tag is all it can read — and a dev team
+that tags its resource `infrastructure` pages Jamie at 3am with nothing
+noticing.
+
+Jamie's own discriminator is better and is already half-built: which Jira
+project authorised the change. `reconcile.py` reads `jira_change_project` from
+the tenant fact map today. So the fast path is the tag and a slower control
+checks it — a resource whose `platform-layer` disagrees with the project that
+created it is a reconciliation finding. Same shape as everywhere else here.
+
+**The four pieces.**
+
+1. `policies/scp/04` requires `platform-layer` at creation with the value
+   constrained to the two-word vocabulary, alongside the existing `Owner` and
+   `Application` requirements. Note 04 already exempts `role/Platform*`,
+   `OrganizationAccountAccessRole*` and `stacksets-exec-*` — which is how
+   platform-deployed resources will satisfy the hard rule without the SCP
+   fighting the baseline.
+2. The instrumentation Lambda stamps it on each alarm it creates, beside the
+   `platform-tier` tag it already writes.
+3. `router.py` selects the routing key on it — B-119.
+4. The tenant Terraform module gains a reserved `infra` object per tier, so
+   `tenant-<id>-<tier>-infra` exists with AltDigital's escalation policy
+   alongside the application's service. No structural change to the module:
+   services are already keyed on (tier, object).
+
+Application-layer alarms page the application team's service and notify
+AltDigital's infrastructure service at low urgency, same dedup key so the two
+correlate in the console. Jamie: "probably us too, just in case."
+
+## B-128 · A daily report of resources missing the layer tag
+
+**Deferred with a trigger** — 2026-09-22. Jamie asked for it and deferred the
+design the same day: "that report design is for a different day."
+
+An operational report, mailed daily, of objects and services carrying no
+`platform-layer` tag.
+
+**Why it is not optional once B-127 lands.** An untagged resource does not fail
+loudly. Its alarms fall to whatever the router's default is, which means either
+the wrong team is paged or nobody is — and both look exactly like a quiet
+night. The SCP catches creation, but it exempts the platform's own roles and
+cannot see resources that predate it, so enforcement at creation is not the
+same as coverage across the estate.
+
+This is the same declared-expectation principle the cadence checker uses:
+absence is only detectable against a declaration, and the tag is the
+declaration.
+
+**Design deliberately not attempted here.** Jamie deferred it, and the audience
+matters more than the mechanism — who reads it, whether it is per-partner, and
+whether it belongs with the three unbuilt cost reports in B-090, which are also
+"generate a document and send it" and would otherwise be built twice.
+
+**Trigger:** when anything other than the baseline first creates a resource in
+a tenant account — that is, the first `AppDeployer` deployment. Before that
+every resource in the estate is platform-built and carries the tag by the hard
+rule, so the report would have nothing to say and would teach people to ignore
+it.
