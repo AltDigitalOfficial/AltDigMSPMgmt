@@ -50,12 +50,30 @@ terraform {
 }
 
 locals {
+  # The reserved object every tier carries. B-127.
+  #
+  # Inside one tenant account two teams own resources: AltDigital owns the VPC,
+  # KMS keys, log groups and backup vault the baseline puts there, and a
+  # separate team owns the application. They page different people even when
+  # both teams work for the same company. This is the service AltDigital's half
+  # routes to, and `platform-layer: infrastructure` on the resource is what
+  # selects it.
+  #
+  # Added HERE rather than in scripts/render-pagerduty-tenants.sh on purpose.
+  # The renderer derives objects from the `app` field on each account, so an
+  # account with no app, or a renderer that changed, could produce a tier with
+  # no infrastructure service -- and the failure would be silent: infrastructure
+  # alarms would fall back to the platform's own service and page the right
+  # people for the wrong reason, until the first tenant where that was not the
+  # same thing.
+  infra_object = "infra"
+
   # Flattened tier x object, because Terraform has no nested for_each. The key
   # is "<tier>/<object>" and an empty object is a real key meaning the
   # account's single unnamed application.
   services = merge([
     for tier, cfg in var.tiers : {
-      for obj in cfg.objects :
+      for obj in distinct(concat(cfg.objects, [local.infra_object])) :
       "${tier}/${obj}" => { tier = tier, object = obj }
     }
   ]...)
@@ -90,16 +108,26 @@ resource "pagerduty_service" "object" {
 
   name = "tenant-${var.tenant_id}-${each.value.tier}-${each.value.object == "" ? "app" : each.value.object}"
   description = join(" ", [
-    "${each.value.object == "" ? "Application" : each.value.object} alarms for",
+    each.value.object == local.infra_object
+    ? "AltDigital-owned infrastructure alarms for"
+    : "${each.value.object == "" ? "Application" : each.value.object} alarms for",
     "${var.tenant_id} ${each.value.tier}.",
     local.provenance,
   ])
 
-  # Per-tier override, falling back to the platform policy. B-117 will replace
-  # the fallback for non-production once Jamie and Wayne settle what should
-  # happen there.
-  escalation_policy = lookup(var.tier_escalation_policy_ids, each.value.tier,
-  var.default_escalation_policy_id)
+  # Infrastructure escalates to AltDigital REGARDLESS of tier, because the
+  # thing that determines who answers is which team owns the resource, not
+  # which environment it is in. A tenant's dev-tier VPC failing is still
+  # AltDigital's to fix.
+  #
+  # Everything else takes the per-tier override, falling back to the platform
+  # policy. B-117 will replace that fallback for non-production once Jamie and
+  # Wayne settle what should happen there.
+  escalation_policy = (
+    each.value.object == local.infra_object
+    ? coalesce(var.infrastructure_escalation_policy_id, var.default_escalation_policy_id)
+    : lookup(var.tier_escalation_policy_ids, each.value.tier, var.default_escalation_policy_id)
+  )
 
   alert_creation          = "create_alerts_and_incidents"
   auto_resolve_timeout    = var.auto_resolve_timeout_minutes == 0 ? "null" : tostring(var.auto_resolve_timeout_minutes * 60)
@@ -109,6 +137,10 @@ resource "pagerduty_service" "object" {
     type = "constant"
     # Low still NOTIFIES. See variables.tf: the tier separation is urgency,
     # not silence.
+    # Infrastructure keeps the tier's urgency like everything else. The layer
+    # decides WHO is woken, not how loudly -- a dev-tier infrastructure fault is
+    # still a dev-tier fault, and making it high because AltDigital owns it
+    # would page us at 3am for an environment design 14 gives no SLA.
     urgency = lookup(var.tier_urgency, each.value.tier, "low")
   }
 }

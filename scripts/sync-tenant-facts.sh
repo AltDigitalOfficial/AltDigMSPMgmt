@@ -123,6 +123,11 @@ for item in accounts:
                                or val(client, "jira_change_project")
                                or default_project,
         "change_approver": val(client, "change_approver"),
+        # B-127. Which PagerDuty service an APPLICATION-layer alarm reaches.
+        # The tenant services are keyed (tier, object) and the object is this
+        # app, so without it the router cannot name the tenant's own service
+        # and falls back to paging AltDigital.
+        "app": val(item, "app"),
     }
 
 print(json.dumps(out, sort_keys=True))

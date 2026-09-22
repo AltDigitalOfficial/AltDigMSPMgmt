@@ -4797,7 +4797,7 @@ the list has grown.
 
 ## B-119 · The router picks a PagerDuty key by tier, and knows nothing about tenants or layers
 
-**Open** — rewritten 2026-09-22. The original entry was wrong in a way that
+**RESOLVED** — 2026-09-22. Rewritten and then closed the same day. The original entry was wrong in a way that
 would have cost somebody a day, so what it said is kept here rather than
 deleted.
 
@@ -4853,6 +4853,41 @@ failed is the wrong page, and the fallback firing at all is itself the signal.
 **Trigger:** before the first tenant account's baseline deploys. Until then
 every alarm in the estate is AltDigital's own and the tier-only selection is
 correct for the population it runs over.
+
+### Resolved 2026-09-22 — the router selects on (tenant, tier, layer)
+
+`routing_key(tier)` became `routing_key(tier, layer, account_id)`, and the
+three dimensions come from three different places so none can be quietly
+re-derived inside the router:
+
+| dimension | source |
+|---|---|
+| tenant | the account id, through `/platform/change/tenant-facts` |
+| tier | the alarm's `platform-tier`, off the description trailer |
+| layer | the alarm's `platform-layer`, ditto — B-127 |
+
+`platform_key(tier)` keeps the old two-secret behaviour under a name that says
+what it is: AltDigital's own service, which is the right destination for
+AltDigital's own accounts and the fallback for everything that cannot resolve.
+
+`sync-tenant-facts.sh` now publishes each account's `app`, because the tenant
+services are keyed on (tier, object) and the object for an application-layer
+alarm is that app. Without it the router could not name the tenant's own
+service.
+
+**Every failure falls back to AltDigital WITH A NOTE, and never raises.** A
+routing lookup that fails during an incident must not turn a page into no page;
+the wrong page is recoverable in a way silence is not. Each fallback prints a
+`routing-key-fallback` record, because a fallback nobody can see becomes
+permanent — and this one looks exactly like working until a tenant asks why
+they never hear from us.
+
+**The SNS fallback still points at AltDigital**, unchanged and deliberately.
+`alerting/10-alert-topic.yaml` resolves one key at deploy time and cannot be
+tenant-aware without a topic per tenant. It does not need to be: it is the
+fallback for a broken router, and a broken router is AltDigital's incident.
+
+13 cases, including every fallback branch and an alarm predating the field.
 
 ## B-120 · Nothing schedules the PagerDuty drift check
 
@@ -5188,7 +5223,7 @@ which is the only reason this is not urgent.
 
 ## B-127 · Nothing records which team owns a resource
 
-**Open** — 2026-09-22. Decided with Jamie the same day.
+**RESOLVED** — 2026-09-22. Decided with Jamie the same day.
 
 Within one tenant account, two teams own resources. The baseline puts the VPC,
 KMS keys, log groups, Config recorder and backup vault into the account —
@@ -5247,6 +5282,56 @@ Application-layer alarms page the application team's service and notify
 AltDigital's infrastructure service at low urgency, same dedup key so the two
 correlate in the console. Jamie: "probably us too, just in case."
 
+### Resolved 2026-09-22 — all four pieces
+
+1. **SCP 04** carries `PlatformLayerMustBePresentAndOneOfTwo`. One statement,
+   not the two `DataClassification` uses, because `StringNotEquals` without
+   `IfExists` evaluates true when the key is absent — so one statement denies
+   both a missing tag and a wrong value.
+2. **`PLATFORM_LAYER_TAG_VALID`** in `policies/guard/baseline.guard`, covering
+   what the SCP's exemption of `Platform*`, `OrganizationAccountAccessRole*`
+   and `stacksets-exec-*` necessarily leaves open — which is every template the
+   platform deploys. Proved against a deliberate typo.
+3. **The instrumentation Lambda** attributes each alarm from the Config
+   configuration item's own tags, so there is no extra call and no second place
+   the answer could differ from the resource.
+4. **The tenant Terraform module** gains a reserved `infra` object in every
+   tier, added in the module rather than in `render-pagerduty-tenants.sh`: the
+   renderer derives objects from each account's `app` field, so a changed
+   renderer or an account without one could produce a tier with no
+   infrastructure service, and the failure would be silent. Its escalation
+   policy is AltDigital's regardless of tier, because what decides who answers
+   is which team owns the resource and not which environment it sits in. Its
+   *urgency* still follows the tier — the layer decides who is woken, not how
+   loudly.
+
+**The direction of the unknown-value default, which I got wrong first.** The
+router's layer branch was written as
+
+    INFRA_OBJECT if (not layer or layer == "infrastructure") else None
+
+which sends every value it does not recognise — a typo, a future third layer, a
+truncated trailer — to the APPLICATION team. That is the one direction that
+wakes a client at 3am for something that may well be ours. It is now
+
+    None if layer == "application" else INFRA_OBJECT
+
+so only an exact, recognised `application` reaches the application team. The
+unit case that covered this originally asserted the wrong behaviour and passed,
+which is worse than no case at all: it documented the defect as intended.
+
+**What this enforces today, and what it does not.** `attachments.tsv` puts SCP
+04 on Sandbox only, deliberately — it is the only policy in the set that denies
+ordinary creation rather than tampering with a control, and the manifest is
+explicit that widening it to Members is a conversation rather than a
+deployment. So in a tenant account an application team can create untagged
+resources freely. Those alarms route to AltDigital by the default, which is the
+safe direction, but the split only becomes real for a tenant once 04 is widened
+— a conversation with Arc8 about their pipeline tagging resources, not a
+decision this item can make.
+
+B-129 carries the provenance cross-check the tag cannot provide by itself.
+
 ## B-128 · A daily report of resources missing the layer tag
 
 **Deferred with a trigger** — 2026-09-22. Jamie asked for it and deferred the
@@ -5276,3 +5361,33 @@ a tenant account — that is, the first `AppDeployer` deployment. Before that
 every resource in the estate is platform-built and carries the tag by the hard
 rule, so the report would have nothing to say and would teach people to ignore
 it.
+
+## B-129 · The layer tag is a claim, and nothing checks it against provenance
+
+**Open** — 2026-09-22. Split out of B-127, which built everything except this.
+
+`platform-layer` is read at alarm time, so it has to be a tag: a CloudTrail
+lookup on the path that pages people is slow, fragile, and runs while an
+incident is starting. But a tag is something the creator asserts about itself.
+An application team can tag a resource `infrastructure` and page Jamie at 3am,
+and nothing would notice.
+
+Jamie's own discriminator is better and is already half-built: which Jira
+project authorised the change. `change/src/reconcile.py` reads
+`jira_change_project` from the tenant fact map today. Resources created through
+the Core App Infra project are AltDigital's; resources created through the
+client-specific project belong to that team.
+
+**What to build.** A reconciliation finding when a resource's `platform-layer`
+disagrees with the project that created it. The fast path stays the tag; a
+slower control checks the claim against the record, which is the shape used
+everywhere else here — the guardrail harness against the SCPs, the registry
+against Organizations, the cost categories against the account list.
+
+**Why it is not urgent.** It cannot fire until an application team is creating
+tagged resources in a tenant account, which needs both a tenant and SCP 04
+widened to Members. Until then every resource in the estate is platform-built
+and the claim and the provenance are the same thing.
+
+**Trigger:** when SCP 04 is widened to the Members OU. That is the moment the
+tag starts being asserted by somebody other than us.

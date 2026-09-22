@@ -113,3 +113,20 @@ variable "commercial_point_of_contact" {
   default     = "AltDigital Platform"
   description = "Role reference for the client-conversation business service. A person's name here goes stale and is personal data besides."
 }
+
+variable "infrastructure_escalation_policy_id" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    Escalation policy for the reserved `infra` service in every tier -- the one
+    holding alarms on resources tagged `platform-layer: infrastructure`, which
+    AltDigital owns. B-127.
+
+    Null falls back to default_escalation_policy_id, which today IS AltDigital's
+    policy, so the fallback is correct rather than merely tolerable. It becomes
+    load-bearing the moment a tenant sets a per-tier policy of their own: at
+    that point the application services move to the tenant's people and the
+    infrastructure service must NOT follow them, which is exactly what this
+    variable exists to prevent.
+  EOT
+}

@@ -100,6 +100,24 @@ ACCOUNT_TIER_PARAM = os.environ.get(
     "ACCOUNT_TIER_PARAM", "/platform/routing/account-tiers")
 _TIER_CACHE = {}
 
+# B-119 / B-127. Which tenant an account belongs to, and which of that tenant's
+# PagerDuty services an alarm should reach.
+#
+# Until this existed `routing_key` chose between exactly two secrets, both
+# AltDigital's own services, and the word "tenant" did not appear in this file.
+# Every tenant's alarm would have paged AltDigital, and the per-tenant services
+# created by prompt 12.2 had no consumer at all.
+TENANT_FACTS_PARAM = os.environ.get(
+    "TENANT_FACTS_PARAM", "/platform/change/tenant-facts")
+TENANT_KEY_PREFIX = os.environ.get(
+    "TENANT_KEY_PREFIX", "platform/pagerduty/tenant")
+# Matches local.infra_object in pagerduty/modules/tenant/main.tf. Two copies of
+# one string, in two languages, with no way to derive either from the other --
+# so it is named in both rather than spelled inline in either.
+INFRA_OBJECT = "infra"
+_FACTS_CACHE = {}
+_KEY_CACHE = {}
+
 # design/06a routing_destinations, duplicated here for one specific reason: this
 # Lambda runs in the Audit account and 06a ships with the instrumentation
 # package into member accounts. Shipping the whole spec here to read five lines
@@ -429,6 +447,15 @@ def decide(norm):
                     # The real resource, so the page names the database rather
                     # than the alarm about the database.
                     norm["resource"] = token.split("=", 1)[1]
+                # B-127. Which team owns the resource, and whether the resource
+                # said so or the instrumentation Lambda defaulted it. Both are
+                # carried: they route the same way today, and a reader that
+                # could not tell them apart would make the default permanent by
+                # making it invisible.
+                elif token.startswith("layer-source="):
+                    norm["layer_source"] = token.split("=", 1)[1]
+                elif token.startswith("layer="):
+                    norm["layer"] = token.split("=", 1)[1]
         if routing:
             return routing, f"alarm tag platform-routing={routing}"
         # No tag. Either an alarm the platform did not create, or one created
@@ -561,7 +588,26 @@ def dedup_key(norm):
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
-def routing_key(tier):
+def tenant_facts(account_id):
+    """The tenant record for an account, or None. Cached for the container."""
+    if not account_id:
+        return None
+    if "map" not in _FACTS_CACHE:
+        try:
+            raw = ssm.get_parameter(Name=TENANT_FACTS_PARAM)["Parameter"]["Value"]
+            _FACTS_CACHE["map"] = json.loads(raw)
+        except Exception as exc:                      # noqa: BLE001
+            _FACTS_CACHE["map"] = {}
+            _FACTS_CACHE["error"] = type(exc).__name__
+    return (_FACTS_CACHE["map"] or {}).get(account_id)
+
+
+def platform_key(tier):
+    """AltDigital's own routing key for this tier.
+
+    The destination for AltDigital's own accounts, and the fallback for every
+    tenant lookup that cannot complete.
+    """
     name = PD_SECRET_NAME_LOW if tier in ("dev", "test") and PD_SECRET_NAME_LOW \
         else PD_SECRET_NAME
     if not name:
@@ -570,9 +616,105 @@ def routing_key(tier):
     return json.loads(raw).get("events_v2_routing_key")
 
 
+def routing_key(tier, layer=None, account_id=None):
+    """(key, destination, note) for one alarm.
+
+    Three dimensions, each from a different place so none can be quietly
+    re-derived here:
+
+      tenant   the account id, through the tenant facts map in SSM
+      tier     the alarm's own platform-tier, parsed from the description
+      layer    the alarm's platform-layer, ditto -- B-127
+
+    The LAYER decides who, and it does so independently of the tier. AltDigital
+    owns the infrastructure in a tenant's account at every tier, so a dev-tier
+    VPC fault is still ours; the application at that same tier belongs to
+    whoever owns the application, which for Arc8 is Wayne's team and for a later
+    client is the client's own developers.
+
+    Every failure falls back to AltDigital's key WITH A NOTE rather than
+    raising. A routing lookup that fails during an incident must not turn a page
+    into no page, and the wrong page is recoverable in a way silence is not. The
+    note is printed so the fallback is visible rather than inferred.
+    """
+    # Infrastructure at any tier is AltDigital's to answer for, but it still
+    # belongs on the TENANT's infra service rather than the platform's own, so
+    # the tenant's own console shows their estate.
+    #
+    # ONLY an exact "application" routes to the application team. Written this
+    # way round deliberately, and the first version was written the other way:
+    # `INFRA_OBJECT if (not layer or layer == "infrastructure") else None` sends
+    # every value it does not recognise -- a typo, a future third layer, a
+    # truncated trailer -- to the APPLICATION team, which is the one direction
+    # that wakes a client at 3am for something that may well be ours.
+    #
+    # The instrumentation Lambda already maps an unrecognised value to
+    # infrastructure before it reaches the trailer, so this should be
+    # unreachable. It is written to be safe anyway: this function also receives
+    # alarms that predate the field, and a routing default should not depend on
+    # another component having been correct.
+    object_name = None if layer == "application" else INFRA_OBJECT
+
+    facts = tenant_facts(account_id)
+    if not facts:
+        return platform_key(tier), "platform", (
+            "no tenant facts for account " + str(account_id) + " in "
+            + TENANT_FACTS_PARAM
+            + ((" (" + _FACTS_CACHE["error"] + " reading it)")
+               if _FACTS_CACHE.get("error") else "")
+            + "; paged AltDigital's own service. Correct for AltDigital's own "
+              "accounts, a gap for anything else.")
+
+    client = facts.get("client")
+    if not client:
+        return platform_key(tier), "platform", (
+            "account " + str(account_id) + " has tenant facts with no client; "
+            "paged AltDigital's own service.")
+
+    if object_name is None:
+        # Application layer. The object is the account's app, which is the same
+        # granularity the PagerDuty services were built at.
+        object_name = facts.get("app")
+        if not object_name:
+            return platform_key(tier), "platform", (
+                "account " + str(account_id) + " is a tenant account with no "
+                "`app` recorded, so its application service cannot be named. "
+                "Paged AltDigital rather than guessing which of a tenant's "
+                "services should wake somebody.")
+
+    secret_name = "/".join(
+        [TENANT_KEY_PREFIX, client, tier or "prod", object_name])
+    if secret_name in _KEY_CACHE:
+        return _KEY_CACHE[secret_name], "tenant:" + secret_name, None
+    try:
+        raw = secrets.get_secret_value(SecretId=secret_name)["SecretString"]
+        key = json.loads(raw).get("events_v2_routing_key")
+    except Exception as exc:                          # noqa: BLE001
+        return platform_key(tier), "platform", (
+            "could not read " + secret_name + " (" + type(exc).__name__
+            + "), so this tenant's service could not be paged. Fell back to "
+              "AltDigital's own: a page to the wrong rotation is recoverable, "
+              "silence is not. Run scripts/sync-pagerduty-tenants.sh.")
+    if not key:
+        return platform_key(tier), "platform", (
+            secret_name + " holds no events_v2_routing_key.")
+    _KEY_CACHE[secret_name] = key
+    return key, "tenant:" + secret_name, None
+
+
 def page(norm, routing, why):
     tier = norm.get("environment_tier") or "prod"
-    key = routing_key(tier)
+    key, destination, key_note = routing_key(
+        tier, norm.get("layer"), norm.get("account_id"))
+    if key_note:
+        # Printed, never swallowed. A fallback nobody can see becomes permanent,
+        # and this one routes a tenant's alarm to AltDigital -- which looks
+        # exactly like working until the tenant asks why they never hear from us.
+        print(json.dumps({"record_type": "routing-key-fallback",
+                          "account_id": norm.get("account_id"),
+                          "tier": tier, "layer": norm.get("layer"),
+                          "layer_source": norm.get("layer_source"),
+                          "destination": destination, "why": key_note}))
     if not key:
         raise RuntimeError(
             "No Events API v2 routing key. Refusing to silently not page: the "
