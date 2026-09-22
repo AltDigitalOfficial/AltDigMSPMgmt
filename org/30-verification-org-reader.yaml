@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — a read-only role in the MANAGEMENT account
+  letting the verification sweep ask Organizations where an account actually
+  sits and what is actually attached to it. B-112.
+
+# ---------------------------------------------------------------------------
+# Why the sweep needs to read Organizations at all
+# ---------------------------------------------------------------------------
+# design 13's check 6 asks that "the guardrail test harness passes against
+# these specific accounts". Decided with Jamie on 2026-09-22 that this is the
+# wrong per-account check, and this role serves what replaced it.
+#
+# The reasoning, in short: SCPs attach to OUs, not to accounts. Running
+# `scripts/test-guardrails.sh` for forty accounts in one OU tests the same
+# policy forty times. It also cannot run from a read-only role — it proves SCPs
+# work by ATTEMPTING DENIED ACTIONS with an administrator, creating IAM roles,
+# KMS keys, backup vaults and EBS volumes inside the account it is testing.
+#
+# What is genuinely true per account, and genuinely a read, is INHERITANCE:
+#
+#   is this account under the OU we believe it is, and are the policies we
+#   believe are attached actually attached to that OU?
+#
+# The harness stays the per-OU exercise it already is. This answers the
+# per-account question without holding admin anywhere.
+#
+# ---------------------------------------------------------------------------
+# Why the comparison is not vacuous
+# ---------------------------------------------------------------------------
+# The expected OU comes from SSM under /platform/org/ou/members/<partner>/
+# <client>, published when the OU was created. The ACTUAL parent comes from
+# Organizations. Two different sources, which is the whole point — reading both
+# from the registry would confirm the registry agrees with itself.
+#
+# This is the same construction `scripts/lib/cost_categories.py` uses: the
+# registry says what should exist and Organizations says what does, and the gap
+# between them is the finding.
+#
+# ---------------------------------------------------------------------------
+# Why it is in the management account, and why that is not a workload
+# ---------------------------------------------------------------------------
+# The Organizations API answers only in the management account or a delegated
+# administrator, and the OU parameters live there too. CLAUDE.md keeps the
+# management account holding "the Organization and nothing else" — a read-only
+# role over the Organization's own structure is not a workload, it is a view of
+# the one thing this account is for. Same argument that puts Cost Categories
+# here.
+
+Parameters:
+
+  ToolingAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: >-
+      The Platform Tooling account, where the verification sweep runs. No empty
+      default: unlike the member-side reader this template is deployed
+      deliberately to one account, so an operator who does not know the tooling
+      account id should stop rather than create a role that trusts nobody.
+
+Resources:
+
+  VerificationOrgReaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformVerificationOrgReader
+      Description: >-
+        Read-only over Organization structure and the published OU parameters.
+        Assumed by the provisioning verification sweep. B-112.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              # Naming the account alone would let every principal in tooling
+              # read the Organization's structure. The sweep is the only
+              # legitimate caller.
+              #
+              # A pattern rather than an exact ARN because the verification
+              # function is not deployed (B-110). Still narrow: SCP 03 governs
+              # who may create a Platform* role. Replace with the function's
+              # role ARN once the provisioning stack exists.
+              ArnLike:
+                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:role/PlatformVerification*'
+      Policies:
+        - PolicyName: ReadOrganizationStructure
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              - Sid: ReadPlacementAndAttachedPolicies
+                Effect: Allow
+                Action:
+                  # Where the account actually is.
+                  - organizations:ListParents
+                  - organizations:DescribeOrganizationalUnit
+                  # What is actually attached there. ListPoliciesForTarget
+                  # returns attachment, not content — the sweep is asking
+                  # whether the guardrails apply to this account, not what they
+                  # say. DescribePolicy is deliberately NOT granted: policy
+                  # bodies are in the repository and reading them from the API
+                  # would answer a question nobody asked.
+                  - organizations:ListPoliciesForTarget
+                Resource: '*'
+                # Organizations list operations admit no resource ARN. The
+                # actions are enumerated, none of them mutates, and none can
+                # read account contents — only structure.
+
+              - Sid: ReadPublishedOuParameters
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/platform/org/ou/*'
+                # Scoped to the OU tree only. The rest of /platform/ in this
+                # account includes identity and config values the sweep has no
+                # business reading.
+
+      Tags:
+        # CLAUDE.md hard rule, Jamie 2026-09-22.
+        - Key: platform-layer
+          Value: infrastructure
+        - Key: platform-managed
+          Value: 'true'
+
+Outputs:
+
+  VerificationOrgReaderRoleArn:
+    Description: >-
+      Set as ORG_READER_ROLE_ARN on the verification function. Absent, the
+      inheritance check reports undeterminable and says why rather than
+      passing.
+    Value: !GetAtt VerificationOrgReaderRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-VerificationOrgReaderRoleArn'

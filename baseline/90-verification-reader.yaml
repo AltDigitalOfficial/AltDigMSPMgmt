@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — a read-only role the verification sweep can
+  assume to answer two of design 13's nine checks from inside a member account.
+  Part of the member baseline StackSet. B-112.
+
+# ---------------------------------------------------------------------------
+# Why this exists
+# ---------------------------------------------------------------------------
+# Three of design 13's verification checks need to read state INSIDE a tenant's
+# accounts. `provisioning/src/verify.py` runs outside them, holds no role in a
+# member account, and reported all three as `undeterminable` — which blocks
+# go-live. Correct, and useless: the sweep could never clear for any tenant no
+# matter how healthy, so the gate was permanently shut rather than selective.
+#
+# Two of the three are genuine reads and this role serves them:
+#
+#   canary running and passing        synthetics, last run result
+#   backup policy and recovery point  backup, plans and recovery points
+#
+# ---------------------------------------------------------------------------
+# The third check is NOT served by this role, deliberately
+# ---------------------------------------------------------------------------
+# Decided with Jamie, 2026-09-22.
+#
+# B-112 originally asked this role to also carry "the guardrail harness against
+# these accounts". It cannot, and it should not.
+#
+# `scripts/test-guardrails.sh` proves SCPs work by ATTEMPTING DENIED ACTIONS
+# with an administrator. It creates IAM roles, KMS keys, backup vaults and EBS
+# volumes, and its own header says it requires credentials in the management
+# account. A read-only role cannot run it, and giving the sweep what it needs
+# would mean a scheduled job holding admin in every tenant account in the
+# estate — the exact thing B-112 said it wanted to avoid.
+#
+# It would also mean creating test IAM roles and KMS keys inside a client's
+# account as a condition of their go-live.
+#
+# The deeper objection is that it is the wrong check. SCPs attach to OUs, not
+# to accounts. Running the harness for forty accounts in one OU tests the same
+# policy forty times and learns nothing after the first. What is true PER
+# ACCOUNT is narrower and is a genuine read: is this account under the OU we
+# believe it is, and are the expected policies attached to that OU?
+#
+# So the harness stays the per-OU exercise it already is, and the per-tenant
+# check became an inheritance assertion in `verify.py`, which reads
+# Organizations and needs nothing in the member account at all.
+#
+# ---------------------------------------------------------------------------
+# Why not OrganizationAccountAccessRole
+# ---------------------------------------------------------------------------
+# It exists in every member account and would work today. It is also
+# administrative. A sweep that runs on a schedule should not hold admin in
+# every tenant account in the estate in order to find out whether a canary
+# passed, and a role that can do anything gives an auditor no way to bound what
+# a scheduled job did.
+
+Parameters:
+
+  ToolingAccountId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]{12}$'
+    Description: >-
+      The Platform Tooling account, which is where the verification sweep
+      runs.
+
+      Empty creates nothing. That is the correct state before the provisioning
+      stack exists — B-110 records that `provisioning/` has no CloudFormation
+      at all and the saga has only ever run locally, so there is currently no
+      principal to trust. A role trusting an account with no caller in it is a
+      standing grant nobody is using, which is worse than its absence because
+      it reads as deliberate.
+
+Conditions:
+  # No tooling account, no role. Same shape as the CentralBusArn condition in
+  # 70-event-forwarding: an empty parameter disables the resource rather than
+  # creating one that exists, reads as configured, and serves nobody.
+  HasTooling: !Not [!Equals [!Ref ToolingAccountId, '']]
+
+Resources:
+
+  VerificationReaderRole:
+    Type: AWS::IAM::Role
+    Condition: HasTooling
+    Properties:
+      RoleName: PlatformVerificationReader
+      Description: >-
+        Read-only. Assumed by the provisioning verification sweep in the
+        Platform Tooling account to answer two of design 13's checks. B-112.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              # Naming the account alone would let ANY principal in tooling
+              # assume this, which is most of the tooling account's own
+              # automation. The sweep is the only legitimate caller.
+              #
+              # A pattern rather than an exact role ARN because the
+              # verification function is not deployed yet (B-110), so there is
+              # no ARN to name. The pattern is still narrow: SCP 03 governs
+              # who may create a role named Platform*, so the set of principals
+              # that can ever match this is controlled rather than open.
+              #
+              # Replace with the exact function role ARN once the provisioning
+              # stack exists. A pattern that could have been an ARN is a
+              # standing exception nobody revisits.
+              ArnLike:
+                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:role/PlatformVerification*'
+      Policies:
+        - PolicyName: VerificationReads
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              # --- check 3: the canary is running and passing ---------------
+              #
+              # DescribeCanariesLastRun is the check almost exactly: it returns
+              # each canary's most recent run and its state. GetCanaryRuns is
+              # here because "passing" is a question about a RUN OF RUNS — one
+              # green run after four red ones is not a passing canary, and the
+              # sweep should be able to see that rather than reading the last
+              # result and calling it health.
+              - Sid: ReadCanaryState
+                Effect: Allow
+                Action:
+                  - synthetics:DescribeCanaries
+                  - synthetics:DescribeCanariesLastRun
+                Resource: '*'
+                # Both are list operations and admit no resource ARN. The
+                # actions are enumerated, which is what the guard rule asks
+                # for, and neither can mutate or read anything beyond canary
+                # metadata.
+
+              - Sid: ReadCanaryRuns
+                Effect: Allow
+                Action: synthetics:GetCanaryRuns
+                Resource: !Sub 'arn:${AWS::Partition}:synthetics:*:${AWS::AccountId}:canary:*'
+
+              # --- check 5: backup policy attached, first recovery point ----
+              #
+              # Two halves, and the check is only satisfied by both. A plan
+              # with no recovery point is a policy that has never run, which
+              # looks identical to a healthy one in every console view that
+              # shows configuration rather than outcome.
+              - Sid: ReadBackupConfiguration
+                Effect: Allow
+                Action:
+                  - backup:ListBackupPlans
+                  - backup:ListBackupVaults
+                  - backup:GetBackupPlan
+                  - backup:ListBackupSelections
+                Resource: '*'
+
+              - Sid: ReadRecoveryPoints
+                Effect: Allow
+                Action: backup:ListRecoveryPointsByBackupVault
+                Resource: !Sub 'arn:${AWS::Partition}:backup:*:${AWS::AccountId}:backup-vault:platform-backup-*'
+                # Scoped to the platform's own vault naming
+                # (recovery/30-backup-policy.yaml creates
+                # platform-backup-<tier>). A tenant's own vaults are not the
+                # platform's business and the sweep has no reason to enumerate
+                # what is in them.
+
+      Tags:
+        # CLAUDE.md hard rule, Jamie 2026-09-22: everything the platform builds
+        # carries this. It is what tells the router at alarm time that a
+        # resource is AltDigital's to answer for rather than the application
+        # team's. B-127.
+        - Key: platform-layer
+          Value: infrastructure
+        - Key: platform-managed
+          Value: 'true'
+
+Outputs:
+
+  VerificationReaderRoleArn:
+    Condition: HasTooling
+    Description: >-
+      The ARN the verification sweep assumes. Read by provisioning/src/verify.py
+      once the provisioning stack exists.
+    Value: !GetAtt VerificationReaderRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-VerificationReaderRoleArn'

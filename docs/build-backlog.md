@@ -4314,7 +4314,9 @@ real customer attached to the wrong one.
 
 ## B-112 · The verification sweep cannot read into tenant accounts
 
-**Open** — 2026-09-21.
+**RESOLVED** — 2026-09-22. See the resolution below; the original statement
+is kept because the reasoning that rejected the harness still explains why the
+per-tenant check is narrower than design 13 asks for.
 
 Three of design 13's nine verification checks need to read state *inside* a
 tenant's own AWS accounts:
@@ -4340,6 +4342,89 @@ to find out whether a canary passed.
 **Trigger:** when the vesting pipeline (phase 3) first produces accounts. Until
 then there is nothing to read into, and the checks are blocked by the absence
 of accounts rather than by the absence of a role.
+
+### Resolved 2026-09-22 — two reads served, and the third check replaced
+
+Jamie agreed the narrowing the same day.
+
+**Two of the three were genuine reads** and are now served by
+`baseline/90-verification-reader.yaml`: `PlatformVerificationReader`, scoped to
+six synthetics and backup actions, trusting only a `PlatformVerification*`
+principal in tooling rather than the whole account. Deliberately not
+`OrganizationAccountAccessRole` — a sweep on a schedule should not hold admin
+in every tenant account to find out whether a canary passed.
+
+`check_canary` and `check_backup` now read through it, and both distinguish the
+three states that matter: cannot assume is **undeterminable**, never `fail`.
+"I could not look" and "I looked and it is broken" send people to different
+places.
+
+Two specific traps are closed by the new code rather than by the role:
+
+- **Zero canaries is a FAIL, not a pass.** An empty population produces zero
+  failures, and a check reading that as health would clear a tenant with no
+  monitoring at all.
+- **A backup plan with no recovery point is a FAIL.** A plan that has never run
+  is identical to a healthy one in every view showing configuration rather than
+  outcome, which is exactly why design 13 asks for the first recovery point and
+  not the plan.
+
+`check_backup` was also **stale**: it reported that design 05 was absent and
+that there was no backup policy to attach, which stopped being true when design
+05 arrived and `recovery/30-backup-policy.yaml` was built and deployed. A stale
+refusal is the same defect as a stale pass — the check was reporting what was
+true when it was written, not the estate.
+
+**The third check was the wrong check.** `scripts/test-guardrails.sh` proves
+SCPs work by ATTEMPTING DENIED ACTIONS with an administrator: it creates IAM
+roles, KMS keys, backup vaults and EBS volumes in the account under test, and
+its own header requires management-account credentials. A read-only role cannot
+run it; giving the sweep what it needs means a scheduled job holding admin
+across the estate, and creating test IAM roles inside a client's account as a
+condition of their go-live.
+
+It is also redundant. SCPs attach to OUs. Running the harness for forty
+accounts in one OU tests the same policy forty times.
+
+So `check_guardrails` became an **inheritance assertion**: is this account under
+the OU we published, and is anything beyond AWS's default `FullAWSAccess`
+attached there? Expected comes from SSM, actual from Organizations — two
+sources, so the comparison is not the registry agreeing with itself.
+`org/30-verification-org-reader.yaml` carries the read.
+
+**Proved live, not asserted.** The org reader was deployed to management
+(`platform-verification-org-reader`), a temporary `PlatformVerificationProbe`
+role was created in tooling, and the chain was exercised end to end:
+
+| call | result |
+|---|---|
+| `ssm:GetParameter` on the published client OU | `ou-t7wy-cp0ss1x1` |
+| `organizations:ListParents` on a real account | `ou-t7wy-9pmwmp9x` |
+| `organizations:ListPoliciesForTarget` | three Platform SCPs + FullAWSAccess |
+| `ssm:GetParameter` on `/platform/identity/*` | **AccessDenied** |
+| `organizations:DescribePolicy` | **AccessDenied** |
+
+Then `check_guardrails` itself was run against live Organizations and returned
+`fail` with both sides of the comparison in `examined`. The probe role was
+deleted and its absence confirmed.
+
+This is the B-108 / B-113 / B-114 lesson applied rather than restated: test a
+capability by USING it. Both denials above were checked as deliberately as the
+grants.
+
+**15 unit cases**, covering every refusal path including both undeterminable
+branches for each read.
+
+**Still open, and not this item's to fix.** The trust policies name
+`PlatformVerification*` as a pattern because the verification function has no
+deployment at all (B-110) — `provisioning/` contains no CloudFormation and the
+saga has only ever run locally. Replace both with the function's exact role ARN
+once that stack exists. A pattern that could have been an ARN is a standing
+exception nobody revisits.
+
+`baseline/90-verification-reader.yaml` is written and passes both gates; it
+reaches accounts when the baseline StackSet next deploys, which for tenants is
+their vesting.
 
 ## B-113 · Two registry record shapes, and the sweep read the wrong one
 

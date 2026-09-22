@@ -101,6 +101,14 @@ Resources:
     Properties:
       Description: Encrypts cross-account backup copies. Required for copy to work at all.
       EnableKeyRotation: true
+      # design 04 specifies 30 days, not KMS's 7-day default. Missed when this
+      # template was written and caught by cfn-guard afterwards, which means
+      # B-043 was committed with a template that did not pass the gate
+      # CLAUDE.md requires. The consequence was real rather than cosmetic: this
+      # key encrypts every cross-account backup copy, and scheduling its
+      # deletion destroys the copies with it. Seven days is not enough notice
+      # for the one key whose loss is unrecoverable by design.
+      PendingWindowInDays: 30
       KeyPolicy:
         Version: '2012-10-17'
         Statement:
