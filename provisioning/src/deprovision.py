@@ -213,6 +213,30 @@ def authorise(rec, mode, authorised_by=None):
         raise Refused(
             f"{rec.get('tenant_id')} is already dormant. Nothing to tear down.")
 
+    # design 14 step 1: "Final backup taken and verified." Not taken --
+    # VERIFIED.
+    #
+    # Dormancy is the one teardown that is MEANT to be reversed, which makes
+    # the backup load-bearing in a way it is not for exit: the re-vest
+    # restores from it. An unverified final backup is indistinguishable from a
+    # good one until the re-vest that needs it, and by then the environment
+    # has been gone for a season.
+    #
+    # Checked here as well as in revest.assert_can_teardown, because this is
+    # the function somebody actually calls. A gate that lives only in the
+    # module nobody invokes is a gate in name.
+    if mode == "dormant":
+        import revest
+        backup = revest.final_backup(rec.get("tenant_id"), rec)
+        if backup["state"] != "verified":
+            raise Refused(
+                f"dormant teardown needs a VERIFIED final backup and this one "
+                f"is {backup['state']}. {backup['why']} Backup infrastructure "
+                "does not exist (B-043, design 05 absent), so no tenant can "
+                "currently satisfy this. Refusing is recoverable; tearing "
+                "down a seasonal environment whose backup turns out to be "
+                "unreadable is not.")
+
     return True
 
 
