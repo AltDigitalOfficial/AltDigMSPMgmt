@@ -259,12 +259,26 @@ Parameters:
 
   TeardownResourceTypes:
     Type: String
-    Default: EBS
+    Default: EBS,RDS
     Description: >-
-      Which resource types teardown is ARMED to delete. Defaults to EBS alone —
-      the only type exercised end to end against the sandbox fixture. An
-      unarmed type is reported as an orphan for a human instead. B-045, and the
-      reasoning is in recovery/src/teardown.py.
+      Which resource types teardown is ARMED to delete. An unarmed type is
+      reported as an orphan for a human instead.
+
+      RDS was added 2026-09-22 after being exercised end to end against a real
+      db.t4g.micro in the exercise account (B-045). The objection to arming it
+      was specific — "a DeleteDBInstance call that has never once run is
+      exactly the code that should not be armed by default" — and it has now
+      run, including all three of its refusals: recovery mode, an unarmed type,
+      and a provenance mismatch each left the instance running.
+
+      The exercise also proved the half that matters more. `DeleteAutomatedBackups`
+      is False, and after the delete the automated backup reported `retained`.
+      This platform's automation does not delete backups, and that is now a
+      verified claim rather than a documented intention.
+
+      Still a parameter, and still narrowable per account. Arming is a decision
+      somebody makes about a specific account; the default is what that
+      decision starts from.
 
   LogsKeyArn:
     Type: String

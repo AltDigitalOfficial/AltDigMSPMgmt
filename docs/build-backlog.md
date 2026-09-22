@@ -1503,6 +1503,37 @@ Practically: it is part of that work, not a separate item discovered later.
 
 ## B-045 · Teardown is armed for EBS only
 
+**CLOSED 2026-09-22.** RDS exercised end to end against a real
+`db.t4g.micro` in the exercise account, and armed by default.
+
+The objection was always specific and never about the code being unwritten:
+*"a `DeleteDBInstance` call that has never once run is exactly the code that
+should not be armed by default."* It has now run.
+
+**All three refusals were exercised first, and each left the instance
+running:**
+
+| case | outcome |
+|---|---|
+| `mode: recovery` with everything else correct | refused — teardown is test-mode only |
+| RDS absent from the armed set | refused — reported as an orphan for a human |
+| execution id does not match the resource's tag | refused — provenance failed |
+
+Only the fourth case, armed and in test mode with matching provenance,
+deleted.
+
+**The half that matters more was also proven.** `DeleteAutomatedBackups` is
+`False`, and after the instance was deleted its automated backup reported
+status `retained`. "This platform's automation does not delete backups" is now
+a verified claim rather than a documented intention — and those are different
+things, which is the whole reason this entry existed.
+
+Still a parameter and still narrowable per account. Arming remains a decision
+somebody makes about a specific account; what changed is where that decision
+starts from.
+
+The original entry follows.
+
 **UNAFFECTED by design 05** — 2026-09-22. Recorded because this entry sits
 among the ones 05 unblocked and is not one of them.
 
