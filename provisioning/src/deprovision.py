@@ -199,6 +199,23 @@ def authorise(rec, mode, authorised_by=None):
             "contractual exit, pass one; if it is not, this is the wrong "
             "tenant.")
 
+    # An exit removes a partner's client, and design 10 makes it a contractual
+    # commitment. B12 / prompt 14.6: one person both requesting and
+    # authorising it is not a commitment either party verified.
+    if mode == "exit":
+        import separation
+        # Re-raised as Refused rather than allowed to escape. This module's
+        # contract is that a refusal is a Refused -- callers distinguish
+        # "the machine declined" from "the machine tried and could not", and a
+        # separation violation is emphatically the first. Letting a different
+        # exception type through would make it read as a failure.
+        sep = separation.check(
+            "exit-authorisation",
+            rec.get("exit_requested_by"), authorised_by,
+            names=("exit_requested_by", "authorised_by"))
+        if sep["verdict"] != separation.CLEAR:
+            raise Refused(sep["why"])
+
     # cleanup is for unwinding a halted provisioning, not for removing a
     # working tenant. Using it on a live tenant would skip the extraction that
     # exit performs -- the customer's data would be gone with no copy.

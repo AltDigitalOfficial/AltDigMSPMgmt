@@ -273,6 +273,22 @@ def record_notification(incident_id, leg, notifier, notified_at=None,
             "party above it, so recording AltDigital as having notified a "
             "client would assert a relationship that does not exist.")
 
+    # B12 / prompt 14.6: the two legs must be recorded by different people.
+    # One person discharging both makes the chain two notifications that were
+    # a single act -- and the chain is the whole reason this platform models
+    # partner and client as separate parties at all.
+    #
+    # Checked against what is ALREADY recorded rather than against a claim in
+    # this call, because the other leg may have been recorded days earlier by
+    # somebody else.
+    import separation
+    other_leg = next(l for l in LEG_NOTIFIERS if l != leg)
+    already = discharged(incident_id).get(other_leg)
+    if already and recorded_by:
+        separation.assert_separated(
+            "notification-chain", already.get("recorded_by"), recorded_by,
+            names=(f"{other_leg} (recorded earlier)", leg))
+
     when = notified_at or _iso(_now())
     dynamodb.put_item(
         TableName=INCIDENT_TABLE,

@@ -20,7 +20,7 @@ Status as of v0.1. Items are grouped by whether they block build work.
 | B9 | **Golden Jira scheme design** | Jamie | Built by hand once, shared across all tenants. Blocks provisioning automation. |
 | B10 | **Service account identities** for Jira, PagerDuty, Truveon | Jamie | Platform identities, not personal. Tokens in Secrets Manager. |
 | B11 | **Blocking vs non-blocking task set** — confirm | Jamie | Draft in [13](design/13-client-provisioning.md); needs sign-off before first onboarding |
-| B12 | **Dual-hat SoD action list** | Jamie | Which actions claim AltDigital/partner separation, and the rule preventing one person holding both roles — see [15](design/15-partner-model.md) |
+| B12 | **Dual-hat SoD action list** | ~~Jamie~~ CLOSED | **All four actions, entity-blind.** Decided 2026-09-22: notification-chain discharge, change approval, exit authorisation and go-live each require two different individuals regardless of which entity they act for — design 15's own recommended minimum. It BLOCKS rather than warns, because Jamie will never own the dev teams (that is Wayne, Tina, outsourced dev or the client), so the MSP-side approver always has a different person opposite. Enforced in `partners/src/separation.py`; the ACTIONS table is the decision |
 | B13 | **SOC 2 carve-out scoping** | Jamie | Confirm AltDigital's report scope and what remains in each partner's scope |
 | B14 | **Root mailbox is a monitored DL; plus-addressing verified** | Jamie | `msp-mgmt@altdigital.ai` — AWS sends root security notices there |
 | B15 | **Account alias prefix confirmed** | Jamie | `ad-` assumed; aliases are globally unique across all AWS |

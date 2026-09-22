@@ -159,6 +159,18 @@ def assess(tenant_id):
                 "transition: SLA measurement, billing, and the on-call "
                 "rotation. Nothing here approves it.")})
 
+    # 5. Two people, not one. B12 / prompt 14.6, entity-blind by Jamie's
+    #    decision of 2026-09-22. The requester is whoever owns the dev team,
+    #    which is deliberately never the same person as the MSP-side approver.
+    import separation
+    sep = separation.check("go-live",
+                           record.get("go_live_requested_by"), approver,
+                           names=("go_live_requested_by",
+                                  "go_live_approved_by"))
+    checks.append({"check": "separation",
+                   "ok": sep["verdict"] == separation.CLEAR,
+                   "why": sep["why"]})
+
     return record, checks
 
 
