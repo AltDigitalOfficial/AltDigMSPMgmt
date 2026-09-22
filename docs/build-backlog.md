@@ -4619,9 +4619,29 @@ firings, giving a monthly cron months and a daily cron days. That is the same
 property `interval * MIN_INTERVALS` gives a `rate()` rule, and it is what keeps
 "did not run" distinguishable from "not due yet".
 
-`L`, `W` and `#` remain refused. Treating `L` as a literal would count firings
-on days the rule never fires, and the original reasoning holds: a gap that says
-so is recoverable, one that returns "fine" is not.
+**Second pass, same day.** The first version refused `L`, `W` and `#`, and
+deploying it showed why that was not good enough: the estate's ONE cron rule is
+`cron(0 14 ? * 3#2 *)` -- the second Tuesday of the month -- so the checker
+evaluated nine rules of ten and reported the tenth as unevaluated forever. The
+gap said so, which is the property that was defended, and it was still a gap
+covering exactly the case that existed.
+
+`#` and `L` are now computed exactly, because enumeration makes them arithmetic
+rather than approximation: `3#2` asks which occurrence of its weekday a date
+is, and `L` asks whether the next day is in another month. Only `W` -- "nearest
+weekday", which does not cross a month boundary and moves a Saturday the 1st
+forward rather than back -- is still refused, and no rule in the estate uses it.
+
+Deploying also found a second defect. A 100-day window at hourly granularity is
+2400 datapoints and CloudWatch rejects anything over 1440. The clamp went into
+`triggered_series` rather than the cron call site, because the limit is a
+property of the API and not of one caller.
+
+**Verified live:** 10 of 10 scheduled rules evaluated, none unevaluated. The
+monthly rule reports `no_metric` -- its stack was created on 2026-09-19 and the
+second Tuesday of September was the 8th, so it has legitimately never fired and
+next fires on 13 October. That is the "absence of evidence, not evidence of
+absence" case the verdict exists for.
 
 **Option 1 below was rejected on reflection.** Converting the containment
 exercise to `rate(30 days)` would trade a predictable monthly date for one

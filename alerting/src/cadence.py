@@ -114,10 +114,20 @@ _MONTHS = {m: i + 1 for i, m in enumerate(
     ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
      "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"])}
 
-# Characters this parser does not implement. Refused rather than ignored: `L`
-# in a day-of-month field means "last day", and silently treating it as a
-# literal would count firings on days the rule never fires.
-_UNSUPPORTED = ("L", "W", "#")
+# `W` -- "nearest weekday to day N" -- is the one construct still refused. Its
+# rules are fiddly (it does not cross a month boundary, and a Saturday the 1st
+# moves forward rather than back), and no rule in the estate uses it. Refusing
+# is the same choice as before: a gap that says so is recoverable.
+#
+# `#` and `L` ARE implemented, because enumeration makes them exact rather than
+# approximate. `3#2` is "the second Tuesday", which is answerable by asking
+# which occurrence of its weekday a given date is; `L` is "the last day", which
+# is answerable by looking at the next one. Both were refused in the first
+# version of this parser, and the estate's one cron rule -- the monthly
+# containment exercise, cron(0 14 ? * 3#2 *) -- used exactly the syntax that
+# was refused, so the checker evaluated nine rules out of ten and reported the
+# tenth as unevaluated forever.
+_UNSUPPORTED = ("W",)
 
 
 class CronUnsupported(Exception):
@@ -154,6 +164,22 @@ def _field(spec, low, high, names=None):
     return out
 
 
+def _dow_constraint(spec):
+    """Split an AWS day-of-week field into (weekdays, nth, last).
+
+    `nth` is set for `N#M` -- the Mth occurrence of weekday N in the month.
+    `last` is set for `NL` -- the final occurrence of weekday N.
+    Both are exact under enumeration; neither needs a calendar library.
+    """
+    spec = spec.strip().upper()
+    if "#" in spec:
+        day, _, occurrence = spec.partition("#")
+        return _field(day, 1, 7, _DOW), int(occurrence), False
+    if spec.endswith("L") and spec not in ("L",):
+        return _field(spec[:-1], 1, 7, _DOW), None, True
+    return _field(spec, 1, 7, _DOW), None, False
+
+
 def cron_fields(expression):
     """AWS cron, as six sets. Always UTC -- EventBridge cron has no timezone."""
     match = _CRON.match((expression or "").strip())
@@ -167,10 +193,12 @@ def cron_fields(expression):
     return {
         "minute": _field(minute, 0, 59),
         "hour": _field(hour, 0, 23),
-        "dom": None if dom.strip() in ("?", "*") else _field(dom, 1, 31),
+        # `L` alone in day-of-month means the last day of the month.
+        "dom": None if dom.strip() in ("?", "*") else (
+            "last" if dom.strip().upper() == "L" else _field(dom, 1, 31)),
         "month": _field(month, 1, 12, _MONTHS),
         # AWS day-of-week is 1=Sunday.
-        "dow": None if dow.strip() in ("?", "*") else _field(dow, 1, 7, _DOW),
+        "dow": None if dow.strip() in ("?", "*") else _dow_constraint(dow),
         "year": _field(year, 1970, 2199),
     }
 
@@ -192,9 +220,28 @@ def cron_firings(expression, start, end):
     while day <= end:
         # AWS: Sunday is 1. Python's isoweekday has Monday 1, Sunday 7.
         aws_dow = (day.isoweekday() % 7) + 1
+
+        if fields["dom"] is None:
+            dom_ok = True
+        elif fields["dom"] == "last":
+            dom_ok = (day + datetime.timedelta(days=1)).month != day.month
+        else:
+            dom_ok = day.day in fields["dom"]
+
+        if fields["dow"] is None:
+            dow_ok = True
+        else:
+            weekdays, nth, last = fields["dow"]
+            dow_ok = aws_dow in weekdays
+            if dow_ok and nth is not None:
+                # Which occurrence of this weekday the date is: days 1-7 are
+                # the first, 8-14 the second, and so on.
+                dow_ok = (day.day - 1) // 7 + 1 == nth
+            if dow_ok and last:
+                dow_ok = (day + datetime.timedelta(days=7)).month != day.month
+
         if (day.year in fields["year"] and day.month in fields["month"]
-                and (fields["dom"] is None or day.day in fields["dom"])
-                and (fields["dow"] is None or aws_dow in fields["dow"])):
+                and dom_ok and dow_ok):
             for hour in fields["hour"]:
                 for minute in fields["minute"]:
                     moment = day.replace(hour=hour, minute=minute)
@@ -301,6 +348,18 @@ def triggered_series(rule_name, start, end, period):
     reported separately: zero is "it should have and did not", absent is
     "there is no evidence either way".
     """
+    # CloudWatch returns at most 1440 datapoints per call and rejects a
+    # request that would exceed it. Clamped HERE rather than at each call site,
+    # because the limit is a property of the API and not of any one caller --
+    # the cron path asked for 100 days at hourly granularity, which is 2400,
+    # and every future caller would have had to rediscover the same arithmetic.
+    #
+    # Rounded up to a whole minute: CloudWatch requires a period that is a
+    # multiple of 60 and rejects one that is not.
+    span = max(1, int((end - start).total_seconds()))
+    minimum = -(-span // 1440)                    # ceiling division
+    period = max(period, -(-minimum // 60) * 60)
+
     resp = cloudwatch.get_metric_statistics(
         Namespace="AWS/Events",
         MetricName="TriggeredRules",
