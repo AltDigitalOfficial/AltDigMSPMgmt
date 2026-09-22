@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the copy destination. design 05: "Backup copies
+  land in a separate backup account." Deploys ONLY to altdig-security-backup.
+
+# ---------------------------------------------------------------------------
+# Why a separate account at all
+# ---------------------------------------------------------------------------
+# design 05: "Vault Lock enabled — a compromised member account cannot destroy
+# its own backups. This is the ransomware answer, and auditors ask about it
+# directly."
+#
+# Vault Lock alone does not answer that. A locked vault in the SAME account as
+# the resource stops early deletion of recovery points, and leaves everything
+# else about that account in the attacker's hands: the KMS key, the account's
+# own quotas, the ability to fill the vault with garbage until it is useless.
+# The separation is what makes the lock mean something.
+#
+# So this vault lives in an account whose only job is holding copies, whose
+# only inbound permission is `backup:CopyIntoBackupVault`, and which no member
+# account can reach in any other way.
+#
+# ---------------------------------------------------------------------------
+# Compliance mode is irreversible, including by AWS
+# ---------------------------------------------------------------------------
+# Once `ChangeableForDays` elapses, the lock cannot be removed, shortened or
+# altered by anyone -- not by this account's root, not by the Organization
+# management account, not by AWS Support. The vault cannot be deleted until
+# every recovery point in it has aged out under the retention it was locked
+# with.
+#
+# That is the property that makes it worth having and the reason the grace
+# period is not zero. Three days is AWS's minimum and is what is set: long
+# enough that a wrong value deployed on a Friday is still correctable on the
+# Monday, short enough that the window is not the answer to "is it locked".
+#
+# MinRetentionDays is the value that becomes permanent. It is deliberately set
+# from a parameter with a conservative default rather than computed, because a
+# computed retention is a retention somebody can change without noticing that
+# this particular one cannot be changed back.
+
+Parameters:
+
+  MembersOrgPath:
+    Type: String
+    Description: >-
+      Organization ID. Copy permission is granted to the ORGANIZATION rather
+      than to a list of account ids, so a newly vested member can copy on the
+      day it is created rather than after somebody remembers to add it here.
+      The permission granted is narrow enough that org-wide is the right scope.
+
+  MinRetentionDays:
+    Type: Number
+    Default: 35
+    MinValue: 1
+    Description: >-
+      Becomes PERMANENT when the lock hardens. Copies cannot be deleted before
+      this many days, by anyone, for the life of the vault.
+
+  MaxRetentionDays:
+    Type: Number
+    Default: 2555
+    Description: >-
+      Seven years, matching the evidence retention elsewhere in the platform.
+      An upper bound is required by Vault Lock and is the less dangerous half:
+      it caps how long a copy may be kept, not how soon it may be destroyed.
+
+  VaultLockChangeableDays:
+    Type: Number
+    Default: 3
+    MinValue: 3
+    Description: Grace period before the lock becomes irreversible. AWS minimum is 3.
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # A customer-managed key, because cross-account copy requires one
+  # -------------------------------------------------------------------------
+  # Found by deploying. A vault encrypted with the default AWS Backup
+  # service-managed key cannot participate in a cross-account copy at all:
+  #
+  #   "Copy job failed because the destination Backup vault is encrypted with
+  #    the default Backup service managed key. The contents of this vault
+  #    cannot be copied."
+  #
+  # The service-managed key has no key policy anybody can edit, so there is no
+  # way to grant another account the use of it -- which is precisely what a
+  # cross-account copy needs. design 05 asks for copies into a separate
+  # account; a CMK is the mechanism that makes that possible rather than an
+  # optional hardening.
+  #
+  # The key policy grants USE to the organization and ADMINISTRATION to nobody
+  # but this account. A member account can encrypt a copy under this key and
+  # cannot schedule its deletion.
+
+  CopyVaultKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts cross-account backup copies. Required for copy to work at all.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AccountRoot
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: MembersMayEncryptCopies
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+              # AWS Backup creates grants on the caller's behalf during a copy.
+              - kms:CreateGrant
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref MembersOrgPath
+          - Sid: NobodySchedulesDeletion
+            Effect: Deny
+            Principal: '*'
+            # A key deletion destroys every copy encrypted under it, which is
+            # a faster route to the same outcome Vault Lock exists to prevent.
+            Action:
+              - kms:ScheduleKeyDeletion
+              - kms:DisableKey
+            Resource: '*'
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformQuorumExecutor'
+
+  CopyVaultKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-backup-copies
+      TargetKeyId: !Ref CopyVaultKey
+
+  CopyVault:
+    Type: AWS::Backup::BackupVault
+    # Retained, always. The stack that created it must never be the thing that
+    # removes it -- and after the lock hardens, CloudFormation could not delete
+    # it anyway, which would leave a stack that cannot be rolled back.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Named exactly as recovery/30-backup-policy.yaml's CopyActions expect.
+      # A mismatch here produces copy jobs that fail one per resource per
+      # schedule, which reads as a resource problem rather than a naming one.
+      BackupVaultName: platform-backup-copies
+      # The key ARN, never the alias. AWS Backup rejects an alias here with
+      # "Key Aliases are not supported for this operation".
+      EncryptionKeyArn: !GetAtt CopyVaultKey.Arn
+      LockConfiguration:
+        MinRetentionDays: !Ref MinRetentionDays
+        MaxRetentionDays: !Ref MaxRetentionDays
+        ChangeableForDays: !Ref VaultLockChangeableDays
+      AccessPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # Inbound: copy, and nothing else. A member account can put a copy
+          # here and cannot list, read, restore or delete what is here --
+          # including its own copies. That asymmetry is the whole design: the
+          # account that gets compromised is the account that cannot reach
+          # the backups.
+          - Sid: MembersMayCopyIn
+            Effect: Allow
+            Principal: '*'
+            Action: backup:CopyIntoBackupVault
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref MembersOrgPath
+
+          - Sid: NobodyDeletes
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - backup:DeleteRecoveryPoint
+              - backup:UpdateRecoveryPointLifecycle
+              - backup:DeleteBackupVault
+              - backup:DeleteBackupVaultAccessPolicy
+              - backup:PutBackupVaultAccessPolicy
+            Resource: '*'
+            Condition:
+              # design 05 puts vault deletion and lock modification under
+              # quorum control (design 03). This is that, expressed where it
+              # is enforced rather than where it is documented.
+              ArnNotLike:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformQuorumExecutor'
+
+  # -------------------------------------------------------------------------
+  # design 05: "periodically verify that a member account with full local admin
+  # genuinely cannot delete or alter its own backups"
+  # -------------------------------------------------------------------------
+  # The alarm, not the exercise. The exercise is a scheduled attempt from a
+  # member account and belongs with the other guardrail exercises; this is the
+  # detection that fires if a delete ever SUCCEEDS.
+  #
+  # A successful DeleteRecoveryPoint in this vault means the access policy, the
+  # lock, or both have stopped working, and it is the single most serious
+  # finding the backup layer can produce -- it is the ransomware answer having
+  # quietly stopped being an answer.
+
+  CopyVaultDeletionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-backup-copy-deleted
+      AlarmDescription: >-
+        A recovery point was deleted from the cross-account copy vault. This
+        vault denies deletion to every principal except the quorum executor and
+        is under Vault Lock, so a successful deletion means one of those two
+        controls is not working.
+
+        This is the ransomware answer having stopped being an answer. Treat it
+        as a security incident, not a backup problem.
+
+        CHECK: CloudTrail in the backup account for DeleteRecoveryPoint, then
+        the vault access policy and the lock configuration.
+      Namespace: AWS/Backup
+      MetricName: NumberOfRecoveryPointsDeleted
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  CopyVaultArn:
+    Description: Copy destination for every member account's backup plans.
+    Value: !GetAtt CopyVault.BackupVaultArn
+
+  LockHardensAfterDays:
+    Description: >-
+      Days during which MinRetentionDays can still be corrected. After this the
+      lock is irreversible by anyone, including AWS.
+    Value: !Ref VaultLockChangeableDays

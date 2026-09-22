@@ -99,6 +99,25 @@ Parameters:
       rejects anything higher, which is worth failing on at deploy time rather
       than in a backup job.
 
+  CopyRetentionDays:
+    Type: Number
+    Default: 35
+    Description: >-
+      Retention for the CROSS-ACCOUNT COPY, which is a different number from
+      local retention and must not be derived from it.
+
+      The destination vault is under Vault Lock with its own
+      `MinRetentionDays`, and a copy job specifying less is REJECTED. Found by
+      deploying: a dev account keeping 7 days locally produced copy jobs that
+      failed with "the retention specified in the job is not within the range
+      specified for the target Backup Vault" -- one per resource per schedule,
+      indefinitely, and per-job rather than per-account so it reads as a
+      resource problem.
+
+      Local retention is a cost decision the tier makes. Copy retention is a
+      floor the locked destination sets, and the destination wins because it
+      cannot be argued with after the lock hardens.
+
   SnapshotIntervalHours:
     Type: Number
     Default: 2
@@ -119,6 +138,13 @@ Parameters:
   KmsKeyArn:
     Type: String
     Default: ''
+    Description: >-
+      Customer-managed key for the LOCAL vault. Left empty uses the AWS Backup
+      service-managed key, which is adequate for local recovery points and
+      CANNOT participate in a cross-account copy -- the service key has no
+      editable policy, so no other account can be granted its use.
+
+      Supply a CMK in any account whose copies must reach the backup account.
 
 Conditions:
 
@@ -136,9 +162,15 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       BackupVaultName: !Sub 'platform-backup-${EnvironmentTier}'
+      # Omitted when no CMK is supplied, rather than pointing at the default
+      # key's alias. AWS Backup rejects an ALIAS arn here -- "Key Aliases are
+      # not supported for this operation" -- and applies the AWS-managed key
+      # itself when the property is absent. Found by deploying; the template
+      # validated and the alias looked like every other key reference in this
+      # repository.
       EncryptionKeyArn: !If
         - UseDefaultKey
-        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/backup'
+        - !Ref 'AWS::NoValue'
         - !Ref KmsKeyArn
       LockConfiguration:
         MinRetentionDays: !Ref RetentionDays
@@ -214,7 +246,8 @@ Resources:
             CopyActions:
               - DestinationBackupVaultArn: !Sub 'arn:${AWS::Partition}:backup:${AWS::Region}:${BackupAccountId}:backup-vault:platform-backup-copies'
                 Lifecycle:
-                  DeleteAfterDays: !Ref RetentionDays
+                  # NOT RetentionDays. See CopyRetentionDays.
+                  DeleteAfterDays: !Ref CopyRetentionDays
 
   ContinuousSelection:
     Type: AWS::Backup::BackupSelection
@@ -257,7 +290,7 @@ Resources:
             CopyActions:
               - DestinationBackupVaultArn: !Sub 'arn:${AWS::Partition}:backup:${AWS::Region}:${BackupAccountId}:backup-vault:platform-backup-copies'
                 Lifecycle:
-                  DeleteAfterDays: !Ref RetentionDays
+                  DeleteAfterDays: !Ref CopyRetentionDays
 
   SnapshotSelection:
     Type: AWS::Backup::BackupSelection

@@ -4862,6 +4862,14 @@ against an environment that cannot exercise them.
 
 ## B-124 · Three sources give three different restore-duration thresholds
 
+**CLOSED 2026-09-22.** Jamie confirmed 50%/80%. The reasoning that decided it:
+a breach alarm at 100% of RTO fires when the commitment has already been
+missed, with nothing left to do about the restore in progress; at 80% there is
+still budget to escalate. `docs/deviations.md` D-019 records the departure from
+design 05's indicative 75%/100%, and open-items B3 now reads as decided.
+
+The original entry follows.
+
 **Open, needs Jamie** — 2026-09-22.
 
 | Source | Warning | Breach |
@@ -4894,3 +4902,53 @@ are a percentage of is per tenant.
 **Resolution:** confirm 50/80 or adopt 75/100, then update whichever two of the
 three sources disagree. Leaving all three is the only option that is certainly
 wrong.
+
+## B-125 · A deny keyed on a role ARN is only as strong as control over role creation
+
+**Open** — 2026-09-22. Found by locking myself out of a vault I had just made.
+
+`recovery/40-backup-vault.yaml` and `30-backup-policy.yaml` both express design
+05's quorum requirement as a vault access policy:
+
+```yaml
+Effect: Deny
+Action: [backup:DeleteBackupVault, ...]
+Condition:
+  ArnNotLike:
+    aws:PrincipalArn: arn:aws:iam::<account>:role/PlatformQuorumExecutor
+```
+
+That is genuinely effective against the threat it names — a compromised member
+account principal cannot delete its own backups, and it stopped
+`OrganizationAccountAccessRole` cold when the vault needed replacing.
+
+**It is defeated by creating a role with that name.** Which is exactly what was
+done to recover: `iam:CreateRole` named `PlatformQuorumExecutor`, assume it,
+delete the vault. No quorum was involved, and nothing about the vault policy
+was bypassed — the policy was satisfied.
+
+**The control is therefore not the vault policy.** It is the vault policy plus
+whatever prevents arbitrary role creation in that account, and the second half
+is currently nothing. A member account with local admin can mint the role.
+
+**What closes it,** in rough order of strength:
+
+1. **An SCP denying `iam:CreateRole` and `iam:PutRolePolicy` for a role named
+   `PlatformQuorumExecutor`** in every account except where the platform
+   creates it. This is the direct fix and belongs with the other SCPs in
+   `policies/scp/`.
+2. Key the deny on a role's unique **RoleId** (`aws:userId`) rather than its
+   ARN. A RoleId cannot be reproduced by recreating a same-named role — but it
+   changes when the role is legitimately recreated, so the vault policy would
+   need updating on every quorum-stack redeploy.
+3. Vault Lock itself, which is not defeated by this and is the reason the
+   exposure is narrower than it looks: once the lock hardens, *no* principal
+   including root can shorten retention or delete a non-empty vault.
+
+**Why it is not urgent but must not be forgotten.** Vault Lock is the real
+protection for recovery points; this policy is defence in depth over the vault
+object. But the same `ArnNotLike` idiom appears in the KMS key policy, and
+deleting the KEY destroys every copy encrypted under it — which Vault Lock does
+not prevent.
+
+**Trigger:** before the first tenant's backups land in the copy vault.
