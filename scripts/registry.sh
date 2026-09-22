@@ -46,6 +46,7 @@ Usage: registry.sh <command> [options]
 
 Partners
   put-partner    --slug S --state STATE --notify-hours N --altdig-hours N
+                 [--downstream-sla PCT] [--altdig-sla PCT]
                  [--owner NAME] [--baa STATE]
   get-partner    --slug S
   list-partners
@@ -94,6 +95,8 @@ while [[ $# -gt 0 ]]; do
     --state)            STATE="$2"; shift 2 ;;
     --notify-hours)     NOTIFY_HOURS="$2"; shift 2 ;;
     --altdig-hours)     ALTDIG_HOURS="$2"; shift 2 ;;
+    --downstream-sla)   DOWNSTREAM_SLA="$2"; shift 2 ;;
+    --altdig-sla)       ALTDIG_SLA="$2"; shift 2 ;;
     --owner)            OWNER="$2"; shift 2 ;;
     --baa)              BAA="$2"; shift 2 ;;
     --ip-owner)         IP_OWNER="$2"; shift 2 ;;
@@ -235,6 +238,12 @@ cmd_put_partner() {
   "notify_hours":     {"N": "${NOTIFY_HOURS}"},
   "altdig_hours":     {"N": "${ALTDIG_HOURS}"},
   "baa_state":        {"S": "${BAA:-unknown}"},
+  # design 15's back-to-back pair. Captured at partner onboarding precisely so
+  # AltDigital's number can be compared with the partner's BEFORE signing --
+  # partners/src/backtoback.py does the comparison. Absent is a finding, not a
+  # default: an unrecorded downstream commitment cannot be checked against.
+  "downstream_sla_pct": $(ddb_str "${DOWNSTREAM_SLA:-}"),
+  "altdig_sla_pct":     $(ddb_str "${ALTDIG_SLA:-}"),
   "owner":            $(ddb_str "${OWNER:-unassigned}"),
   "updated_at":       {"S": "$(now_iso)"}
 }
