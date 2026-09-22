@@ -10,7 +10,7 @@ Status as of v0.1. Items are grouped by whether they block build work.
 |---|---|---|---|
 | B1 | **Default primary region** — us-east-2 or us-west-2 | Jamie | Vesting parameter default; trivial to decide, blocks Phase 3 |
 | B2 | **CVE remediation SLAs** per severity | Jamie | Committing beyond capability is worse than committing conservatively |
-| B3 | **Restore duration warning/breach thresholds** | Jamie | Principle agreed (two tiers, differentiated routing); values not set |
+| B3 | **Restore duration warning/breach thresholds** | Jamie | DECIDED 2026-09-18 as 50%/80% of RTO and built on. design 05 (2026-09-22) restates them as undecided with a different indicative pair — see B-124, which must be resolved rather than left as three answers |
 | B4 | **Circuit breaker and rate limit values** | Jamie | Now specified in [06a](design/06a-alarm-specification.yaml) `safety_rails` — 3x/hour, 20 actions/hour. Confirm or adjust. |
 | B16 | **`[TUNE]` alarm thresholds** | Jamie | [06a](design/06a-alarm-specification.yaml) marks ~12 thresholds as workload-specific. Null ones block alarm creation and raise exceptions by design. |
 | B5 | **Second baseline approver** (named) | Jamie | For periods of unavailability; needs occasional exercise |
@@ -100,7 +100,7 @@ These are load-bearing and break quietly. Each needs a scheduled test.
 | V1 | Member account with full local admin cannot remove detective controls | Phase 1 guardrail harness |
 | V2 | Member account cannot delete or alter its own backups | Scheduled, per [05](design/05-resilience.md) |
 | V3 | Containment role cannot be blocked by a compromised member account | Phase 7 blast-radius verification |
-| V4 | Restore test VPC is genuinely isolated from production | Scheduled, per [05](design/05-resilience.md) |
+| V4 | Restore test VPC is genuinely isolated from production | DEFINED by 05 (2026-09-22): "isolated, and a test restore cannot reach production". Network floor asserted in `recovery/src/worker.py`; what remains unproven is named in the evidence rather than left unknown |
 | V5 | Break-glass access path works | Scheduled, per [03](design/03-identity-and-access.md) |
 | V6 | Evidence pipeline completeness (no silent gaps) | Continuous — sequence + heartbeat |
 | V7 | Telemetry gap detection actually fires on a stopped agent | Scheduled, per [11](design/11-developer-access.md) |

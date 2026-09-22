@@ -1,0 +1,315 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the backup vault a member account writes to,
+  and the plans that fill it. design 05. Deploys to each member account.
+
+# ---------------------------------------------------------------------------
+# What design 05 specifies, and what this is
+# ---------------------------------------------------------------------------
+# 05 "Backup architecture":
+#
+#   AWS Backup, driven centrally from the Organization via backup policies
+#   pushed down to the Members OU. Coverage is enforced by policy, not by
+#   hoping each account configured it correctly.
+#
+# That sentence describes TWO things, and conflating them is the mistake this
+# template exists to avoid. The Organization backup POLICY (in org/) decides
+# which resources are selected and on what schedule, and it is pushed down so
+# that a member account cannot opt out. This template creates what that policy
+# needs to exist in the account: a local vault, and the copy destination.
+#
+# Splitting them this way is not tidiness. An Organization policy that selects
+# resources in an account with no vault produces backup jobs that fail, one per
+# resource per schedule, forever -- and the failure is per-job rather than
+# per-account, so it reads as a resource problem rather than a missing vault.
+#
+# ---------------------------------------------------------------------------
+# The 2-hour RPO is the sharper constraint
+# ---------------------------------------------------------------------------
+# 05: "Standard daily snapshots do not meet this."
+#
+#   RDS / Aurora   continuous backup with point-in-time recovery
+#   DynamoDB       point-in-time recovery
+#   S3             versioning + cross-region replication
+#   EBS / EC2      snapshot every 2 hours, or replication
+#   EFS            AWS Backup continuous where supported
+#
+# Continuous backup is a PROPERTY OF THE RULE (`EnableContinuousBackup`), not a
+# frequency, and it is what actually delivers a 2-hour RPO for the database
+# types. The 2-hourly schedule below covers the types where continuous backup
+# is unavailable, which is EBS and EC2.
+#
+# A single 2-hourly snapshot plan applied to everything would cost twelve times
+# a daily plan on resources that gain nothing from it, which is how a
+# reasonable RPO turns into an unreasonable bill.
+#
+# ---------------------------------------------------------------------------
+# Vault Lock, and why the delay matters
+# ---------------------------------------------------------------------------
+# 05: "Vault Lock enabled — a compromised member account cannot destroy its own
+# backups. This is the ransomware answer, and auditors ask about it directly."
+#
+# Vault Lock in COMPLIANCE mode is irreversible. Not difficult to reverse --
+# irreversible, by AWS, including by AWS support, for the life of the vault.
+# A wrong retention value locked in compliance mode is permanent.
+#
+# So `ChangeableForDays` is set and non-zero. During that grace period the lock
+# is in governance mode and can be corrected; after it, compliance. 05 asks for
+# the protection and does not specify the grace period, and three days is short
+# enough to be meaningfully locked and long enough that a mistake discovered on
+# the Monday after a Friday deploy is still fixable.
+#
+# The vault itself is never deleted by automation. CLAUDE.md, and 05 puts vault
+# deletion under quorum control (design 03) rather than under any schedule.
+
+Parameters:
+
+  BackupAccountId:
+    Type: String
+    Description: >-
+      The separate backup account copies land in. design 05: "Backup copies
+      land in a separate backup account." A copy in the same account as the
+      resource is not a backup against account compromise, which is the threat
+      Vault Lock exists for.
+
+  EnvironmentTier:
+    Type: String
+    AllowedValues: [dev, test, uat, prod]
+    Description: >-
+      Drives retention and frequency. design 05 and design 14 split these
+      across two axes: the POLICY follows the data (uat gets production's
+      policy because its data is real) and the FREQUENCY follows resilience
+      (uat is reduced because its infrastructure is not).
+
+  RetentionDays:
+    Type: Number
+    Default: 35
+    Description: >-
+      Retention for the daily rule, in days. The full/reduced split comes from
+      config/tiers.yaml (`backup_policy`), resolved by the deploy script rather
+      than recomputed here.
+
+  ContinuousRetentionDays:
+    Type: Number
+    Default: 35
+    MaxValue: 35
+    Description: >-
+      Point-in-time recovery window. AWS caps continuous backup at 35 days and
+      rejects anything higher, which is worth failing on at deploy time rather
+      than in a backup job.
+
+  SnapshotIntervalHours:
+    Type: Number
+    Default: 2
+    Description: >-
+      For resource types with no continuous backup — EBS and EC2. design 05's
+      2-hour RPO. Raised for non-production tiers, where 05 permits "relaxed
+      frequency".
+
+  VaultLockChangeableDays:
+    Type: Number
+    Default: 3
+    MinValue: 3
+    Description: >-
+      Grace period before the lock becomes irreversible. AWS enforces a
+      three-day minimum. See the header: compliance mode cannot be undone by
+      anyone, including AWS.
+
+  KmsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+
+  UseDefaultKey: !Equals [!Ref KmsKeyArn, '']
+  IsProduction: !Equals [!Ref EnvironmentTier, prod]
+
+Resources:
+
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    # Retained on stack deletion, deliberately and non-negotiably. A vault
+    # removed with its stack takes every recovery point with it, and the moment
+    # somebody deletes a stack is not the moment to discover that.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Sub 'platform-backup-${EnvironmentTier}'
+      EncryptionKeyArn: !If
+        - UseDefaultKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/backup'
+        - !Ref KmsKeyArn
+      LockConfiguration:
+        MinRetentionDays: !Ref RetentionDays
+        ChangeableForDays: !Ref VaultLockChangeableDays
+      AccessPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # The ransomware answer, stated as a policy rather than assumed from
+          # the lock. Vault Lock stops recovery points being deleted early;
+          # this stops the vault's contents being tampered with by the local
+          # account at all. design 05 is explicit that "a compromised member
+          # account cannot destroy its own backups".
+          - Sid: DenyLocalDeletion
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - backup:DeleteRecoveryPoint
+              - backup:UpdateRecoveryPointLifecycle
+              - backup:PutBackupVaultAccessPolicy
+              - backup:DeleteBackupVault
+              - backup:DeleteBackupVaultAccessPolicy
+              - backup:DeleteBackupVaultLockConfiguration
+            Resource: '*'
+            Condition:
+              # Everything except the platform's own quorum-controlled role.
+              # design 05 puts vault deletion and lock modification under
+              # quorum (design 03), and PlatformQuorumExecutor is the only
+              # principal that path produces.
+              ArnNotLike:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformQuorumExecutor'
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformBackupService
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: backup.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup'
+        # Restore is granted here because design 05's monthly test restores
+        # into this same account. Withholding it would mean the restore
+        # workflow could find a recovery point and not use it.
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores'
+
+  # -------------------------------------------------------------------------
+  # Continuous — the types that can actually meet a 2-hour RPO
+  # -------------------------------------------------------------------------
+
+  ContinuousPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub 'platform-continuous-${EnvironmentTier}'
+        BackupPlanRule:
+          - RuleName: continuous-pitr
+            TargetBackupVault: !Ref BackupVault
+            # Daily as the snapshot cadence; the RPO comes from
+            # EnableContinuousBackup, which gives point-in-time recovery to
+            # any second in the window rather than to the last snapshot.
+            ScheduleExpression: 'cron(0 5 * * ? *)'
+            EnableContinuousBackup: true
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            Lifecycle:
+              DeleteAfterDays: !Ref ContinuousRetentionDays
+            # design 05: copies land in a separate backup account, because a
+            # copy beside the original survives neither account compromise nor
+            # a region event.
+            CopyActions:
+              - DestinationBackupVaultArn: !Sub 'arn:${AWS::Partition}:backup:${AWS::Region}:${BackupAccountId}:backup-vault:platform-backup-copies'
+                Lifecycle:
+                  DeleteAfterDays: !Ref RetentionDays
+
+  ContinuousSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref ContinuousPlan
+      BackupSelection:
+        SelectionName: continuous-capable
+        IamRoleArn: !GetAtt BackupRole.Arn
+        # RDS, Aurora, DynamoDB and EFS. Selected by TYPE rather than by tag,
+        # because design 05 says coverage is "enforced by policy, not by
+        # hoping each account configured it correctly" -- and a tag is a thing
+        # an account can forget to apply.
+        Resources:
+          - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:*'
+          - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:*'
+          - !Sub 'arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/*'
+          - !Sub 'arn:${AWS::Partition}:elasticfilesystem:*:${AWS::AccountId}:file-system/*'
+
+  # -------------------------------------------------------------------------
+  # Frequent snapshots — the types with no continuous option
+  # -------------------------------------------------------------------------
+
+  SnapshotPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub 'platform-snapshot-${EnvironmentTier}'
+        BackupPlanRule:
+          - RuleName: frequent-snapshot
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: !Sub 'cron(0 0/${SnapshotIntervalHours} * * ? *)'
+            # A start window shorter than the interval, so a job that has not
+            # started by the time the next one is due is abandoned rather than
+            # queued. Two overlapping snapshot jobs on one volume is how a
+            # 2-hourly schedule becomes a backlog.
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 120
+            Lifecycle:
+              DeleteAfterDays: !Ref RetentionDays
+            CopyActions:
+              - DestinationBackupVaultArn: !Sub 'arn:${AWS::Partition}:backup:${AWS::Region}:${BackupAccountId}:backup-vault:platform-backup-copies'
+                Lifecycle:
+                  DeleteAfterDays: !Ref RetentionDays
+
+  SnapshotSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref SnapshotPlan
+      BackupSelection:
+        SelectionName: snapshot-only
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:volume/*'
+          - !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*'
+
+  # -------------------------------------------------------------------------
+  # The two things design 05 says are "load-bearing and quietly breakable"
+  # -------------------------------------------------------------------------
+
+  BackupJobFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProduction
+    Properties:
+      AlarmName: platform-backup-job-failed
+      AlarmDescription: >-
+        A backup job failed. With a 2-hour RPO the window to notice is small,
+        and a failed job is not retried into the next window - that window has
+        its own job and its own resources.
+
+        Most likely: a resource created without the tags or in a region the
+        selection does not cover, or a vault access policy change. Check AWS
+        Backup, Jobs, filtered to Failed.
+      Namespace: AWS/Backup
+      MetricName: NumberOfBackupJobsFailed
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      # A period with no failures publishes nothing. Treating that as breaching
+      # would alarm on a quiet account.
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  VaultName:
+    Description: Where this account's recovery points land.
+    Value: !Ref BackupVault
+
+  VaultArn:
+    Description: For the restore workflow's recovery point lookup.
+    Value: !GetAtt BackupVault.BackupVaultArn
+
+  LockChangeableUntilDays:
+    Description: >-
+      Days during which the Vault Lock can still be corrected. After this it is
+      compliance mode and irreversible by anyone, including AWS.
+    Value: !Ref VaultLockChangeableDays

@@ -16,29 +16,33 @@ identically whether this is October's scheduled exercise or a real restore at
 3am. If a future change needs `if mode == ...` anywhere else, that is the
 signal prompt 6.1 asks for: stop and flag it rather than writing it.
 
-What design/05-resilience.md would have told us
------------------------------------------------
-Prompt 6.1 opens "Read design/05-resilience.md, section 'The unified restore
-path'". THAT FILE IS NOT IN THE DESIGN PACKAGE. The mechanism here is built
-from P4 and the prompt; everywhere 05 would have supplied content the gap is
-marked `DESIGN 05` in a comment rather than filled with a guess. The precedent
-is baseline/50-instrumentation.yaml, which was built against a missing design
-06 and needed only a data edit when 06 arrived.
+What design/05-resilience.md told us, once it arrived
+-----------------------------------------------------
+This module was built against 05's ABSENCE and the gaps were marked rather than
+guessed. 05 was supplied 2026-09-22. What it settled, and what it did not:
 
-The largest of those gaps, stated once here rather than repeated:
-
-  * There is no backup infrastructure. No BackupPlan, no BackupSelection, no
-    vault outside recovery/00-restore-fixture.yaml's scaffold. This workflow
-    therefore does not assume a recovery point exists — "none found" is a
-    first-class OUTCOME that reports the true state of the account, not an
-    error. See resolve(). B-043.
-  * In-guest validation is not implemented and cannot be, from here. See
-    VALIDATIONS. B-044.
-  * The restore duration thresholds (open-items.md B3) were undecided when this
-    was built and were DECIDED on 2026-09-18: warning at 50% of the RTO, breach
-    at 80%. They remain parameters, because the RTO they are a percentage of is
-    per tenant. The TREND notice period was not part of B3 and is still unset —
-    it carries its own placeholder flag. See evaluate_thresholds() and trend().
+  * SETTLED — the unified restore path. 05's "most important decision in this
+    section" is exactly the mechanism already built here: one artifact with a
+    mode parameter, same code, same sequence, same validation, differing only
+    in target and teardown. "It is an operational failure to recover one way
+    for testing and another way for real." Nothing to change.
+  * SETTLED — what isolation means. "The test VPC is genuinely isolated and a
+    test restore cannot reach production." See targets() for how that resolves
+    the cases this code had to leave open, and open-items.md V4.
+  * SETTLED — the backup architecture 05 specifies (AWS Backup driven from the
+    Organization, copies into a separate backup account, Vault Lock, per-type
+    mechanisms for a 2h RPO). It does not exist yet, so this workflow still
+    treats "no recovery point" as a first-class OUTCOME rather than an error.
+    B-043 is now buildable rather than blocked.
+  * NOT SETTLED — in-guest validation still needs an executor inside the
+    target subnet. 05 confirms the five checks and says nothing that removes
+    the architectural obstacle. See VALIDATIONS. B-044.
+  * CONFLICT — the restore duration thresholds. This module uses 50%/80% of
+    the RTO, decided by Jamie on 2026-09-18. 05 says the values are "not
+    decided" and suggests "warning around 75% of RTO and breach at or near
+    100%". open-items.md B3 still reads "values not set". Three sources, three
+    answers, and the values are NOT changed here pending a decision — see
+    evaluate_thresholds() and B-124.
 """
 import datetime
 import json
@@ -160,12 +164,35 @@ def _split(name):
 # that as `if mode == "test": check_isolation()` would have been a second place
 # the mode is read, and P4's whole point is that there is one.
 #
-# DESIGN 05 would specify what "isolated" means for a restore test VPC.
-# open-items.md V4 — "Restore test VPC is genuinely isolated from production" —
-# lists the test as "Scheduled, per 05". What is asserted here is the checkable
-# floor: no internet gateway, no active peering. Transit gateway attachments,
-# VPC endpoints onto production services, and shared-subnet arrangements are
-# NOT checked, because 05 is where the list of what counts would come from.
+# design 05 (supplied 2026-09-22) settles what "isolated" has to mean here:
+#
+#   "verify the test VPC is genuinely isolated and a test restore cannot reach
+#    production"
+#
+# Two clauses, and the second is the operative one. The test is not whether the
+# VPC is hermetically sealed -- it is whether a restore running inside it can
+# reach production. That distinction decides several cases this code previously
+# had to leave open:
+#
+#   a route to IGW/NAT/TGW/peering    fails. Any of them is a path off the VPC
+#                                     and towards something, and none of them
+#                                     is distinguishable from a path to
+#                                     production without knowing the far side.
+#   a gateway endpoint to S3          does NOT fail. It reaches an AWS service
+#                                     API, not production's network, and
+#                                     reaching a production BUCKET through it
+#                                     additionally requires that bucket's
+#                                     policy to allow this account. Recorded.
+#   a subnet owned by another account fails. A shared subnet is somebody
+#                                     else's network by definition, and the
+#                                     owner decides what it reaches.
+#   IAM-granted access to production  out of scope, and stated rather than
+#                                     omitted. That is not a property of a VPC
+#                                     and no VPC check can see it.
+#
+# open-items.md V4 is therefore answerable: the definition exists, the network
+# floor is asserted below, and what remains unproven is named in the evidence
+# rather than left as an unknown.
 
 
 def targets():
@@ -359,16 +386,23 @@ def assert_target(target):
         # recording it is how that decision gets made on evidence rather than
         # discovered later.
         "service_endpoints": endpoints,
-        "basis": "route reachability from the target subnets. DESIGN 05 is "
-                 "absent and is where the full definition would come from — "
-                 "open-items.md V4",
-        # Still narrower than "genuinely isolated". Said out loud so the record
-        # does not read as a broader assurance than it is.
-        "not_checked": ["interface VPC endpoints", "security group rules",
-                        "shared subnets owned by another account",
-                        "DNS resolution paths",
-                        "gateway endpoint POLICIES (the endpoints themselves "
-                        "are listed under service_endpoints)"],
+        "basis": "design 05, 'Testing the assumptions': the test VPC is "
+                 "isolated and a test restore cannot reach production. "
+                 "Asserted by route reachability from the target subnets, "
+                 "plus subnet ownership. open-items.md V4.",
+        # Narrower than the sentence it implements, and the difference is
+        # named rather than implied. Each of these is either a different kind
+        # of control or a thing a VPC check cannot see.
+        "not_checked": [
+            "IAM-granted access to production resources -- not a network "
+            "property, and invisible to any VPC check",
+            "security group rules -- they constrain what the routes above "
+            "carry, and cannot create a path the routes do not have",
+            "DNS resolution paths",
+            "gateway endpoint POLICIES: an S3 endpoint reaches the S3 API, "
+            "and reaching a production bucket through it additionally "
+            "requires that bucket's policy to allow this account",
+        ],
     }
     if escapes:
         raise StepError(

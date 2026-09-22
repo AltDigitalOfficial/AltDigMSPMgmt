@@ -1338,6 +1338,44 @@ work they should be re-tested; nobody has seen them succeed. B-025.
 
 ## B-043 · There is no backup infrastructure, and phase 6 restores from it
 
+**UNBLOCKED, partly built** — 2026-09-22, on design 05's arrival.
+
+design 05 supplies exactly what was missing, and the entry below was right
+that posture is not values. What it now gives:
+
+| | |
+|---|---|
+| mechanism | AWS Backup, driven from the Organization, pushed to the Members OU |
+| destination | copies into a **separate backup account** |
+| protection | **Vault Lock** — "a compromised member account cannot destroy its own backups" |
+| control | vault deletion and lock modification under quorum (design 03) |
+| RPO | 2 hours, and "standard daily snapshots do not meet this" |
+
+`recovery/30-backup-policy.yaml` is built against it: a locked vault, a
+**continuous** plan for the types that can meet a 2-hour RPO through
+point-in-time recovery, and a separate 2-hourly snapshot plan for EBS and EC2,
+which cannot. A single 2-hourly plan over everything would cost twelve times a
+daily one on resources that gain nothing from it.
+
+Two things in it are worth knowing before it is deployed. Vault Lock in
+compliance mode is **irreversible by anyone including AWS**, so
+`ChangeableForDays` is set rather than locking immediately. And the vault
+carries an access policy denying deletion to every principal except
+`PlatformQuorumExecutor`, which is design 05's quorum requirement expressed as
+a policy rather than as a convention.
+
+**Still open, and it is not code.** design 05 requires a *separate backup
+account* and the organization does not have one — the estate is management,
+audit, log-archive, tooling, forensics and two sandboxes. The copy destination
+in the template names a vault in an account that must be vested first, and the
+Organization-level backup policy that pushes plans to the Members OU is not
+written because it has nowhere to copy to.
+
+**Next:** vest the backup account, then the org policy. Both need a working
+session; neither needs another design decision.
+
+The original entry follows.
+
 **Open** — 2026-09-18, found starting prompt 6.1.
 
 No `AWS::Backup::BackupPlan`, `BackupVault` or `BackupSelection` exists anywhere
@@ -1387,6 +1425,20 @@ source resource.
 ---
 
 ## B-044 · Four of prompt 6.1's five validation checks are not implemented
+
+**STILL OPEN after design 05** — 2026-09-22, and worth saying explicitly
+because 05's arrival cleared its neighbours.
+
+05 confirms the five checks ("database connects, row counts plausible, volumes
+mount, file checksums match") and confirms the monthly cadence. It says nothing
+that removes the obstacle, which was never a missing specification: the worker
+Lambda does not run inside the target VPC, and attaching it to one would break
+P4 by requiring a function per mode.
+
+The answer is unchanged — an executor launched INTO the target subnet at run
+time — and it is still not built speculatively.
+
+The original entry follows.
 
 **Open** — 2026-09-18.
 
@@ -1450,6 +1502,16 @@ Practically: it is part of that work, not a separate item discovered later.
 ---
 
 ## B-045 · Teardown is armed for EBS only
+
+**UNAFFECTED by design 05** — 2026-09-22. Recorded because this entry sits
+among the ones 05 unblocked and is not one of them.
+
+05 does not discuss teardown arming, and would not: the reason RDS is off is
+that a `DeleteDBInstance` call has never once run, and no design document
+changes that. It is unarmed until it has been exercised against the sandbox
+fixture, which is a testing task rather than a specification gap.
+
+The original entry follows.
 
 **Open** — 2026-09-18.
 
@@ -4777,3 +4839,38 @@ moment a tenant-side absence alarm is written.
 reachable before that — there is no tenant canary, no tenant deployment and no
 tenant alarm to suppress — which is why they are recorded rather than built
 against an environment that cannot exercise them.
+
+## B-124 · Three sources give three different restore-duration thresholds
+
+**Open, needs Jamie** — 2026-09-22.
+
+| Source | Warning | Breach |
+|---|---|---|
+| `recovery/` (worker, workflow, schedule) | 50% of RTO | 80% of RTO |
+| `design/05-resilience.md` | ~75% "indicative", **"not decided"** | at or near 100% |
+| `design/open-items.md` B3 | — | "values not set" |
+
+The 50/80 values were decided by Jamie on 2026-09-18 and written through three
+files with their reasoning. open-items B3 was never updated to record that, and
+design 05 — supplied later — restates the question as open with a different
+indicative answer.
+
+**Nothing has been changed.** Picking either silently would be worse than the
+disagreement: the code carries a justification for 50/80, and 05 carries the
+authority of the design package.
+
+**The engineering argument favours keeping 50/80,** and it is about what the
+threshold is *for*. A breach alarm at 100% of RTO fires when the commitment has
+already been missed — it is a lagging indicator, and there is nothing left to
+do about the restore in progress. At 80% there is still budget to escalate,
+add capacity or start a parallel path. The same logic applies to the warning:
+at 50% the trend is visible with half the budget intact; at 75% the
+conversation is about an incident rather than about capacity.
+
+That is a recommendation, not a decision. 05's point that the values are
+per-application stands either way — both are parameters, because the RTO they
+are a percentage of is per tenant.
+
+**Resolution:** confirm 50/80 or adopt 75/100, then update whichever two of the
+three sources disagree. Leaving all three is the only option that is certainly
+wrong.
