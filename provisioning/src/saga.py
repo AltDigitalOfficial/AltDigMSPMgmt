@@ -470,7 +470,12 @@ STEPS = [
             "Go-live is a human decision. design 13 makes it a blocking task "
             "owned by Jamie, and three things start on the transition to live: "
             "SLA measurement, billing, and the on-call rotation. Nothing here "
-            "approves it automatically."),
+            "approves it automatically. "
+            "The transition itself is golive.run, which re-checks the PARTNER "
+            "at the gate as well as the tenant -- design 15 requires that "
+            "because a partner relationship can lapse between provisioning "
+            "and go-live, and an account live beneath a lapsed one has no "
+            "defensible notification path. It refuses; it does not approve."),
     },
 ]
 
