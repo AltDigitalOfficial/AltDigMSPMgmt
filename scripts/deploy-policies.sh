@@ -24,6 +24,8 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
+PY_BIN="$(command -v python || command -v python3)" || die "python not found."
+
 DO_ATTACH=0; DO_DRIFT=0
 
 usage() {
@@ -140,7 +142,21 @@ for f in "${FILES[@]}"; do
   name="$(policy_name_for "${f}")"
   ptype="$(policy_type_for "${f}")"
   pid="$(find_policy_id "${name}" "${ptype}")"
-  content="$(cat "${f}")"
+  # Submitted MINIFIED, not as the file reads.
+  #
+  # AWS counts every character of the document against the 5120-byte quota,
+  # including the indentation that exists purely so a human can read a policy
+  # in review. Sending the formatted file spends roughly a third of the quota
+  # on whitespace, and the first symptom is a policy that cannot be extended
+  # for a reason that has nothing to do with what it says -- which is exactly
+  # how 04 hit the limit while holding six statements.
+  #
+  # The repository keeps the readable form. Only the wire is minified, and the
+  # semantics are identical.
+  content="$("${PY_BIN}" -c '
+import json,sys
+json.dump(json.load(open(sys.argv[1],encoding="utf-8")),sys.stdout,separators=(",",":"))
+' "$(win_path "${f}")")" || die "Could not read ${f} as JSON."
 
   if [[ -n "${pid}" ]]; then
     # Not via run(): its dry-run mode echoes the full command, which here would

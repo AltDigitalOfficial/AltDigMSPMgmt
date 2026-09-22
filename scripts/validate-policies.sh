@@ -19,6 +19,8 @@ require_cli
 
 POLICY_MAX_BYTES=5120
 
+PY_BIN="$(command -v python || command -v python3)" || die "python not found."
+
 if [[ $# -gt 0 ]]; then
   FILES=("$@")
 else
@@ -50,7 +52,20 @@ for f in "${FILES[@]}"; do
     *) warn "${name}: cannot infer policy type from path — skipped"; continue ;;
   esac
 
-  bytes="$(wc -c < "${f}" | tr -d ' ')"
+  # MINIFIED bytes, because that is what deploy-policies.sh sends and
+  # therefore what AWS counts. Measuring the formatted file measures the
+  # indentation, which fails policies AWS would accept and -- worse -- would
+  # pass one that is genuinely too large if somebody ever committed a minified
+  # file by hand. Check the artefact, not its presentation.
+  bytes="$("${PY_BIN}" -c '
+import json,sys
+print(len(json.dumps(json.load(open(sys.argv[1],encoding="utf-8")),separators=(",",":"))))
+' "$(win_path "${f}")" 2>/dev/null | no_cr | tr -d " ")"
+  if [[ -z "${bytes}" ]]; then
+    printf '%sFAIL%s  %-42s not valid JSON\n' "${C_RED}" "${C_RESET}" "${name}"
+    FAILED=1
+    continue
+  fi
   if [[ ${bytes} -gt ${POLICY_MAX_BYTES} ]]; then
     printf '%sFAIL%s  %-42s %s bytes — exceeds the %s-byte quota\n' \
       "${C_RED}" "${C_RESET}" "${name}" "${bytes}" "${POLICY_MAX_BYTES}"

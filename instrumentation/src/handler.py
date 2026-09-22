@@ -123,6 +123,65 @@ ROUTING = SPEC.get("routing_destinations", {})
 # short, stable, and a mismatch degrades to the review queue rather than to
 # silence.
 ROUTING_MARKER = "[platform-routing]"
+
+# ---------------------------------------------------------------------------
+# Which team owns the resource an alarm is about
+# ---------------------------------------------------------------------------
+# B-127. Inside one tenant account two teams own resources: the baseline puts
+# the VPC, KMS keys, log groups and backup vault there and those are
+# AltDigital's, while the application's RDS, ALB and ECS sit in the same
+# account and belong to whoever owns the application. They page differently
+# even when both teams work for the same company.
+#
+# The layer arrives free. This function is driven by AWS Config configuration
+# items, and a configuration item carries the resource's own tags -- so no
+# extra API call, no cross-account read, and no second place where the answer
+# could differ from the resource itself.
+#
+# WHERE IT TRAVELS MATTERS. The layer goes in the DESCRIPTION trailer, not only
+# in the alarm's tags. See the comment on the trailer below: CloudWatch alarms
+# have no resource-based policy, so the router in Audit cannot read another
+# account's alarm tags. A layer that existed only as a tag would be invisible
+# to the one thing that needs it.
+LAYER_INFRASTRUCTURE = "infrastructure"
+LAYER_APPLICATION = "application"
+LAYER_VALUES = (LAYER_INFRASTRUCTURE, LAYER_APPLICATION)
+
+# What an untagged resource is treated as, and why it is not `application`.
+#
+# An unattributed alarm has to go somewhere, and the two errors are not
+# symmetric. Routing it to AltDigital wakes us for something that may not be
+# ours, and we can triage it. Routing it to the application team wakes a
+# CLIENT for something that may be our infrastructure -- at 3am, about a
+# resource they did not create and cannot see the cause of.
+#
+# So ambiguity is absorbed by AltDigital. `layer-source` travels beside it so
+# the router can tell a real attribution from this fallback, and so B-128's
+# report has something to count.
+DEFAULT_LAYER = LAYER_INFRASTRUCTURE
+
+
+def resource_layer(ci):
+    """(layer, source) from a Config configuration item's own tags.
+
+    `source` is "tag" when the resource said so and "default" when nothing
+    did. Reported rather than collapsed: "this is infrastructure" and "nobody
+    told us what this is" are different facts that happen to route the same
+    way today, and a caller that could not tell them apart would make the
+    fallback permanent by making it invisible.
+    """
+    tags = (ci or {}).get("tags") or {}
+    raw = tags.get("platform-layer") or tags.get("platform-Layer") or ""
+    value = str(raw).strip().lower()
+    if value in LAYER_VALUES:
+        return value, "tag"
+    if value:
+        # A value outside the vocabulary is not a smaller problem than a
+        # missing one. cfn-guard blocks it in our own templates and the SCP
+        # blocks it at creation where 04 is attached, so reaching here means a
+        # resource created somewhere neither covers.
+        return DEFAULT_LAYER, "invalid"
+    return DEFAULT_LAYER, "default"
 DEFAULTS = SPEC.get("defaults", {})
 ALARM_SETS = SPEC.get("alarm_sets", {})
 IN_SCOPE = set(SPEC.get("resource_types_in_scope", []))
@@ -490,7 +549,8 @@ def derived_metrics(spec, dimension_name, resource_id):
     ], None
 
 
-def plan_alarms(resource_type, resource_id):
+def plan_alarms(resource_type, resource_id, layer=DEFAULT_LAYER,
+                layer_source="default"):
     """Work out what alarms this resource SHOULD have. Creates nothing.
 
     Returns (planned, classes, terminal):
@@ -710,7 +770,11 @@ def plan_alarms(resource_type, resource_id):
                 # fail while an incident is starting.
                 f"{ROUTING_MARKER} routing={routing} tier={ENVIRONMENT_TIER} "
                 f"alarm-id={aid} resource-type={resource_type} "
-                f"resource-id={resource_id}"),
+                f"resource-id={resource_id} "
+                # B-127. The router selects the tenant's PagerDuty service on
+                # this, and `layer-source` lets it tell a resource that
+                # declared itself from one that was defaulted here.
+                f"layer={layer} layer-source={layer_source}"),
             "EvaluationPeriods": spec.get(
                 "evaluation_periods", DEFAULTS.get("evaluation_periods", 2)),
             "Threshold": threshold,
@@ -729,6 +793,11 @@ def plan_alarms(resource_type, resource_id):
                 # would be free to disagree with this one.
                 {"Key": "platform-tier", "Value": ENVIRONMENT_TIER},
                 {"Key": "platform-resource-id", "Value": resource_id[:255]},
+                # On the alarm as well as in the description. The router reads
+                # the trailer because it cannot reach these tags across
+                # accounts, but an operator listing alarms IN the account can,
+                # and "which of these are mine" is the first question they ask.
+                {"Key": "platform-layer", "Value": layer},
             ],
         }
         # A metric alarm and a metric-math alarm are different SHAPES, not the
@@ -773,7 +842,9 @@ def handler(event, context):
             "event": event})
         return {"status": "exception", "reason": "unparseable-event"}
 
-    planned, classes, terminal = plan_alarms(resource_type, resource_id)
+    layer, layer_source = resource_layer(ci)
+    planned, classes, terminal = plan_alarms(
+        resource_type, resource_id, layer, layer_source)
     if terminal is not None:
         print(json.dumps(terminal))
         return terminal

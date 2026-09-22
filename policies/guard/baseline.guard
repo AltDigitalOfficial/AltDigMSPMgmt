@@ -355,3 +355,44 @@ rule SSO_PERMISSION_SET_SESSION_DURATION_BOUNDED when %permission_sets !empty {
     >>
   }
 }
+
+# ===========================================================================
+# Ownership layer
+# ===========================================================================
+#
+# CLAUDE.md hard rule, Jamie 2026-09-22: everything the platform builds carries
+# platform-layer: infrastructure. B-127.
+#
+# The SCP enforces the same vocabulary at CREATION, but it exempts the
+# platform's own principals -- Platform*, OrganizationAccountAccessRole* and
+# stacksets-exec-* -- which is exactly how the baseline is deployed. So the SCP
+# cannot catch a typo in one of our own templates, and a typo is worse than an
+# absent tag: the router treats an unrecognised layer as unattributable and
+# pages whoever the default is, quietly and for every alarm that resource ever
+# raises.
+#
+# This rule covers the gap the exemption leaves. Deliberately a rule here
+# rather than a differing exemption list in the SCP: those files are JSON and
+# cannot carry the reason, and an unexplained asymmetry between two adjacent
+# statements reads as a mistake.
+
+let layer_tagged_resources = Resources.*[
+  Properties.Tags exists
+]
+
+rule PLATFORM_LAYER_TAG_VALID when %layer_tagged_resources !empty {
+  %layer_tagged_resources {
+    Properties.Tags[ Key == 'platform-layer' ] {
+      Value in [ 'infrastructure', 'application' ]
+      <<
+        Violation: platform-layer tag with a value outside the vocabulary.
+        Reason:    The router selects a PagerDuty routing key on this value
+                   (B-119). An unrecognised layer is not a smaller problem
+                   than a missing one -- it is unattributable, and every alarm
+                   that resource raises goes to the default audience silently.
+        Fix:       Use "infrastructure" or "application". Platform-built
+                   resources are always "infrastructure".
+      >>
+    }
+  }
+}
