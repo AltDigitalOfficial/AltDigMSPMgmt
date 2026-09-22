@@ -1,0 +1,263 @@
+# Environment tiers, as two axes rather than four columns.
+#
+# Source: design/14-environment-tiers.md, "Revised environment matrix".
+# Consumed by: scripts/lib/tiers.py, scripts/publish-tiers.sh
+#
+# ---------------------------------------------------------------------------
+# Why this file exists at all
+# ---------------------------------------------------------------------------
+# prompt 13.1: "Do not implement UAT by copying the test parameterisation and
+# adjusting. Build the tier table in design 14 as explicit configuration so the
+# two axes stay visibly separate."
+#
+# The instruction is unusually specific, and the reason is in design 14:
+#
+#   | Axis            | dev / test     | uat                   | prod       |
+#   | Data handling   | Non-production | Production-equivalent | Production |
+#   | Resilience      | Non-production | Non-production        | Production |
+#
+# dev, test and prod keep those two axes ALIGNED, which is why three tiers can
+# be implemented as a single ordered scale and why doing so works right up
+# until UAT exists. UAT is the tier where they diverge: its data is real and
+# its infrastructure is not.
+#
+# Copying test and adjusting produces a UAT that is out of compliance scope
+# with a reduced retention floor, because those are the settings you do not
+# think to change. The failure is quiet, it is discovered during an audit, and
+# by then the environment has been holding regulated data for months.
+#
+# ---------------------------------------------------------------------------
+# So nothing about a tier is written per tier
+# ---------------------------------------------------------------------------
+# Each tier declares only its POSITION on the two axes. Every attribute that
+# follows an axis is resolved from that position. UAT's compliance scope is
+# not set here — it falls out of `data_handling: production_equivalent`, which
+# is the same value production uses.
+#
+# That makes the failure mode structurally unavailable. There is no field to
+# forget, because there is no per-tier field.
+#
+# A handful of attributes genuinely follow neither axis. They are in
+# `tier_specific` below, which is deliberately small and deliberately awkward:
+# anything added there is a claim that it depends on the tier's NAME rather
+# than on what the tier is, and that claim should have to be defended.
+
+version: 1
+
+axes:
+
+  # -------------------------------------------------------------------------
+  # Data handling — what the environment HOLDS
+  # -------------------------------------------------------------------------
+  # Drives compliance, retention, evidence and the severity at which a finding
+  # about the data is treated. design 14: "The distinction that matters is not
+  # its purpose but what data it holds."
+  data_handling:
+    attributes:
+      - compliance_scope
+      - retention_floor
+      - regulated_data_expected
+      - regulated_data_is_finding
+      - finding_severity
+      - restore_testing
+      - canary_required
+      - backup_policy
+
+    values:
+      non_production:
+        compliance_scope: out
+        retention_floor: reduced
+        regulated_data_expected: false
+        # The scope-change finding that fires when regulated data turns up
+        # somewhere it was not expected.
+        regulated_data_is_finding: true
+        finding_severity: non_production
+        restore_testing: false
+        canary_required: false
+        backup_policy: reduced
+
+      production_equivalent:
+        compliance_scope: in
+        retention_floor: full
+        regulated_data_expected: true
+        # prompt 13.1: "regulated data in UAT must NOT trigger the
+        # scope-change finding that applies to dev and test. UAT is in scope
+        # from the outset." Real users bring real data -- design 14 calls this
+        # "not misconduct, it is how UAT works" -- and a control that fires on
+        # the expected case trains people to close it without reading.
+        regulated_data_is_finding: false
+        finding_severity: production
+        # design 14: "An environment holding regulated data with an untested
+        # restore path is an audit finding regardless of its SLA status."
+        restore_testing: true
+        canary_required: true
+        # design 14 gives UAT "Full policy, reduced frequency". The POLICY
+        # follows the data -- an environment holding regulated data is backed
+        # up the same way production is -- while the FREQUENCY follows the
+        # resilience axis below. The two halves of one row landing on
+        # different axes is the clearest illustration in the file of why
+        # there are two.
+        backup_policy: full
+
+      production:
+        compliance_scope: in
+        retention_floor: full
+        regulated_data_expected: true
+        regulated_data_is_finding: false
+        finding_severity: production
+        restore_testing: true
+        canary_required: true
+        backup_policy: full
+
+  # -------------------------------------------------------------------------
+  # Resilience — what the environment PROMISES
+  # -------------------------------------------------------------------------
+  # Drives availability, SLA, backup frequency, paging and whether the thing
+  # may be switched off at night. None of this is affected by how sensitive
+  # the data is.
+  resilience:
+    attributes:
+      - availability_zones
+      - sla_commitment
+      - backup_frequency
+      - pagerduty_routing
+      - schedulable
+      - multi_az_required
+
+    values:
+      non_production:
+        availability_zones: single
+        sla_commitment: false
+        backup_frequency: reduced
+        # No paging. NOT no alerting -- see D-018 and alarm_routing below.
+        pagerduty_routing: false
+        schedulable: true
+        multi_az_required: false
+
+      production:
+        availability_zones: multi
+        sla_commitment: true
+        backup_frequency: full
+        pagerduty_routing: true
+        # design 14 marks production "No" for HOOPs, and prompt 13.2 says to
+        # "enforce that, do not rely on configuration". This value is what the
+        # scheduler checks; the enforcement is that it refuses regardless.
+        schedulable: false
+        multi_az_required: true
+
+# ---------------------------------------------------------------------------
+# The tiers, as positions
+# ---------------------------------------------------------------------------
+# Note what is NOT here: no tier sets compliance_scope, retention_floor or any
+# other axis attribute. UAT differs from test in exactly one character of this
+# file, which is the whole point.
+
+tiers:
+
+  dev:
+    purpose: Where developers build. Things break.
+    data_handling: non_production
+    resilience: non_production
+    provisioned_by_default: true
+
+  test:
+    purpose: QA verifies function against specification.
+    data_handling: non_production
+    resilience: non_production
+    provisioned_by_default: true
+
+  uat:
+    purpose: Do the users accept this, or are adjustments needed?
+    # The divergence. Real users bring real data; the infrastructure behind it
+    # is still non-production.
+    data_handling: production_equivalent
+    resilience: non_production
+    # design 14: "UAT is optional and opt-in. It is not provisioned by
+    # default, because it raises the customer's AWS cost and not every
+    # customer runs a formal acceptance stage." Opt-in rather than opt-out so
+    # that a customer who never uses UAT does not have to notice it in order
+    # to stop paying for it.
+    provisioned_by_default: false
+
+  prod:
+    purpose: Production.
+    data_handling: production
+    resilience: production
+    provisioned_by_default: true
+
+# ---------------------------------------------------------------------------
+# Attributes that follow NEITHER axis
+# ---------------------------------------------------------------------------
+# Kept separate and kept short. Everything here is an assertion that the value
+# depends on which tier this is rather than on what the tier IS, and each one
+# carries its reason so the assertion can be argued with.
+#
+# If this section grows, the axis model is wrong and should be fixed rather
+# than worked around.
+
+tier_specific:
+
+  monitoring_depth:
+    reason: >-
+      A gradient rather than a consequence of either axis. design 14's matrix
+      lists four distinct values, and UAT's "moderate" is neither the
+      non-production nor the production setting.
+    dev: light
+    test: light
+    uat: moderate
+    prod: pervasive
+
+  alarm_routing:
+    reason: >-
+      Follows resilience for the PAGING half and data handling for the rest,
+      so it belongs to both axes and therefore to neither. UAT reaches Jira
+      and the commercial channel without paging anybody, which is exactly the
+      combination that has no single axis to inherit from.
+    dev: digest
+    test: digest_and_jira
+    uat: jira_and_commercial
+    prod: pagerduty
+
+  developer_console_access:
+    reason: >-
+      Follows design 11's access model, which is about blast radius rather
+      than about data or resilience. Test is more open than UAT despite both
+      being non-production for resilience.
+    dev: full_within_guardrails
+    test: read_and_limited_ops
+    uat: read_only
+    prod: read_only
+
+  path_to_change:
+    reason: >-
+      Direct access in dev only. Everything else goes through AppDeployer,
+      which is a deployment-mechanism decision rather than a tier property.
+    dev: direct
+    test: app_deployer
+    uat: app_deployer
+    prod: app_deployer
+
+  change_reconciliation:
+    reason: >-
+      Follows path_to_change rather than either axis. design 14 has test at
+      Yes despite test being non-production on BOTH axes -- reconciliation
+      exists wherever deployment goes through AppDeployer, which is everywhere
+      except dev's direct access. Deriving this from the data axis would have
+      silently turned test's reconciliation off.
+    dev: false
+    test: true
+    uat: true
+    prod: true
+
+  hoop_aggressiveness:
+    reason: >-
+      All three non-production tiers are schedulable -- that comes from the
+      resilience axis -- but how hard they are scheduled does not. design 14
+      distinguishes "aggressive" from "conservative": UAT may have real users
+      in it at unpredictable hours, and switching it off underneath an
+      acceptance session is a different kind of wrong from switching off an
+      idle dev box.
+    dev: aggressive
+    test: aggressive
+    uat: conservative
+    prod: none

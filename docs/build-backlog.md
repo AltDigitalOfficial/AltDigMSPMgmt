@@ -4619,3 +4619,42 @@ one.
 **Trigger:** before the first client tenant is live in PagerDuty. Until then
 the only services are the platform's own and a drift window measured in days
 is tolerable; once a client's paging depends on it, it is not.
+
+## B-121 · Tier semantics are enumerated in templates, not derived from the tier table
+
+**Open** — 2026-09-21.
+
+`config/tiers.yaml` is now the single source of truth for what an environment
+tier means, and `scripts/lib/tiers.py` resolves it. CloudFormation cannot read
+it, so templates still enumerate tier names:
+
+```yaml
+MetaAlarmsLowUrgency: !Or
+  - !Equals [!Ref EnvironmentTier, dev]
+  - !Equals [!Ref EnvironmentTier, test]
+  - !Equals [!Ref EnvironmentTier, uat]
+```
+
+That list is a second copy of `resilience: non_production`, and the first copy
+of it was already wrong — `uat` was missing, so a UAT environment would have
+paged the on-call rotation against design 14's matrix. Nothing reported it;
+the alarm worked, it simply woke the wrong people.
+
+**Proposed fix.** Generate a `Mappings` block from `config/tiers.yaml` at
+publish time, the way `publish-router.sh` bakes 06a's event patterns in with
+`extract_event_specs.py`. Templates then condition on
+`!FindInMap [TierSettings, !Ref EnvironmentTier, pagerduty_routing]` and the
+enumeration disappears.
+
+The precedent is deliberate: that script exists because the router and the
+instrumentation Lambda must not disagree about 06a, and the same argument
+applies here.
+
+**Interim mitigation.** The conformance test asserts the resolved matrix
+matches design 14 row for row, so the TABLE cannot drift from the design
+silently. What it cannot catch is a template that fails to consult the table —
+which is exactly what happened here.
+
+**Trigger:** before the first UAT environment is vested, or at the third
+template that enumerates tier names, whichever comes first. Two is a
+coincidence; three is a convention nobody decided on.

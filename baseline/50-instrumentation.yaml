@@ -184,11 +184,31 @@ Conditions:
   # knowing and is not worth a phone call.
   HasTooling: !Not [!Equals [!Ref ToolingAccountId, '']]
 
+  # Everything whose RESILIENCE axis is non-production, which is dev, test and
+  # UAT. Not "everything that is not production".
+  #
+  # uat was missing here until prompt 13.1, and the consequence was specific:
+  # with the condition false, meta-alarms fall through to AlertTopicArn, which
+  # subscribes to PagerDuty. A UAT environment would have paged the on-call
+  # rotation, against design 14's matrix, which gives uat `Jira + commercial`
+  # routing and no SLA.
+  #
+  # It is the exact failure prompt 13.1 warns about: a condition written when
+  # three tiers existed, where the fourth silently inherits the production
+  # branch because nobody enumerated it. Nothing would have reported this --
+  # the alarm works, it simply wakes somebody it should not.
+  #
+  # Still an enumeration rather than a derived value, because CloudFormation
+  # cannot read config/tiers.yaml. B-121 proposes generating a Mappings block
+  # from it so the tier table stays the single source of truth; until then the
+  # list is authored here and the conformance test in tests/ checks the
+  # resolved matrix against design 14.
   MetaAlarmsLowUrgency: !And
     - !Not [!Equals [!Ref LowUrgencyTopicArn, '']]
     - !Or
       - !Equals [!Ref EnvironmentTier, dev]
       - !Equals [!Ref EnvironmentTier, test]
+      - !Equals [!Ref EnvironmentTier, uat]
 
 Resources:
 
