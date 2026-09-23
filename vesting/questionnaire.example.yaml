@@ -89,3 +89,15 @@ exit:
   ip_boundary_ack: true
   post_exit_governance_loss_ack: true
   truveon_retention_desired: false
+
+# Section 16. One Truveon tenant per client (B-023). OEight already has one --
+# it was provisioned 2026-09-08, before the platform existed -- so creation is
+# skipped and the tenant is configured and linked only. People are NOT here;
+# they are in the Truveon roster sidecar (vesting/truveon.roster.example.yaml).
+truveon:
+  existing_tenant: true
+  tenant_slug: oeight
+  tenant_name: "OEight"
+  legal_entities:
+    - { ref: OE, legal_name: "OEight Placeholder LLC", entity_kind: parent, jurisdiction: "US-TX" }
+  send_invites: false

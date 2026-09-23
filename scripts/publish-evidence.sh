@@ -130,15 +130,24 @@ body = nl.join(l for l in source.split(nl) if not l.strip().startswith("#"))
 
 problems = []
 
-# A 200 is not enough. The contract says the response must say `stored: true`,
-# because a proxy or a misconfigured stub returns 200 for things that never
-# reached a datastore -- and this acknowledgement is what stops the gap
-# detector looking at that record forever.
-if '"stored"' not in body and "'stored'" not in body:
+# A 200 is not enough. The response must say `accepted: true` and carry a
+# `submission_id`, because a proxy or a misconfigured stub returns 200 for
+# things that never reached a datastore -- and this acknowledgement is what
+# stops the gap detector looking at that record forever. (Was `stored: true`
+# until the contract was reconciled with Truveon's endpoint, 2026-09-23.)
+for field in ("accepted", "submission_id"):
+    if f'"{field}"' not in body and f"'{field}'" not in body:
+        problems.append(
+            f"the sender no longer checks Truveon's `{field}` before marking a "
+            "record delivered. A bare 200 would mark records delivered, and a "
+            "delivered row is excluded from gap detection permanently.")
+
+# One key per tenant, chosen by the record's tenant. A sender that fell back to
+# a single shared key would write every tenant's evidence into whichever tenant
+# that key belongs to -- Truveon derives the tenant from the key.
+if "ingest_key(tenant)" not in body:
     problems.append(
-        "the sender no longer checks that Truveon confirmed STORAGE. A bare "
-        "200 would mark records delivered, and a delivered row is excluded "
-        "from gap detection permanently.")
+        "the sender no longer selects the ingest key by the record's tenant.")
 
 # With no endpoint, nothing may be marked delivered: the
 # `not TRUVEON_ENDPOINT` branch has to return before any _mark_delivered CALL.
@@ -238,10 +247,11 @@ log "    --template evidence/10-evidence.yaml --stack platform-evidence \\"
 log "    ArtifactBucket=${BUCKET} ArtifactKey=${KEY} \\"
 log "    LogsKeyArn=<alerts key>"
 log ""
-info "TruveonEndpoint is deliberately left empty until the endpoint exists."
-log "  Evidence is collected, numbered and buffered meanwhile; it is NOT"
-log "  marked delivered, and the backlog drains when the endpoint is set."
-log "  B-088, docs/truveon-ingestion-contract.md"
+info "To start delivering, add TruveonEndpoint=https://app.truveon.ai."
+log "  Each tenant also needs its ingest key at platform/truveon/ingest/<tenant>"
+log "  (scripts/truveon-tenant-handoff.sh). A tenant without one stays pending"
+log "  and is named in a platform-evidence-no-credential finding; nothing is"
+log "  marked delivered that was not. docs/truveon-ingestion-contract.md"
 log ""
 info "Then publish the tenant map, which is not in the repository:"
 log "  scripts/sync-evidence-tenants.sh"

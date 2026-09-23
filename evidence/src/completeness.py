@@ -448,20 +448,25 @@ def reconcile_counts(event=None, context=None):
             ours = _count_ours(stream, since, until)
             if ours is None:
                 continue
-            theirs = _count_theirs(endpoint, stream, since, until)
+            theirs = _count_theirs(endpoint, tenant, category, since, until)
             compared += 1
+            truveon_range = [(theirs or {}).get("min_sequence"),
+                             (theirs or {}).get("max_sequence")]
             result = {
                 "stream_id": stream, "tenant": tenant, "partner": partner,
                 "window_start": _iso(since), "window_end": _iso(until),
                 "source_count": ours["count"],
                 "truveon_count": (theirs or {}).get("count"),
                 "source_range": [ours["min"], ours["max"]],
-                "truveon_range": [(theirs or {}).get("min_sequence"),
-                                  (theirs or {}).get("max_sequence")],
+                "truveon_range": truveon_range,
                 "unreadable": theirs is None,
             }
+            # Count AND range. The docstring promised both and the first
+            # version compared only the count, which is exactly the check that
+            # one lost record plus one duplicate passes.
             agrees = (theirs is not None
-                      and theirs.get("count") == ours["count"])
+                      and theirs.get("count") == ours["count"]
+                      and truveon_range == [ours["min"], ours["max"]])
             result["agrees"] = agrees
             # Persisted whether or not it agrees. A comparison that matched is
             # evidence the control operated; only keeping the failures would
@@ -472,12 +477,19 @@ def reconcile_counts(event=None, context=None):
                      payload=result)
             if not agrees:
                 mismatches.append(result)
+                # An unanswered question goes to the digest, a disagreement to
+                # Jira. Between Truveon's ingest going live and its count
+                # endpoint existing (B-088), every stream is unanswerable every
+                # run; ticketing each one would be a control that cries wolf
+                # twice a day per stream, and gets muted -- B-043, B-081.
                 _emit({
                     "record_type": "evidence-completeness-finding",
                     "recorded_at": _iso(_now()),
                     "current_state": "ALARM",
-                    "routing": "digest_and_jira",
-                    "alarm": {"name": "platform-evidence-count-mismatch",
+                    "routing": "digest" if theirs is None else "digest_and_jira",
+                    "alarm": {"name": ("platform-evidence-reconciliation-impossible"
+                                       if theirs is None else
+                                       "platform-evidence-count-mismatch"),
                               "resource_id": stream},
                     "assessment": {"probable_cause": (
                         f"{stream}: the platform holds {ours['count']} record(s) "
@@ -515,25 +527,30 @@ def _count_ours(stream_id, since, until):
     return {"count": len(seqs), "min": min(seqs), "max": max(seqs)}
 
 
-def _count_theirs(endpoint, stream_id, since, until):
+def _count_theirs(endpoint, tenant, category, since, until):
     """Truveon's count for the same window, or None if it cannot be asked.
 
     None is distinct from zero throughout. A Truveon that cannot be reached has
-    not told us it holds nothing.
+    not told us it holds nothing -- and neither has one whose count endpoint
+    does not exist yet (B-088), or a tenant with no ingest key.
+
+    Asked with the tenant's own key and the bare category as the stream,
+    because Truveon scopes streams per tenant and derives the tenant from the
+    key. See docs/truveon-ingestion-contract.md section 2.
     """
     import urllib.error
     import urllib.parse
     import urllib.request
     try:
         import sender
-        token = sender._token()
+        key = sender.ingest_key(tenant)
     except Exception:                              # noqa: BLE001
         return None
     query = urllib.parse.urlencode({
-        "stream_id": stream_id, "from": _iso(since), "to": _iso(until)})
+        "stream": category, "from": _iso(since), "to": _iso(until)})
     req = urllib.request.Request(
-        f"{endpoint}/v1/evidence/count?{query}",
-        headers={"Authorization": f"Bearer {token}",
+        f"{endpoint}{sender.INGEST_PATH}/count?{query}",
+        headers={"X-Truveon-Ingest-Key": key,
                  "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:

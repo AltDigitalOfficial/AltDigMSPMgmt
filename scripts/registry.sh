@@ -56,6 +56,10 @@ Partners
 Clients
   put-client     --partner S --slug S [--state STATE] [--ip-owner WHO]
                  [--tech-contact EMAIL] [--dev-manager EMAIL]
+                 Updates only the fields passed; never erases the rest.
+  get-client     --partner S --slug S
+  link-truveon   --partner S --slug S --name TRUVEON_TENANT_SLUG
+                 One Truveon tenant per client (B-023).
   list-clients   [--partner S]
 
 Accounts
@@ -305,30 +309,50 @@ cmd_check_partner() {
   ok "partner ${SLUG}: active, notify=${nh}h, altdigital=${ah}h (tighter) — clients may be created"
 }
 
+# update-item, not put-item, and only the fields actually passed.
+#
+# put-item replaced the whole record, and onboard-client.sh step 1 calls this on
+# every run and every --from resume. So a resume silently erased anything else
+# written to the record since -- the Truveon link (link-truveon, below), and the
+# tech contact and dev manager, which step 1 never passes and which were
+# overwritten with blanks each time. A record that forgets on re-run is not a
+# spine.
 cmd_put_client() {
   [[ -n "${PARTNER}" ]] || die "--partner is required."
   [[ -n "${SLUG}" ]]    || die "--slug is required."
   validate_slug "partner" "${PARTNER}"
   validate_slug "client" "${SLUG}"
   check_state "${STATE:=provisioning}"
+
+  local set="record_type = :rt, baseline_version = if_not_exists(baseline_version, :bv), partner = :p, slug = :s, #st = :st, updated_at = :u"
+  local vals
+  vals="\":rt\":{\"S\":\"CLIENT\"},\":bv\":{\"S\":\"000000\"},\":p\":{\"S\":\"${PARTNER}\"},\":s\":{\"S\":\"${SLUG}\"},\":st\":{\"S\":\"${STATE}\"},\":u\":{\"S\":\"$(now_iso)\"}"
+  if [[ -n "${IP_OWNER}" ]]; then
+    set+=", ip_owner = :ip";  vals+=",\":ip\":$(ddb_str "${IP_OWNER}")"
+  else
+    # First write records 'unrecorded' so the gap is findable; later writes
+    # without --ip-owner leave whatever is there.
+    set+=", ip_owner = if_not_exists(ip_owner, :ip)"; vals+=",\":ip\":{\"S\":\"unrecorded\"}"
+  fi
+  if [[ -n "${TECH_CONTACT}" ]]; then
+    set+=", tech_contact = :tc"; vals+=",\":tc\":$(ddb_str "${TECH_CONTACT}")"
+  fi
+  if [[ -n "${DEV_MANAGER}" ]]; then
+    set+=", dev_manager = :dm";  vals+=",\":dm\":$(ddb_str "${DEV_MANAGER}")"
+  fi
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    printf '%s DRY%s  update-item CLIENT %s/%s SET %s\n' \
+      "${C_YELLOW}" "${C_RESET}" "${PARTNER}" "${SLUG}" "${set}"
+    return 0
+  fi
   ddb_init
-  put_item "$(cat <<JSON
-{
-  "PK":               {"S": "PARTNER#${PARTNER}"},
-  "SK":               {"S": "CLIENT#${SLUG}"},
-  "record_type":      {"S": "CLIENT"},
-  "baseline_version": {"S": "000000"},
-  "partner":          {"S": "${PARTNER}"},
-  "slug":             {"S": "${SLUG}"},
-  "state":            {"S": "${STATE}"},
-  "ip_owner":         $(ddb_str "${IP_OWNER:-unrecorded}"),
-  "tech_contact":     $(ddb_str "${TECH_CONTACT}"),
-  "dev_manager":      $(ddb_str "${DEV_MANAGER}"),
-  "updated_at":       {"S": "$(now_iso)"}
-}
-JSON
-)"
-  ok "client ${PARTNER}/${SLUG} recorded: state=${STATE} ip-owner=${IP_OWNER:-unrecorded}"
+  ddb update-item --table-name "${TABLE}" \
+    --key "{\"PK\":{\"S\":\"PARTNER#${PARTNER}\"},\"SK\":{\"S\":\"CLIENT#${SLUG}\"}}" \
+    --update-expression "SET ${set}" \
+    --expression-attribute-names '{"#st":"state"}' \
+    --expression-attribute-values "{${vals}}" >/dev/null
+  ok "client ${PARTNER}/${SLUG} recorded: state=${STATE}${IP_OWNER:+ ip-owner=${IP_OWNER}}"
   # Questionnaire 1.5 and 5.8. These are the ONLY personal data in the
   # registry, and they are here because the instrumentation digest has nowhere
   # else to find a recipient — design doc 06 makes that digest the documented
@@ -339,10 +363,51 @@ JSON
   # data lives in a system with access control and an audit trail, never in
   # git.
   if [[ -z "${TECH_CONTACT}" ]]; then
-    warn "No --tech-contact. The instrumentation digest for this client has no
+    warn "No --tech-contact passed; any value already on the record is kept.
+      If there is none, the instrumentation digest for this client has no
       recipient and will be skipped, which loses the evidence that monitoring
       requirements were communicated. Questionnaire field 1.5."
   fi
+}
+
+cmd_get_client() {
+  [[ -n "${PARTNER}" ]] || die "--partner is required."
+  [[ -n "${SLUG}" ]]    || die "--slug is required."
+  ddb_init
+  ddb get-item --table-name "${TABLE}" \
+    --key "{\"PK\":{\"S\":\"PARTNER#${PARTNER}\"},\"SK\":{\"S\":\"CLIENT#${SLUG}\"}}" \
+    --query 'Item' --output json
+}
+
+# The client's Truveon tenant. One per CLIENT, not per application (B-023,
+# decided 2026-09-23): frameworks and BAAs are signed by the organisation, and
+# design 01 and 04 both say "member organisation". Applications are modelled
+# inside the tenant.
+#
+# Conditional on the client record existing. Linking a Truveon tenant to a
+# client the registry has never heard of would create a half-record that
+# list-clients cannot show and put-client would then have to guess around.
+cmd_link_truveon() {
+  [[ -n "${PARTNER}" ]] || die "--partner is required."
+  [[ -n "${SLUG}" ]]    || die "--slug is required."
+  [[ -n "${NAME}" ]]    || die "--name <truveon-tenant-slug> is required."
+  [[ "${NAME}" =~ ^[a-z][a-z0-9-]{1,62}$ ]] \
+    || die "Truveon tenant slug '${NAME}' is not a valid slug (lowercase, digits, hyphens)."
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    printf '%s DRY%s  update-item CLIENT %s/%s SET truveon_tenant_id=%s\n' \
+      "${C_YELLOW}" "${C_RESET}" "${PARTNER}" "${SLUG}" "${NAME}"
+    return 0
+  fi
+  ddb_init
+  ddb update-item --table-name "${TABLE}" \
+    --key "{\"PK\":{\"S\":\"PARTNER#${PARTNER}\"},\"SK\":{\"S\":\"CLIENT#${SLUG}\"}}" \
+    --update-expression "SET truveon_tenant_id = :t, truveon_linked_at = :u, updated_at = :u" \
+    --condition-expression "attribute_exists(PK)" \
+    --expression-attribute-values "{\":t\":{\"S\":\"${NAME}\"},\":u\":{\"S\":\"$(now_iso)\"}}" \
+    >/dev/null 2>&1 \
+    || die "Could not link: client ${PARTNER}/${SLUG} has no registry record (or the write failed).
+      Record the client first: scripts/registry.sh put-client --partner ${PARTNER} --slug ${SLUG}"
+  ok "client ${PARTNER}/${SLUG} linked to Truveon tenant '${NAME}'"
 }
 
 cmd_list_clients() {
@@ -351,12 +416,12 @@ cmd_list_clients() {
     ddb query --table-name "${TABLE}" \
       --key-condition-expression 'PK = :p AND begins_with(SK, :c)' \
       --expression-attribute-values "{\":p\":{\"S\":\"PARTNER#${PARTNER}\"},\":c\":{\"S\":\"CLIENT#\"}}" \
-      --query 'Items[].[partner.S,slug.S,state.S,ip_owner.S]' --output text | no_cr | sed 's/^/  /'
+      --query 'Items[].[partner.S,slug.S,state.S,ip_owner.S,truveon_tenant_id.S]' --output text | no_cr | sed 's/^/  /'
   else
     ddb query --table-name "${TABLE}" --index-name by-type \
       --key-condition-expression 'record_type = :t' \
       --expression-attribute-values '{":t":{"S":"CLIENT"}}' \
-      --query 'Items[].[partner.S,slug.S,state.S,ip_owner.S]' --output text | no_cr | sed 's/^/  /'
+      --query 'Items[].[partner.S,slug.S,state.S,ip_owner.S,truveon_tenant_id.S]' --output text | no_cr | sed 's/^/  /'
   fi
 }
 
@@ -595,6 +660,8 @@ case "${CMD}" in
   list-partners)    cmd_list_partners ;;
   check-partner)    cmd_check_partner ;;
   put-client)       cmd_put_client ;;
+  get-client)       cmd_get_client ;;
+  link-truveon)     cmd_link_truveon ;;
   list-clients)     cmd_list_clients ;;
   put-account)      cmd_put_account ;;
   get-account)      cmd_get_account ;;

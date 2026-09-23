@@ -472,6 +472,54 @@ Unglamorous, and much easier to agree now than during a separation.
 
 ---
 
+## 16. Truveon — your compliance workspace
+
+Truveon is where your compliance evidence lands: control results, security
+findings, change records, and the platform's own proof that nothing was
+dropped on the way. It is also where your compliance team works — frameworks,
+risks, policies, audits.
+
+**One Truveon workspace per organisation**, not per application. If you bring us
+a second application later, it joins the workspace you already have. If an
+application's intellectual property belongs to a different organisation — you
+build it, they own it — that organisation is the client for it and has its own
+workspace.
+
+| # | Question | How to answer | When | Change later? |
+|---|---|---|---|---|
+| 16.1 | Do you already have a Truveon workspace? | Yes / No | Vest | — |
+| 16.2 | What should the workspace be called? | A display name. We choose the short identifier with you; it cannot be changed once created. | Vest | Name reversible; identifier **permanent** |
+| 16.3 | What is your legal structure? | Each legal entity in scope: legal name, jurisdiction, and whether it is a parent, subsidiary, branch or joint venture. Company facts only. | Dev | Reversible |
+| 16.4 | Should people receive their Truveon invitation straight away, or during a walkthrough with us? | **Pick one:** `now` / `walkthrough` | Vest | — |
+| 16.5 | Who needs Truveon access? | Roster below | Vest | Reversible |
+
+**On 16.2.** The identifier becomes part of how your workspace is stored and
+cannot be renamed afterwards. It is usually your organisation's short name.
+
+**On 16.4.** We recommend the walkthrough. A login that arrives before anybody
+has shown you what the workspace is for tends to be ignored.
+
+### 16.5 Truveon roster
+
+**This contains personal data** and is handled the same way as Section 3b.
+
+These are usually different people from your developers: whoever owns
+compliance, an executive sponsor, sometimes your auditor. **Exactly one person
+is the owner** — Truveon's first administrator, who can then invite others. If
+you already have a workspace (16.1), you already have an owner and this list
+is the people to add.
+
+| Name | Email | Title | Owner? | Access |
+|---|---|---|---|---|
+| | | | ☐ | ☐ administrator ☐ contributor ☐ viewer |
+| | | | ☐ | ☐ administrator ☐ contributor ☐ viewer |
+| | | | ☐ | ☐ administrator ☐ contributor ☐ viewer |
+
+**When:** Vest · **Change later?** Reversible — people are added and removed
+from within Truveon.
+
+---
+
 ## Appendix A — Deferral register
 
 Anything left open goes here. **A deferral with a trigger is a plan; a blank is
@@ -492,21 +540,24 @@ a surprise.**
    created — including the irreversible ones, spelled out, so there is no
    surprise.
 
-2. **We create your AWS accounts.** One per environment. This is the
+2. **We set up your Truveon workspace** (Section 16), before any account
+   exists, so that evidence has somewhere to go from the first minute.
+
+3. **We create your AWS accounts.** One per environment. This is the
    irreversible step: an AWS account cannot be deleted, only closed, and the
    root email address is consumed permanently.
 
-3. **We apply the baseline.** Logging, encryption, detective controls, network,
+4. **We apply the baseline.** Logging, encryption, detective controls, network,
    backup, monitoring. Identical in every account, derived from your manifest
    where your answers differ from the default.
 
-4. **We grant access.** Your developers get single sign-on to the environments
+5. **We grant access.** Your developers get single sign-on to the environments
    listed in Section 3b.
 
-5. **Development begins.** Sections marked **Prod** can still be open at this
+6. **Development begins.** Sections marked **Prod** can still be open at this
    point.
 
-6. **Before production**, we close out the deferral register, verify the
+7. **Before production**, we close out the deferral register, verify the
    environment against your manifest, and confirm — with you — that it is ready.
 
 ---

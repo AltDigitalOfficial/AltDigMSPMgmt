@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://altdigital.ai/schemas/truveon-roster/1",
+  "title": "Truveon roster",
+  "description": "Questionnaire section 16.5: the people who get accounts in the client's Truveon tenant. A sidecar for the same reason as the developer roster (vesting/roster.schema.json) -- it is nothing but personal data, and the questionnaire schema and its committed example must not be able to reach it. Real ones are named <client>.truveon.roster.yaml, live in completed_qs/, and are blocked from commit by .gitignore and the pre-commit hook. A different list from the developer roster on purpose: the people who read compliance evidence are rarely the people who deploy the application, and deriving one from the other would give developers GRC access nobody asked for.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tenant", "users"],
+  "properties": {
+
+    "schema_version": { "const": 1 },
+
+    "tenant": {
+      "description": "Repeated from the questionnaire so the roster names the tenant it grants access to. truveon-tenant-handoff.sh refuses to proceed unless both match the questionnaire exactly. Per client, with no application code: the Truveon tenant is per client (B-023).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["partner", "client_slug"],
+      "properties": {
+        "partner":     { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$" },
+        "client_slug": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$" }
+      }
+    },
+
+    "users": {
+      "description": "One entry per person. Exactly one must be the owner when the tenant is being created; for an existing tenant the owner already exists and none is required.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["display_name", "email"],
+        "properties": {
+          "display_name": { "type": "string", "minLength": 1 },
+          "email":        { "type": "string", "format": "email", "pattern": "^[^@ |,\t]+@[^@ |,\t]+[.][^@ |,\t]+$" },
+          "title":        { "type": ["string", "null"] },
+
+          "role": {
+            "description": "Truveon membership role. Free text in Truveon today (tenant_memberships.role; persona-level roles are unscoped work there), so this is not an enum here either -- an enum on this side would claim a control Truveon does not enforce. Defaults to 'contributor'; the owner's defaults to 'admin'.",
+            "type": ["string", "null"]
+          },
+
+          "is_global_admin": {
+            "description": "Tenant-wide administration in Truveon. Forced true for the owner.",
+            "type": "boolean",
+            "default": false
+          },
+
+          "owner": {
+            "description": "The tenant's first Owner (Truveon's identity design, Mode A). A separate decision from the rest of the list, and Truveon takes it as a separate argument.",
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    }
+  }
+}

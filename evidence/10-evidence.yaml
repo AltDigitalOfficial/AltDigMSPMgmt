@@ -73,24 +73,29 @@ Parameters:
     Type: String
     Default: ''
     Description: >-
-      Base URL of the Truveon ingestion API, e.g. https://truveon.example.
+      Base URL of Truveon, e.g. https://app.truveon.ai. The sender appends
+      /api/ingest/evidence (docs/truveon-ingestion-contract.md).
 
-      EMPTY IS A SUPPORTED STATE and is the current one. The sender does not
+      EMPTY IS A SUPPORTED STATE. The sender does not
       mark records delivered when it has nowhere to deliver them — they stay
       pending, the pipeline reports that it is not delivering, and the backlog
       drains when an endpoint appears. A stub that acknowledged locally would
       reproduce design 04's "clean month" inside the thing built to prevent it.
       B-088.
 
-  TruveonSecretName:
+  TruveonSecretPrefix:
     Type: String
     Default: platform/truveon/ingest
+    AllowedPattern: '^[a-z0-9/_-]+[a-z0-9]$'
     Description: >-
-      Bearer token for the ingestion API. One credential for all tenants: the
-      record's `tenant` field carries the isolation and Truveon enforces it.
-      Per-tenant credentials would mean N secrets to rotate, with the failure
-      mode that one expires quietly and that tenant's evidence stops while
-      every other tenant looks fine.
+      Prefix for per-tenant Truveon ingest keys. Tenant X's key is the secret
+      <prefix>/X. Truveon derives the tenant from the key, so which key sits
+      under which secret IS the platform-tenant to Truveon-tenant mapping.
+
+      Per tenant rather than one shared token (reconciled 2026-09-23): a leaked
+      key exposes one tenant, and the quiet-expiry failure a shared token was
+      meant to avoid is caught by the per-tenant heartbeat within the hour.
+      No trailing slash.
 
   TenantMapParam:
     Type: String
@@ -406,10 +411,10 @@ Resources:
               - sqs:GetQueueAttributes
               - sqs:SendMessage
             Resource: !GetAtt EvidenceQueue.Arn
-          - Sid: ReadTruveonCredential
+          - Sid: ReadTruveonCredentials
             Effect: Allow
             Action: secretsmanager:GetSecretValue
-            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TruveonSecretName}-*'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TruveonSecretPrefix}/*'
           - Sid: ReportDeliveryProblems
             Effect: Allow
             Action: events:PutEvents
@@ -446,7 +451,8 @@ Resources:
           EVIDENCE_QUEUE_URL: !Ref EvidenceQueue
           EVIDENCE_INFLIGHT_GRACE_MINUTES: !Ref InflightGraceMinutes
           TRUVEON_ENDPOINT: !Ref TruveonEndpoint
-          TRUVEON_SECRET_NAME: !Ref TruveonSecretName
+          TRUVEON_SECRET_PREFIX: !Ref TruveonSecretPrefix
+          PIPELINE_ACCOUNT_ID: !Ref AWS::AccountId
           ALERT_BUS_NAME: !Ref AlertBusName
 
   SenderQueueSource:
@@ -503,10 +509,10 @@ Resources:
             Effect: Allow
             Action: ssm:GetParameter
             Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TenantMapParam}'
-          - Sid: ReadTruveonCredential
+          - Sid: ReadTruveonCredentials
             Effect: Allow
             Action: secretsmanager:GetSecretValue
-            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TruveonSecretName}-*'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TruveonSecretPrefix}/*'
           - Sid: ReportFindings
             Effect: Allow
             Action: events:PutEvents
@@ -544,7 +550,8 @@ Resources:
           EVIDENCE_TENANT_MAP_PARAM: !Ref TenantMapParam
           EVIDENCE_INFLIGHT_GRACE_MINUTES: !Ref InflightGraceMinutes
           TRUVEON_ENDPOINT: !Ref TruveonEndpoint
-          TRUVEON_SECRET_NAME: !Ref TruveonSecretName
+          TRUVEON_SECRET_PREFIX: !Ref TruveonSecretPrefix
+          PIPELINE_ACCOUNT_ID: !Ref AWS::AccountId
           ALERT_BUS_NAME: !Ref AlertBusName
 
   # design 04's second control. One record per tenant per run, so that silence

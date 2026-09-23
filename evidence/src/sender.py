@@ -1,9 +1,8 @@
 """Delivers evidence to Truveon, and refuses to lie about having done so.
 
-Prompt 9.1. The contract is docs/truveon-ingestion-contract.md, written from
-this side because AltDigital builds both ends -- so the API is set by what
-design 04's completeness controls require rather than discovered from whatever
-the endpoint happens to do. B-088.
+Prompt 9.1. The contract is docs/truveon-ingestion-contract.md, reconciled on
+2026-09-23 with the endpoint Truveon actually built: one submission per record,
+authenticated by a per-tenant ingest key. B-088.
 
 The one thing this module must never do
 ---------------------------------------
@@ -25,15 +24,26 @@ component built to prevent it:
 
 Retry is safe because ingest is idempotent
 -------------------------------------------
-The contract requires `POST /v1/evidence` to be idempotent on
-`(stream_id, sequence)`: re-posting a sequence Truveon already holds is a
-success. Without that, every retry -- after a timeout, a 5xx, or a crash
-between sending and recording the send -- would create a duplicate, and the
-count reconciliation would report a mismatch on an intact stream.
+Truveon is idempotent on `(stream, idempotency_key)`, and the idempotency key
+is derived from the record's sequence number, so re-posting a record Truveon
+already holds returns `duplicate: true`. Without that, every retry -- after a
+timeout, a 5xx, or a crash between sending and recording the send -- would
+create a duplicate, and the count reconciliation would report a mismatch on an
+intact stream.
 
-A 409 is different and is NOT retried. It means Truveon holds that sequence
-with a different content hash, so one of the two stores is wrong and neither
-side should guess which. That is a finding for a human.
+A 409 is different and is NOT retried. It means Truveon holds that key with
+different content, so one of the two stores is wrong and neither side should
+guess which. That is a finding for a human. (Truveon does not yet return it --
+the contract requires it and B-088 tracks it -- but the handling is here so the
+day it does, nothing on this side has to change.)
+
+One key per tenant
+------------------
+Truveon derives the tenant from the key, not from anything in the body. So the
+key for a record is chosen by the record's platform tenant, and a tenant with
+no key cannot deliver at all -- which is reported by name rather than folded
+into a generic failure count. The contract explains why per-tenant keys won
+over one shared token.
 """
 import datetime
 import json
@@ -51,8 +61,12 @@ sqs = boto3.client("sqs")
 LEDGER_TABLE = os.environ.get("EVIDENCE_LEDGER_TABLE", "")
 ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
 TRUVEON_ENDPOINT = os.environ.get("TRUVEON_ENDPOINT", "").rstrip("/")
-TRUVEON_SECRET = os.environ.get("TRUVEON_SECRET_NAME",
-                                "platform/truveon/ingest")
+TRUVEON_SECRET_PREFIX = os.environ.get("TRUVEON_SECRET_PREFIX",
+                                       "platform/truveon/ingest").rstrip("/")
+# The account this pipeline runs in. Stands in as the submission's account for
+# records that describe a tenant's pipeline rather than one of its accounts --
+# see the contract, "Records with no account".
+PIPELINE_ACCOUNT_ID = os.environ.get("PIPELINE_ACCOUNT_ID", "")
 TIMEOUT = int(os.environ.get("TRUVEON_TIMEOUT_SECONDS", "20"))
 QUEUE_URL = os.environ.get("EVIDENCE_QUEUE_URL", "")
 # Matches the gap detector's grace. The two must agree: a record replayed
@@ -60,15 +74,26 @@ QUEUE_URL = os.environ.get("EVIDENCE_QUEUE_URL", "")
 # it is replayed is a finding raised against something already being fixed.
 GRACE_MINUTES = int(os.environ.get("EVIDENCE_INFLIGHT_GRACE_MINUTES", "60"))
 
-_AUTH = {}
+INGEST_PATH = "/api/ingest/evidence"
+
+_KEYS = {}
 
 
 class NotDelivered(Exception):
     """The record was not persisted by Truveon. Retryable."""
 
 
+class NoCredential(NotDelivered):
+    """No ingest key exists for this record's tenant. Retryable once fixed.
+
+    A subclass rather than a separate path so that it can never be mistaken for
+    delivered: it IS a failure to deliver, and it redrives like one. It is
+    distinguished only so the finding can name the tenant.
+    """
+
+
 class ContentConflict(Exception):
-    """Truveon holds this sequence with different content. NOT retryable."""
+    """Truveon holds this key with different content. NOT retryable."""
 
 
 def _now():
@@ -79,35 +104,84 @@ def _iso(dt):
     return dt.astimezone(datetime.timezone.utc).isoformat()
 
 
-def _token():
-    """Bearer token, cached for the execution environment.
+def secret_name(tenant):
+    return f"{TRUVEON_SECRET_PREFIX}/{tenant}"
 
-    One credential for all tenants, not one per tenant. The `tenant` field
-    carries the isolation and Truveon enforces it server-side.
 
-    Per-tenant credentials sound stronger and are worse here: the platform
-    would hold and rotate N secrets, and the failure mode is that one expires
-    quietly and that tenant's evidence stops while every other tenant looks
-    fine. One credential fails loudly for everybody, which is the direction
-    this codebase keeps choosing.
+def ingest_key(tenant):
+    """The Truveon ingest key for a platform tenant, cached per environment.
+
+    The secret name is the mapping from platform tenant to Truveon tenant: the
+    key carries the Truveon slug, so whichever key sits under this tenant's
+    secret decides where its evidence lands.
     """
-    if "token" not in _AUTH:
-        raw = secrets.get_secret_value(SecretId=TRUVEON_SECRET)["SecretString"]
-        try:
-            _AUTH["token"] = json.loads(raw)["token"]
-        except (ValueError, KeyError):
-            # Tolerated: a bare token string rather than JSON. The secret is
-            # set by hand and this is the likely shape of a mistake.
-            _AUTH["token"] = raw.strip()
-    return _AUTH["token"]
+    if tenant in _KEYS:
+        return _KEYS[tenant]
+    try:
+        raw = secrets.get_secret_value(
+            SecretId=secret_name(tenant))["SecretString"]
+    except secrets.exceptions.ResourceNotFoundException as exc:
+        raise NoCredential(
+            f"no Truveon ingest key for tenant '{tenant}' "
+            f"({secret_name(tenant)} does not exist)") from exc
+    except Exception as exc:                       # noqa: BLE001
+        raise NoCredential(
+            f"could not read {secret_name(tenant)}: "
+            f"{type(exc).__name__}") from exc
+    try:
+        key = json.loads(raw)["key"]
+    except (ValueError, KeyError, TypeError):
+        # Tolerated: a bare key string rather than JSON. The secret is set by
+        # hand and this is the likely shape of a mistake.
+        key = raw.strip()
+    if not key.startswith("truveon_ing."):
+        # Refused here rather than sent. A malformed key is a 401 that Truveon
+        # cannot even attribute to a tenant, so it leaves no rejection record
+        # on that side (Truveon D-23) -- this is the only place it is visible.
+        raise NoCredential(
+            f"{secret_name(tenant)} does not hold a Truveon ingest key "
+            "(expected the truveon_ing.<slug>.<secret> form)")
+    _KEYS[tenant] = key
+    return key
 
 
-def _post(body):
-    """One ingest call. Returns on persistence, raises otherwise."""
+def submission(record):
+    """The Truveon submission envelope for one evidence record.
+
+    One record per submission, never several. The record is the unit the
+    ledger numbers and marks delivered; batching would make "delivered" a
+    property of a group and a partial failure unrepresentable.
+
+    The record itself travels unchanged, content_hash included. Only the
+    envelope is derived.
+    """
+    account = record.get("account_id") or PIPELINE_ACCOUNT_ID
+    if not account:
+        raise NotDelivered(
+            "the record has no account and PIPELINE_ACCOUNT_ID is unset, so "
+            "the submission has no account to claim")
+    return {
+        "stream": record["category"],
+        "aws_account_id": str(account),
+        # Stable across every retry of this record and unique within the
+        # stream. A dot rather than '#': Truveon writes it into an S3 key.
+        "idempotency_key": f"{record['category']}.{int(record['sequence']):012d}",
+        "sequence_number": int(record["sequence"]),
+        # The platform's clock, because count reconciliation windows on it and
+        # both sides must count by the same one. occurred_at is in the record.
+        "event_time": record["emitted_at"],
+        "events": [record],
+    }
+
+
+def _post(record):
+    """One ingest call. Returns Truveon's answer on persistence, raises otherwise."""
+    tenant = record.get("tenant") or ""
+    key = ingest_key(tenant)
     req = urllib.request.Request(
-        f"{TRUVEON_ENDPOINT}/v1/evidence",
-        data=json.dumps(body, default=str).encode("utf-8"),
-        headers={"Authorization": f"Bearer {_token()}",
+        f"{TRUVEON_ENDPOINT}{INGEST_PATH}",
+        data=json.dumps(submission(record), default=str).encode("utf-8"),
+        headers={"X-Truveon-Ingest-Key": key,
                  "Content-Type": "application/json",
                  "Accept": "application/json"},
         method="POST")
@@ -122,31 +196,38 @@ def _post(body):
             pass
         if exc.code == 409:
             raise ContentConflict(
-                f"Truveon holds {body['stream_id']} sequence "
-                f"{body['sequence']} with different content: {detail}. "
+                f"Truveon holds {record['stream_id']} sequence "
+                f"{record['sequence']} with different content: {detail}. "
                 "One of the two stores is wrong and the platform will not "
                 "guess which.") from exc
+        if exc.code == 401:
+            # Drop the cached key so a rotated secret is picked up on the next
+            # attempt rather than at the next cold start.
+            _KEYS.pop(tenant, None)
         raise NotDelivered(
             f"Truveon returned HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise NotDelivered(f"could not reach Truveon: {exc}") from exc
 
-    # The contract says 200 means persisted. Verify it SAYS so rather than
-    # inferring persistence from the status code alone -- a proxy, a gateway or
-    # a misconfigured stub can return 200 for something that never reached a
-    # datastore, and this acknowledgement is what stops the platform looking.
+    # Truveon commits before it answers, so a 200 means durable. Verify the
+    # body SAYS so rather than inferring it from the status code -- a proxy, a
+    # gateway or a misconfigured stub can return 200 for something that never
+    # reached a datastore, and this acknowledgement is what stops the platform
+    # looking.
     try:
         answer = json.loads(payload) if payload else {}
     except ValueError:
         raise NotDelivered(
             f"Truveon returned 200 with a body that is not JSON: "
             f"{payload[:200]}")
-    if answer.get("stored") is not True:
+    if answer.get("accepted") is not True or not answer.get("submission_id"):
         raise NotDelivered(
-            "Truveon returned 200 but did not confirm storage "
-            f"(stored={answer.get('stored')!r}). Treated as undelivered: an "
-            "acknowledgement that does not mean persisted is one that would "
-            "stop the platform looking for a record Truveon may still drop.")
+            "Truveon returned 200 but did not confirm it stored the submission "
+            f"(accepted={answer.get('accepted')!r}, "
+            f"submission_id={answer.get('submission_id')!r}). Treated as "
+            "undelivered: an acknowledgement that does not mean persisted is "
+            "one that would stop the platform looking for a record Truveon may "
+            "still drop.")
     return answer
 
 
@@ -175,7 +256,8 @@ def _emit(name, cause, detail, routing="review_queue"):
             "current_state": "ALARM",
             "routing": routing,
             "alarm": {"name": name,
-                      "resource_id": detail.get("stream_id", "evidence")},
+                      "resource_id": detail.get("stream_id")
+                      or detail.get("tenant") or "evidence"},
             "assessment": {"probable_cause": cause},
             "evidence_delivery": detail,
         }, default=str),
@@ -214,14 +296,21 @@ def send(event, context=None):
         # undelivered.
         return out
 
-    delivered, conflicts, failures = 0, [], []
+    delivered, duplicates, conflicts, failures = 0, 0, [], []
+    uncredentialed = {}
+    unregistered = set()
     for body in records:
         stream_id = body.get("stream_id")
         sequence = body.get("sequence")
         try:
-            _post(body)
+            answer = _post(body)
             _mark_delivered(stream_id, sequence)
             delivered += 1
+            if answer.get("duplicate"):
+                duplicates += 1
+            if answer.get("account_registered") is False:
+                unregistered.add(str(body.get("account_id")
+                                     or PIPELINE_ACCOUNT_ID))
         except ContentConflict as exc:
             # Not retried. Retrying cannot resolve a disagreement about
             # content, and burning the redrive budget on it would hide it.
@@ -230,6 +319,10 @@ def send(event, context=None):
             _emit("platform-evidence-content-conflict", str(exc),
                   {"stream_id": stream_id, "sequence": sequence},
                   routing="digest_and_jira")
+        except NoCredential as exc:
+            uncredentialed.setdefault(body.get("tenant") or "", str(exc))
+            failures.append({"stream_id": stream_id, "sequence": sequence,
+                             "error": str(exc)})
         except NotDelivered as exc:
             failures.append({"stream_id": stream_id, "sequence": sequence,
                              "error": str(exc)})
@@ -237,9 +330,32 @@ def send(event, context=None):
             failures.append({"stream_id": stream_id, "sequence": sequence,
                              "error": f"{type(exc).__name__}: {exc}"})
 
+    # One finding per tenant per batch, not per record. A tenant with no key
+    # fails every record it has, and a finding per record would bury it.
+    for tenant, reason in sorted(uncredentialed.items()):
+        _emit("platform-evidence-no-credential",
+              (f"Evidence for tenant '{tenant}' cannot be delivered: {reason}. "
+               "Its records remain pending and are not lost. Mint an ingest "
+               "key in that tenant's Truveon and store it at "
+               f"{secret_name(tenant)} -- see "
+               "scripts/truveon-tenant-handoff.sh."),
+              {"tenant": tenant})
+
+    # Stored AND flagged by Truveon; raised here too so the platform's own
+    # operators see it without reading Truveon. Digest, not review queue:
+    # nothing was lost, the tenant's registration is simply incomplete.
+    if unregistered:
+        _emit("platform-evidence-account-unregistered",
+              (f"Truveon accepted evidence from {len(unregistered)} account(s) "
+               "it has no registration for. The evidence is kept, but "
+               "Truveon cannot tell a silent registered account from a missing "
+               "one until it is registered."),
+              {"accounts": sorted(unregistered)}, routing="digest")
+
     out = {"record_type": "evidence-delivery", "delivering": True,
-           "delivered": delivered, "conflicts": len(conflicts),
-           "failed": len(failures)}
+           "delivered": delivered, "duplicates": duplicates,
+           "conflicts": len(conflicts), "failed": len(failures),
+           "uncredentialed_tenants": sorted(uncredentialed)}
     print(json.dumps(out, default=str))
 
     # Partial batch failure, so only the undelivered records redrive. A
@@ -274,11 +390,10 @@ def replay_pending(event=None, context=None):
     control.
 
     Safe to run repeatedly because ingest is idempotent on
-    (stream_id, sequence) -- a record replayed after it was in fact delivered
-    is accepted and changes nothing. That is the contract requirement in
-    docs/truveon-ingestion-contract.md earning its place: without it, replay
-    would manufacture duplicates and the count reconciliation would then report
-    a mismatch on a stream this function had just repaired.
+    (stream, idempotency_key) -- a record replayed after it was in fact
+    delivered comes back `duplicate: true` and changes nothing. Without that,
+    replay would manufacture duplicates and the count reconciliation would then
+    report a mismatch on a stream this function had just repaired.
     """
     if not LEDGER_TABLE or not QUEUE_URL:
         out = {"record_type": "evidence-replay", "ran": False,

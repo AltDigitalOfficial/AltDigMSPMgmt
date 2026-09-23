@@ -47,26 +47,43 @@ ACCOUNTS="$(aws ssm get-parameters-by-path --path /platform/org/account/ \
 # unattributed, which the pipeline reports but which is not what anyone
 # intended. Silent, syntactically fine, and wrong.
 ACCOUNTS_FILE="$(mktemp)"
-trap 'rm -f "${ACCOUNTS_FILE}"' EXIT
+REGISTRY_FILE="$(mktemp)"
+trap 'rm -f "${ACCOUNTS_FILE}" "${REGISTRY_FILE}"' EXIT
 printf "%s\n" "${ACCOUNTS}" > "${ACCOUNTS_FILE}"
 
-# win_path on both. MSYS_NO_PATHCONV is exported above, so REPO_ROOT stays a
-# POSIX path that python.exe cannot open -- it reads /c/AltDigital/... as a
-# relative path and looks for C:\c\AltDigital.
+# Client accounts come from the registry, not SSM. /platform/org/account/ holds
+# only AltDigital's own accounts, so until this read existed every vested client
+# account filed its evidence as unattributed -- reported, but never reaching
+# the client's Truveon tenant.
+#
+# A failed read STOPS the publish rather than publishing platform accounts
+# alone. That map would be valid and quietly wrong: every client's evidence
+# unattributed, with the parameter's timestamp saying it was just refreshed.
+# Redirected to a file and the exit code read -- CLAUDE.md trap 3.
+bash "${REPO_ROOT}/scripts/registry.sh" list-accounts >"${REGISTRY_FILE}" 2>/dev/null \
+  || die "Could not read the account registry. Refusing to publish a tenant map
+      without client accounts: their evidence would file as unattributed."
+
+# win_path on all of them. MSYS_NO_PATHCONV is exported above, so REPO_ROOT
+# stays a POSIX path that python.exe cannot open -- it reads /c/AltDigital/...
+# as a relative path and looks for C:\c\AltDigital.
 PAYLOAD="$("${PY}" \
   "$(win_path "${REPO_ROOT}/scripts/lib/evidence_tenants.py")" \
-  "$(win_path "${ACCOUNTS_FILE}")")"
+  "$(win_path "${ACCOUNTS_FILE}")" \
+  "$(win_path "${REGISTRY_FILE}")")" \
+  || die "The tenant map could not be built. Nothing was published."
 
-COUNT="$("${PY}" -c "
+SUMMARY="$("${PY}" -c "
 import json,sys
-d=json.loads(sys.argv[1])
-print(sum(len(v['accounts']) for v in d['tenants'].values()))
+d=json.loads(sys.argv[1])['tenants']
+print(len(d), sum(len(v['accounts']) for v in d.values()), ' '.join(sorted(d)))
 " "${PAYLOAD}")"
+read -r TENANT_COUNT COUNT TENANT_NAMES <<<"${SUMMARY}"
 
 hr
 log "Evidence tenant map"
 log "  account  : altdig-security-audit (${AUDIT})"
-log "  tenants  : 1 (altdigital-platform — no client tenants vested yet)"
+log "  tenants  : ${TENANT_COUNT} (${TENANT_NAMES})"
 log "  accounts : ${COUNT}"
 log "  parameter: /platform/evidence/tenants"
 hr
@@ -101,4 +118,7 @@ ok "published /platform/evidence/tenants"
 hr
 info "Re-run this after vesting an account, or evidence from it files under"
 log "  the unattributed tenant and raises a finding until it is mapped."
+log ""
+info "Each tenant above delivers only once its Truveon ingest key is stored:"
+log "  scripts/truveon-tenant-handoff.sh status --partner <p> --client <c>"
 hr

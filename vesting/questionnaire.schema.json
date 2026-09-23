@@ -513,6 +513,80 @@
           "description": "9.3 — billing arrangement."
         }
       }
+    },
+    "truveon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existing_tenant"
+      ],
+      "description": "Section 16 — the client's Truveon tenant. One tenant per CLIENT, not per application (B-023, decided 2026-09-23); a second application for the same client reuses the tenant and adds itself as an application inside it. Optional in the schema so questionnaires completed before this section existed still validate; scripts/truveon-tenant-handoff.sh refuses to prepare a tenant without it. Holds no personal data: the people who get Truveon accounts are in the Truveon roster sidecar, vesting/truveon.roster.example.yaml.",
+      "properties": {
+        "existing_tenant": {
+          "type": "boolean",
+          "description": "16.1 — true if the client already has a Truveon tenant (a Truveon customer before they were a platform tenant, or a second application for an onboarded client). Creation is skipped; the tenant is configured and linked only."
+        },
+        "tenant_slug": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,62}$",
+          "description": "16.2 — Truveon tenant slug. It becomes a Postgres schema name in Truveon and cannot be changed afterwards without a migration. Defaults to identity.client_slug. Set it when two partners have clients with the same slug, since Truveon slugs are global and platform client slugs are unique only within a partner."
+        },
+        "tenant_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "16.2 — display name in Truveon. Defaults to identity.client_name."
+        },
+        "legal_entities": {
+          "type": "array",
+          "description": "16.3 — the client's legal structure, for Truveon's entity model. Optional: Truveon creates a root 'Group' entity regardless and entries without parent_ref attach beneath it. Company facts only; signing officers are people and are entered in Truveon directly.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ref",
+              "legal_name"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
+              },
+              "parent_ref": {
+                "type": "string"
+              },
+              "legal_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "short_name": {
+                "type": "string"
+              },
+              "entity_kind": {
+                "enum": [
+                  "parent",
+                  "sub",
+                  "majority",
+                  "branch",
+                  "jv"
+                ]
+              },
+              "jurisdiction": {
+                "type": "string"
+              },
+              "registration_number": {
+                "type": "string"
+              },
+              "data_residency": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "send_invites": {
+          "type": "boolean",
+          "description": "16.4 — email Truveon invites to the roster when the tenant is created. Default false: accounts are created silently and invited during the white-glove walkthrough, so a client does not receive a login before anybody has shown them what it is for."
+        }
+      }
     }
   },
   "$defs": {

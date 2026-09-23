@@ -1,173 +1,209 @@
 # Truveon ingestion contract
 
-What the evidence pipeline needs from Truveon. Written from this side on
-purpose: AltDigital builds both ends, so the contract is set by what the
-completeness controls require rather than discovered from whatever the
-ingestion endpoint happens to do.
+What the evidence pipeline needs from Truveon, and what Truveon actually
+exposes. AltDigital builds both ends.
 
-Status: **specified, not yet implemented.** See B-088 for the trigger.
-
-The platform is built against this and tested against a stub. Nothing here is
-exotic; all of it exists to make the four controls in
-[design 04](../design/04-security-controls-and-evidence.md) "Completeness is a
-control" actually work.
+Status: **reconciled 2026-09-23.** Ingest (§1) exists in Truveon and the
+platform's sender is built against it. Count (§2), watermark (§3) and the
+content-conflict `409` (§1) are Truveon work outstanding under B-088; until
+they land, reconciliation reports *unanswerable*, never *agreed*.
 
 ---
 
-## Why the pipeline cannot just POST and hope
+## Why this document changed
 
-design 04's premise:
+The first version was written from this side before Truveon's ingestion
+endpoint existed, on the premise that the platform's completeness controls
+should set the API. On 2026-09-13 Truveon built `POST /api/ingest/evidence`
+against its own functional assumptions (4.3.x, 18.1.x) and a CISO review item
+(A12). The two did not match, and the platform's sender would have failed
+against the live endpoint on the first call.
 
-> Because we push, we must prove nothing was silently dropped. [...] A silently
-> failed pipeline that looks like a clean month is the failure mode that
-> destroys an audit.
+Resolved by adopting Truveon's shape and adding to Truveon only what the
+completeness controls genuinely cannot do without. The substantive change is
+**authentication**; everything else is envelope mapping.
 
-Three of the four controls need something back from Truveon. Sequence numbering
-is ours alone; buffering is ours alone; but **acknowledgement** and
-**reconciliation** are a conversation, and an endpoint that only accepts posts
-cannot hold up its end.
+### Per-tenant keys, not one shared token
+
+The first version argued for one bearer token across all tenants: per-tenant
+keys mean N secrets, and one could expire quietly and silence a single tenant
+while the rest looked healthy.
+
+That argument is answered by the pipeline's own second control. The hourly
+heartbeat is **per tenant** and is itself a numbered evidence record; a tenant
+whose key stops working stops delivering heartbeats, its ledger rows age past
+the grace period, and the gap detector raises a finding naming that tenant
+within the hour. The quiet failure the first version feared is exactly the one
+this pipeline was built to make loud.
+
+What remains is the difference in blast radius. One shared token that leaks
+exposes every tenant's evidence store to writes; a per-tenant key exposes one.
+Truveon also derives the tenant from the key rather than trusting a field in
+the body, so a collector bug that mis-files an account cannot write into the
+wrong tenant — it can only fail to authenticate.
 
 ---
 
 ## 1. Ingest
 
 ```
-POST /v1/evidence
+POST {TRUVEON_ENDPOINT}/api/ingest/evidence
+X-Truveon-Ingest-Key: truveon_ing.<truveon-tenant-slug>.<secret>
 ```
 
-Body is one evidence record as built by `evidence/src/record.py`:
+Truveon's unit is a **submission**: one delivery, from one account, on one
+stream, carrying N events. The platform sends exactly one evidence record per
+submission, because the record is the unit the ledger numbers and marks
+delivered — batching several into one submission would make "delivered" a
+property of a group, and a partial failure would be unrepresentable.
 
-```json
-{
-  "record_type": "evidence",
-  "tenant": "acme",
-  "partner": "oeight",
-  "account_id": "754280127660",
-  "category": "security-finding",
-  "stream_id": "acme#security-finding",
-  "sequence": 4182,
-  "source": "securityhub",
-  "control_ref": "...",
-  "occurred_at": "2026-09-20T09:14:02+00:00",
-  "emitted_at": "2026-09-20T09:14:07+00:00",
-  "payload": { },
-  "content_hash": "sha256..."
-}
-```
+| Submission field | Value | Why |
+|---|---|---|
+| `stream` | the record's `category` | Truveon scopes streams per tenant already; the tenant is the key. |
+| `aws_account_id` | the record's `account_id`, or the pipeline's own account for records that have none | See "Records with no account" below. |
+| `idempotency_key` | `<category>.<sequence:012d>` | Unique per stream, stable across retries, and safe inside an S3 key (Truveon puts it in the archive path — `#` would not be). |
+| `sequence_number` | the record's `sequence` | Truveon's own gap detection runs on this. |
+| `event_time` | the record's `emitted_at` | The platform's clock. §2 windows on this, and it must be the same clock the platform counts by. `occurred_at` travels inside the record. |
+| `events` | `[record]` | The record exactly as `evidence/src/record.py` built it, `content_hash` included. |
 
-### Idempotent on `(stream_id, sequence)` — REQUIRED
+### Idempotent on `(stream, idempotency_key)` — built
 
-A re-POST of a sequence Truveon already holds is a **success**, not a duplicate
-and not an error.
+A re-POST of a submission Truveon already holds returns `200` with
+`"duplicate": true`. The sender treats that as delivered. This is what makes
+retry and `replay_pending` safe: without it every retry would add a row, and
+count reconciliation would report a mismatch on a stream that is intact.
 
-This is the requirement most likely to be dropped as an implementation detail,
-and it is the one that breaks everything else. The sender retries — against
-timeouts, 5xx, and its own crashes between "sent" and "recorded as sent". A
-Truveon that appended on every POST would accumulate duplicates, and the count
-reconciliation in control 4 would then report a mismatch on a stream that is
-perfectly intact. The control would be wrong in the direction that costs an
-audit conversation.
+### Same key, different content: `409` — REQUIRED, not yet built
 
-If the stored `content_hash` differs from the one being posted for the same
-`(stream_id, sequence)`, that is **not** idempotent-success. Return `409` and
-say both hashes. Same number, different content, means one of the two stores is
-wrong and neither side should guess which.
+If Truveon holds `(stream, idempotency_key)` with a different payload from the
+one being posted, it must return `409` naming both, **not** `200 duplicate`.
 
-### The response means PERSISTED
+Today it returns `200 duplicate` without comparing. That is the one place
+Truveon's current behaviour is actively wrong for this pipeline: the same
+sequence number with different content means one of the two stores is wrong,
+and a `200` tells the platform to stop looking. The sender already handles
+`409` as a finding for a human and does not retry it.
 
-```json
-{ "stream_id": "acme#security-finding", "sequence": 4182, "stored": true }
-```
+### The response means PERSISTED — built
 
-`200` only once the record is durable. Not "queued", not "accepted".
-
-The sender marks its ledger row `delivered` on this response, and a delivered
-row is excluded from gap detection forever. An acknowledgement that meant
-"received" would let Truveon lose a record that the platform had already
-stopped looking for — the exact silent failure this whole design exists to
-prevent.
-
-If Truveon buffers internally, do not answer until the buffer is durable.
+Truveon writes the archive object, then commits the database row, then
+responds. A `200` therefore means durable. The sender still checks the body
+says so — `"accepted": true` and a `submission_id` — rather than inferring it
+from the status code, because a proxy or gateway can return `200` for
+something that never reached a datastore, and this acknowledgement is what
+permanently removes the record from gap detection.
 
 ### Failure
 
-Any non-2xx leaves the record **pending** and it is retried. Truveon does not
-need to distinguish retryable from fatal; the sender treats everything except a
-`409` as retryable, and a `409` as a finding for a human.
+Any non-2xx other than `409` leaves the record **pending** and it is retried.
+`401` is included: a revoked or missing key is retryable once someone fixes the
+secret, and the heartbeat gap makes sure someone notices.
+
+### Records with no account
+
+`pipeline-completeness` records (heartbeat, gap detected, count reconciled)
+are about a tenant's pipeline, not about any one of its accounts, and carry
+`account_id: null`. Truveon requires `aws_account_id`.
+
+The envelope carries the account the pipeline runs in — the Audit account —
+and the record itself is left untouched with its `null`. Onboarding registers
+the Audit account in every client's Truveon tenant (see
+`scripts/truveon-tenant-handoff.sh`). That turns out to be useful rather than a
+workaround: Truveon's own `account_silent` detection now watches the heartbeat,
+so a stopped pipeline is noticed from both ends independently.
 
 ---
 
-## 2. Count
+## 2. Count — REQUIRED, not yet built
 
 ```
-GET /v1/evidence/count?stream_id=<id>&from=<iso8601>&to=<iso8601>
+GET {TRUVEON_ENDPOINT}/api/ingest/evidence/count?stream=<category>&from=<iso8601>&to=<iso8601>
+X-Truveon-Ingest-Key: ...
 ```
 
 ```json
-{ "stream_id": "acme#security-finding", "from": "...", "to": "...",
+{ "stream": "security-finding", "from": "...", "to": "...",
   "count": 1204, "min_sequence": 3001, "max_sequence": 4204 }
 ```
 
-Control 4, the periodic count comparison. The window is by `emitted_at`, which
-is the platform's clock — `occurred_at` is the source's and a Config evaluation
-arriving late would otherwise make a healthy period look short.
+Authenticated by the ingest key, not a session — the caller is a Lambda. The
+window is by `event_time`, which §1 sets to `emitted_at`.
 
-`min_sequence` and `max_sequence` matter as much as `count`. Equal counts over a
-window prove less than they appear to: the same total can hide one record lost
-and one duplicated. With the range, the platform can check that the count
-matches the span.
+`min_sequence` and `max_sequence` matter as much as `count`. Equal counts over
+a window can hide one record lost and one duplicated; with the range, both
+sides can check that the count matches the span.
+
+A stream with nothing in the window returns `count: 0` and `null` for both
+sequence fields, not a `404`. The platform distinguishes "Truveon holds none"
+from "Truveon could not be asked" throughout, and a `404` would blur them.
 
 ---
 
-## 3. Sequence high-water mark
+## 3. Watermark — REQUIRED, not yet built
 
 ```
-GET /v1/evidence/watermark?stream_id=<id>
+GET {TRUVEON_ENDPOINT}/api/ingest/evidence/watermark?stream=<category>
+X-Truveon-Ingest-Key: ...
 ```
 
 ```json
-{ "stream_id": "acme#security-finding", "highest_sequence": 4204,
+{ "stream": "security-finding", "highest_sequence": 4204,
   "missing": [4188, 4190] }
 ```
 
-`missing` is Truveon's own view of holes below its high-water mark. Optional to
-compute, valuable to have: it lets the two sides compare notes rather than the
-platform being the only one with an opinion about its own completeness. A
-pipeline that audits itself and reports itself healthy is worth less than two
-stores that agree.
+`missing` is Truveon's own view of holes below its high-water mark. Truveon
+already records these as `sequence_gap` events at arrival; this exposes them to
+the sender. It lets the two sides compare notes rather than the platform being
+the only one with an opinion about its own completeness.
 
 ---
 
-## Auth
+## Credentials
 
-Bearer token per environment, from Secrets Manager, rotatable without a
-deployment. One credential per Truveon tenant is **not** required — the
-`tenant` field carries the isolation and Truveon enforces it server-side.
+One Truveon ingest key per platform tenant, in Secrets Manager in the Audit
+account:
 
-Noted because the opposite is tempting: per-tenant credentials sound stronger
-and would mean the platform holding N secrets and rotating N of them, with the
-failure mode that one expires quietly and that tenant's evidence stops while
-every other tenant looks fine. One credential fails loudly for everybody.
+```
+platform/truveon/ingest/<platform-tenant>     {"key": "truveon_ing.<slug>.<secret>"}
+```
+
+The platform tenant name and the Truveon tenant slug need not match. The key
+carries the Truveon slug, so which key sits under which platform tenant's
+secret *is* the mapping, and the registry records the slug as
+`truveon_tenant_id` for humans and for the verification sweep.
+
+A tenant with no secret is not an error the sender swallows: its records stay
+pending and a `platform-evidence-no-credential` finding names the tenant.
+
+Keys are minted in Truveon (`POST /api/ingest/credentials`, session
+authenticated, shown once) during the onboarding handoff, and rotated by
+minting a new one, updating the secret, and revoking the old one. The sender
+caches keys per execution environment; a rotated key is picked up on the next
+cold start or after a `401`, whichever comes first.
 
 ---
 
 ## What Truveon does NOT receive
 
-**Raw logs.** design 04 is explicit:
+**Raw logs.** design 04:
 
 > Truveon holds derived findings and correlated evidence. **Raw logs remain in
 > the Log Archive account** under Object Lock. An auditor may want the raw
 > record; know which store answers which question.
 
+Confirmed 2026-09-23 as the near-term position. Truveon will receive evidence
+*about* the raw logs — that each account's logs arrived, when, and their
+hashes — without the logs themselves. Shipping raw logs into Truveon is a
+long-term product question, not an integration task.
+
 **Personal data.** Approver and requester identities travel as opaque account
-identifiers, never names or email addresses. Anything joining an identifier to
-a person happens in the system that owns identity, not in the evidence store.
+identifiers, never names or email addresses.
 
 ---
 
 ## Open, and deliberately
 
-**Retention inside Truveon** is not specified here. design 04 sets a per-tenant
-retention floor derived from the union of applicable frameworks, and that value
-belongs to the tenant record rather than to this contract. The pipeline does not
-delete from Truveon and has no endpoint to do so.
+**Retention inside Truveon** is not specified here. design 04 sets a
+per-tenant retention floor, set on the Truveon tenant during onboarding
+(`PUT /api/member-accounts/config`). The pipeline does not delete from Truveon
+and has no endpoint to do so.

@@ -1284,3 +1284,44 @@ by `Partner` returns `Partner$altdigital` with a figure.
 
 The permission set half is **not built**, deliberately, and B-126 records the
 report that replaces it.
+
+---
+
+## D-021 · Vesting checks that the Truveon tenant is linked, not that evidence was received
+
+**Design position** — prompt 3.1: *"Vesting must fail loudly if the Truveon
+tenant registration does not confirm first evidence receipt. A vested account
+that is not sending evidence is worse than no account."* design 02 vesting
+step 5 says the same: *"Registers the corresponding Truveon tenant and
+verifies first evidence receipt."*
+
+**Actual** — `vest-client.sh` §8 passes when the client's Truveon tenant is
+**linked**: the registry names it (`truveon_tenant_id` on the CLIENT record)
+and its ingest key is stored at `platform/truveon/ingest/<partner>-<client>`
+in the Audit account. First-evidence receipt is confirmed by the verification
+sweep (design 13 step 8, check 1), before go-live. The vesting evidence record
+carries `truveon_tenant_linked` and `truveon_evidence_verified: false` — never
+`true` at vesting.
+
+**Reason — receipt at vesting is impossible by construction.** The accounts
+§8 would ask about were created seconds earlier and have emitted nothing. The
+evidence tenant map that attributes their events to the client is published at
+onboarding step 8, three steps later, and the StackSet baseline that forwards
+their events arrives asynchronously after that. A gate that required receipt
+here could only ever fail, or be made to pass by weakening what "receipt"
+means — and the second is the one that would actually happen.
+
+What the prompt is protecting against is an account whose evidence has
+nowhere to go. A linked tenant closes that: every record the account produces
+is numbered, buffered, and has a key to deliver with. Whether it *does*
+deliver is a question with an answer only once the account has done
+something, and the sweep is where the platform already asks questions of that
+shape.
+
+**What was lost** — nothing that the prompt's version would have caught.
+Before 2026-09-23 the gate could not pass at all and every vesting took
+`--defer-truveon`, which recorded an override and verified neither.
+
+**Closing condition** — none expected; this is the right place for each
+check. Revisit if the verification sweep's evidence check (B-088) is ever
+dropped from the go-live gate, because then nothing would ask for receipt.

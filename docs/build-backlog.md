@@ -248,12 +248,27 @@ one that decides it for a client whose apps have different IP owners —
 retains the IP for the app OEight builds for them. Those two applications
 arguably should not share an evidence tenant at all.
 
-**Not decided here.** It changes the questionnaire schema (a `truveon_tenant`
-field, or none), the registry record shape, and the billing model. Owned by
-Jamie and Wayne.
+**DECIDED 2026-09-23, Jamie: one Truveon tenant per client.** Closed.
 
-**Decide before** — the Truveon integration is built (phase 9.1), because that
-integration will encode whichever answer is assumed.
+The Avergent case above does not argue against it once "client" is read the way
+the questionnaire already reads it. The application OEight builds for Avergent,
+with Avergent keeping the IP, is onboarded with Avergent as the client — so it
+gets Avergent's tenant, not OEight's. The IP owner is the client, and the
+tenant follows the client. Two applications share a tenant only when the same
+organisation owns both, which is the case where sharing is right.
+
+What encodes it:
+
+- registry: `truveon_tenant_id` on the CLIENT record (`registry.sh
+  link-truveon`), not on an application or account record
+- questionnaire section 16 (`truveon:`), with `existing_tenant` for a second
+  application of an onboarded client; applications are modelled inside the
+  tenant (Truveon's `applications`)
+- evidence: one platform tenant per client, `<partner>-<client>`
+  (`scripts/lib/evidence_tenants.py`), one ingest key each
+- billing: design 10's flat Truveon fee is per client. Wayne should confirm
+  that is what the commercial model meant; nothing in the build depends on the
+  answer.
 
 ---
 
@@ -3311,6 +3326,50 @@ Nothing needs re-architecting at that point. The endpoint and credential are
 configuration, and the buffer means evidence produced in the meantime is
 delivered rather than lost — the same property the design asks for against a
 Truveon outage, exercised early by Truveon simply not being built yet.
+
+### Update 2026-09-23 — the endpoint existed, and did not match
+
+Truveon built `POST /api/ingest/evidence` on 2026-09-13 against its own
+functional assumptions, and it differed from the contract above on path,
+envelope, idempotency key and — substantively — auth: per-tenant keys, with the
+tenant derived from the key, where the contract specified one shared token.
+Neither side had told the other. The sender as it stood would have failed on
+its first call.
+
+**Reconciled by adopting Truveon's shape** (Jamie, 2026-09-23). The contract
+is rewritten in place; its "Why this document changed" section carries the
+reasoning, the short version being that the per-tenant heartbeat already
+catches the quiet-expiry failure a shared token was meant to avoid, and a
+leaked per-tenant key exposes one tenant rather than all of them.
+
+**Done on this side:** sender speaks the real endpoint with a key per tenant
+and names a tenant with no key; reconciliation compares count AND range (it
+previously compared count only, despite its docstring) and routes an
+unanswerable comparison to the digest rather than Jira; template carries
+`TruveonSecretPrefix` and `PIPELINE_ACCOUNT_ID`; client accounts reach the
+evidence tenant map (they previously never did — only platform accounts were
+read); onboarding creates and links the tenant through
+`scripts/truveon-tenant-handoff.sh`.
+
+**Still owed by Truveon** — this item stays open until all four land:
+
+1. `409` when `(stream, idempotency_key)` arrives again with a different
+   payload. Today it answers `200 duplicate` without comparing.
+2. `GET /api/ingest/evidence/count`, ingest-key authenticated.
+3. `GET /api/ingest/evidence/watermark`, ingest-key authenticated.
+4. `GET /api/ingest/evidence/receipt?aws_account_id=`, ingest-key
+   authenticated — the same answer as `/api/provisioning/evidence-receipt`,
+   reachable by a machine. This is what `provisioning/src/verify.py`
+   `check_evidence` and verification sweep check 1 need, and is why both still
+   report *undeterminable*.
+
+Plus the onboarding tooling the handoff pack calls: `onboard_tenant.py
+--owner-from-users-csv`, `apply_msp_manifest.py` with its
+`81-apply-msp-manifest.sh` wrapper, and `uat` as a member-account environment.
+
+**To start delivering** once a tenant is linked: deploy `platform-evidence`
+with `TruveonEndpoint=https://app.truveon.ai`. Ingest works today; items 1–3
+affect whether completeness can be *proven*, not whether evidence arrives.
 
 ## B-089 · I invented event source names instead of reading them
 

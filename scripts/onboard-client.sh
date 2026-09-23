@@ -2,9 +2,10 @@
 #
 # Onboard a client: questionnaire in, working AWS estate out.
 #
-#   scripts/onboard-client.sh --questionnaire q.yaml [--roster r.yaml] --dry-run
 #   scripts/onboard-client.sh --questionnaire q.yaml [--roster r.yaml] \
-#     --confirm-onboard --skip-truveon
+#     [--truveon-roster t.yaml] --dry-run
+#   scripts/onboard-client.sh --questionnaire q.yaml [--roster r.yaml] \
+#     [--truveon-roster t.yaml] --confirm-onboard
 #
 # design/13-client-provisioning.md, driven from a workstation.
 #
@@ -45,7 +46,7 @@
 #   pass 1 (step 3, before accounts)  one client-conversation business service.
 #                                     Proves the credential and the module.
 #                                     No tier services. NO ROUTING KEYS.
-#   pass 2 (step 6, after accounts)   tier business services, one technical
+#   pass 2 (step 7, after accounts)   tier business services, one technical
 #                                     service per tier x app plus `infra`, and
 #                                     the routing keys the alarm layer needs.
 #
@@ -72,22 +73,27 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-QUESTIONNAIRE=""; ROSTER=""; CONFIRM=0; SKIP_TRUVEON=0; DEFER_JIRA=0; FROM_STEP=0
+QUESTIONNAIRE=""; ROSTER=""; TRUVEON_ROSTER=""; CONFIRM=0; SKIP_TRUVEON=0
+DEFER_JIRA=0; FROM_STEP=0
 
 usage() {
   cat <<'USAGE'
 Usage: onboard-client.sh --questionnaire <path> [options]
 
   --questionnaire   Completed questionnaire, YAML. Required.
-  --roster          Developer roster sidecar. Without it, step 8 is skipped
+  --roster          Developer roster sidecar. Without it, step 9 is skipped
                     and nobody gets access to the accounts.
+  --truveon-roster  Truveon roster sidecar (questionnaire 16.5): who gets
+                    accounts in the client's Truveon tenant. Required when
+                    step 2 has to CREATE the tenant.
   --dry-run         Print every step and create nothing. Unlike a real run,
                     a dry run CONTINUES past a blocked step so that one
                     rehearsal reports every problem rather than the first.
   --confirm-onboard Required for a real run. Creates AWS accounts, which
                     cannot be deleted.
-  --skip-truveon    Proceed without a Truveon tenant or evidence receipt,
-                    recording a declared override against every account.
+  --skip-truveon    Proceed without a linked Truveon tenant, recording a
+                    declared override against every account. For when
+                    Truveon itself is unavailable, not as the normal path.
   --defer-jira      Proceed past the Jira step, which cannot be automated
                     here. Without this a real run stops at step 4.
   --from N          Resume at step N. Every step is idempotent, so this is a
@@ -119,18 +125,20 @@ STEP_NAMES=(
   "3|pagerduty-pass-1|design 13 step 3, business service only"
   "4|jira-tenant-artefacts|design 13 step 4"
   "5|aws-accounts-and-baseline|design 13 step 5"
-  "6|pagerduty-pass-2|design 13 step 3 again, tier + technical services"
-  "7|monitoring-and-schedules|design 13 step 6"
-  "8|developer-access|not numbered in design 13; questionnaire 3b"
-  "9|cost-categories|design 13 step 7"
-  "10|verification-sweep|design 13 step 8"
-  "11|go-live-gate|design 13 step 9, never automated"
+  "6|truveon-accounts|design 13 step 2 again, accounts registered"
+  "7|pagerduty-pass-2|design 13 step 3 again, tier + technical services"
+  "8|monitoring-and-schedules|design 13 step 6"
+  "9|developer-access|not numbered in design 13; questionnaire 3b"
+  "10|cost-categories|design 13 step 7"
+  "11|verification-sweep|design 13 step 8"
+  "12|go-live-gate|design 13 step 9, never automated"
 )
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --questionnaire)   QUESTIONNAIRE="$2"; shift 2 ;;
     --roster)          ROSTER="$2"; shift 2 ;;
+    --truveon-roster)  TRUVEON_ROSTER="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=1; shift ;;
     --confirm-onboard) CONFIRM=1; shift ;;
     --skip-truveon)    SKIP_TRUVEON=1; shift ;;
@@ -151,6 +159,7 @@ done
 [[ -n "${QUESTIONNAIRE}" ]] || { usage; die "--questionnaire is required."; }
 [[ -f "${QUESTIONNAIRE}" ]] || die "Not found: ${QUESTIONNAIRE}"
 [[ -z "${ROSTER}" || -f "${ROSTER}" ]] || die "Not found: ${ROSTER}"
+[[ -z "${TRUVEON_ROSTER}" || -f "${TRUVEON_ROSTER}" ]] || die "Not found: ${TRUVEON_ROSTER}"
 
 if [[ "${DRY_RUN}" != "1" && ${CONFIRM} -ne 1 ]]; then
   die "Refusing to onboard without --confirm-onboard.
@@ -201,8 +210,8 @@ hr
 log "Onboarding ${CLIENT_NAME}"
 log "  tenant      : ${PARTNER}/${CLIENT}/${APP}"
 log "  environments: ${ENVS}"
-log "  roster      : ${ROSTER:-<none supplied — step 8 will be skipped>}"
-log "  truveon     : $([[ ${SKIP_TRUVEON} -eq 1 ]] && echo 'SKIPPED (override recorded)' || echo required)"
+log "  roster      : ${ROSTER:-<none supplied — step 9 will be skipped>}"
+log "  truveon     : $([[ ${SKIP_TRUVEON} -eq 1 ]] && echo 'SKIPPED (override recorded)' || echo "required — one tenant per client")"
 log "  mode        : $([[ "${DRY_RUN}" == "1" ]] && echo DRY-RUN || echo EXECUTE)"
 [[ ${FROM_STEP} -gt 0 ]] && log "  resuming at : step ${FROM_STEP}"
 hr
@@ -259,7 +268,7 @@ blocked() {
 # and the distinction is the difference between a usable script and a useless
 # one.
 #
-# Steps 4, 10 and 11 can NEVER succeed from a workstation. If they halted the
+# Steps 4, 11 and 12 can NEVER succeed from a workstation. If they halted the
 # way a failure does, a real run would stop at step 4 every single time and
 # nothing would ever reach account creation — the operator would be forced to
 # pass --from 5 on every run, which trains people to skip steps.
@@ -357,9 +366,19 @@ fi
 # ===========================================================================
 # 2 — Truveon tenant
 # ===========================================================================
-# Before any account emits evidence, "or early evidence is lost rather than
-# buffered". The tenant API is not built (B-088), so this blocks unless the
-# override is taken deliberately.
+# Before any account emits evidence. One tenant per CLIENT (B-023), so a second
+# application for an onboarded client finds it already linked and passes.
+#
+# Done means LINKED: the registry names the client's Truveon tenant and the
+# tenant's ingest key is stored where the evidence sender reads it. Checked by
+# truveon-tenant-handoff.sh status, which is the same check an operator runs.
+#
+# Not done means a person runs Truveon's CLI -- Truveon cannot create a tenant
+# over an API, deliberately (Truveon D-26). So this writes the handoff pack and
+# BLOCKS. It blocks rather than recording a manual step because vesting (step
+# 5) refuses accounts for a client with no linked tenant: carrying on here
+# would only move the stop three steps later, after PagerDuty and Jira work
+# that would then have to be resumed around it.
 
 if should_run 2 truveon-tenant; then
   if [[ ${SKIP_TRUVEON} -eq 1 ]]; then
@@ -367,18 +386,43 @@ if should_run 2 truveon-tenant; then
     warn "Truveon SKIPPED by --skip-truveon."
     warn "  vest-client.sh records a declared, owned, dated override against"
     warn "  every account, so this appears in registry.sh report-overrides"
-    warn "  rather than being forgotten. Evidence is NOT flowing for this"
-    warn "  tenant and nothing else will say so."
+    warn "  rather than being forgotten. Evidence for this tenant is buffered"
+    warn "  and pending, and the pipeline names it in a no-credential finding"
+    warn "  every hour until the tenant is linked."
+  elif bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" status \
+         --partner "${PARTNER}" --client "${CLIENT}" >/dev/null 2>&1; then
+    record 2 truveon-tenant "done" "already linked"
+    ok "Truveon tenant linked and ingest key stored for ${PARTNER}/${CLIENT}"
   else
-    blocked 2 truveon-tenant \
-"The Truveon tenant API is not built (B-088).
+    PACK_OUT="$(mktemp)"
+    if bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" prepare \
+         --questionnaire "${QUESTIONNAIRE}" \
+         ${TRUVEON_ROSTER:+--truveon-roster "${TRUVEON_ROSTER}"} \
+         "${DRY_FLAG[@]}" >"${PACK_OUT}" 2>&1; then
+      sed 's/^/    /' "${PACK_OUT}"; rm -f "${PACK_OUT}"
+      blocked 2 truveon-tenant \
+"The client's Truveon tenant is not linked yet. The handoff pack is written:
 
-design 13 puts this before the accounts so that evidence is never lost rather
-than buffered. A vested account that is not sending evidence is worse than no
-account, because it looks supported.
+  completed_qs/${PARTNER}-${CLIENT}.truveon/
 
-Pass --skip-truveon to proceed anyway. That records a declared override against
-every account rather than skipping silently."
+Hand it to a Claude Code session in the Truveon repository (PROMPT.md), or run
+commands.sh by hand from Truveon's infra/scripts. Its last step stores the
+ingest key here and links the tenant; then resume:
+
+  scripts/onboard-client.sh --questionnaire ${QUESTIONNAIRE} \\
+    ${TRUVEON_ROSTER:+--truveon-roster ${TRUVEON_ROSTER} }--from 2 --confirm-onboard
+
+A person runs this because Truveon cannot create a tenant over an API, by
+design (Truveon D-26). design 13 puts it before the accounts so that no
+account exists without somewhere for its evidence to go."
+    else
+      sed 's/^/    /' "${PACK_OUT}"; rm -f "${PACK_OUT}"
+      blocked 2 truveon-tenant \
+"The Truveon handoff pack could not be prepared. See the output above.
+
+Most often: the questionnaire has no 'truveon' section (16), or the tenant is
+being created and no --truveon-roster was supplied to choose its owner."
+    fi
   fi
 fi
 
@@ -493,21 +537,64 @@ if should_run 5 aws-accounts-and-baseline; then
 fi
 
 # ===========================================================================
-# 6 — PagerDuty, pass 2
+# 6 — Truveon, accounts
+# ===========================================================================
+# Step 2's second pass, for the same reason PagerDuty has one: before vesting
+# there were no accounts to register. The pack is regenerated with them and the
+# operator re-runs only the configure step in Truveon, which is idempotent.
+#
+# MANUAL, not blocked. Nothing later on this side depends on it -- evidence from
+# an account Truveon has not registered is stored and flagged there, not
+# refused -- and it cannot be confirmed from here: whether Truveon registered
+# the accounts is answered by the verification sweep from the Audit account,
+# which holds the key, not from a laptop, which does not.
+
+if should_run 6 truveon-accounts; then
+  if [[ ${SKIP_TRUVEON} -eq 1 ]]; then
+    record 6 truveon-accounts "skipped" "--skip-truveon"
+  else
+    PACK_OUT="$(mktemp)"
+    if bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" prepare \
+         --questionnaire "${QUESTIONNAIRE}" \
+         ${TRUVEON_ROSTER:+--truveon-roster "${TRUVEON_ROSTER}"} \
+         "${DRY_FLAG[@]}" >"${PACK_OUT}" 2>&1; then
+      sed 's/^/    /' "${PACK_OUT}"; rm -f "${PACK_OUT}"
+      manual 6 truveon-accounts \
+"Register the new accounts in the client's Truveon tenant.
+
+The pack in completed_qs/${PARTNER}-${CLIENT}.truveon/ now lists them. From
+Truveon's infra/scripts, re-run ONLY the configure step (step 2 of
+commands.sh):
+
+  ./81-apply-msp-manifest.sh --manifest <pack>/manifest.json
+
+Do not re-run step 1 or step 3: the tenant exists and its key is stored.
+Until this is done Truveon holds this client's evidence against accounts it
+cannot name, and flags every submission as from an unregistered account."
+    else
+      sed 's/^/    /' "${PACK_OUT}"; rm -f "${PACK_OUT}"
+      blocked 6 truveon-accounts \
+"The Truveon pack could not be regenerated with the new accounts. See above."
+    fi
+  fi
+fi
+
+# ===========================================================================
+# 7 — PagerDuty, pass 2
 # ===========================================================================
 # The accounts now exist, so the renderer can see tiers. This is the pass that
 # creates the technical services and the routing keys. See the header.
 
-if should_run 6 pagerduty-pass-2; then
+if should_run 7 pagerduty-pass-2; then
   if [[ "${DRY_RUN}" == "1" ]]; then
     printf '%s DRY%s  re-render with accounts present, then apply and sync\n' \
       "${C_YELLOW}" "${C_RESET}"
-    record 6 pagerduty-pass-2 "dry" ""
+    record 7 pagerduty-pass-2 "dry" ""
     log "    Pass 1 created only the client-conversation business service."
     log "    This pass is where the tier services, the technical services"
     log "    (tier x app plus infra) and the ROUTING KEYS come from."
   else
-    attempt 6 pagerduty-pass-2 \
+    attempt 7 pagerduty-pass-2 \
       bash "${REPO_ROOT}/scripts/render-pagerduty-tenants.sh"
     if [[ -z "${HALTED}" ]]; then
       log ""
@@ -523,7 +610,7 @@ if should_run 6 pagerduty-pass-2; then
 fi
 
 # ===========================================================================
-# 7 — Monitoring and schedules
+# 8 — Monitoring and schedules
 # ===========================================================================
 # The published maps the routing and clock layers read. Each one has the same
 # failure mode if it is not re-run after vesting: the new account has no entry,
@@ -534,7 +621,7 @@ fi
 # StackSets, which service-managed auto-deploy into the Members OU — vesting
 # already refuses to create accounts into an OU those StackSets do not target.
 
-if should_run 7 monitoring-and-schedules; then
+if should_run 8 monitoring-and-schedules; then
   SYNCS=(
     "sync-account-tiers.sh|the router's account -> tier map, so a CRITICAL finding in dev does not page"
     "sync-notification-windows.sh|the incident clock's per-account notification windows"
@@ -558,49 +645,49 @@ if should_run 7 monitoring-and-schedules; then
   done
 
   if [[ -n "${STEP7_FAILED}" ]]; then
-    blocked 7 monitoring-and-schedules \
+    blocked 8 monitoring-and-schedules \
 "These publishers failed:${STEP7_FAILED}
 
 Each publishes a map a consumer reads at alarm time. A missing entry does not
 break loudly — the consumer reports the account as unknown — so this must not
 be left for later."
   else
-    record 7 monitoring-and-schedules "$([[ "${DRY_RUN}" == "1" ]] && echo dry || echo done)" ""
-    ok "step 7 (monitoring-and-schedules) complete"
+    record 8 monitoring-and-schedules "$([[ "${DRY_RUN}" == "1" ]] && echo dry || echo done)" ""
+    ok "step 8 (monitoring-and-schedules) complete"
   fi
 fi
 
 # ===========================================================================
-# 8 — Developer access
+# 9 — Developer access
 # ===========================================================================
 # Not numbered in design 13, which covers systems rather than people. It sits
 # here because it needs the accounts (step 5) and nothing later needs it.
 
-if should_run 8 developer-access; then
+if should_run 9 developer-access; then
   if [[ -z "${ROSTER}" ]]; then
-    record 8 developer-access "skipped" "no --roster supplied"
+    record 9 developer-access "skipped" "no --roster supplied"
     warn "No roster supplied, so nobody has access to these accounts."
     warn "  Questionnaire section 3b is marked Dev, not Vest, so this is a"
     warn "  legitimate state — the accounts are vested and baselined and no"
     warn "  human can sign in to them. Supply --roster when 3b is answered:"
     warn "    cp vesting/roster.example.yaml completed_qs/${CLIENT}.roster.yaml"
     warn "    scripts/onboard-client.sh --questionnaire ${QUESTIONNAIRE} \\"
-    warn "      --roster completed_qs/${CLIENT}.roster.yaml --from 8 --confirm-onboard"
+    warn "      --roster completed_qs/${CLIENT}.roster.yaml --from 9 --confirm-onboard"
   else
-    attempt 8 developer-access \
+    attempt 9 developer-access \
       bash "${REPO_ROOT}/scripts/grant-developer-access.sh" \
         --roster "${ROSTER}" --questionnaire "${QUESTIONNAIRE}" "${DRY_FLAG[@]}"
   fi
 fi
 
 # ===========================================================================
-# 9 — Cost categories
+# 10 — Cost categories
 # ===========================================================================
 # Until this runs, the tenant's spend appears as `unregistered`. Budgets are
 # design 13 step 7's other half and do not exist yet.
 
-if should_run 9 cost-categories; then
-  attempt 9 cost-categories \
+if should_run 10 cost-categories; then
+  attempt 10 cost-categories \
     bash "${REPO_ROOT}/scripts/sync-cost-categories.sh" "${DRY_FLAG[@]}"
   if [[ -z "${HALTED}" ]]; then
     warn "Budgets and anomaly detection are NOT created — design 13 step 7 asks"
@@ -611,13 +698,13 @@ if should_run 9 cost-categories; then
 fi
 
 # ===========================================================================
-# 10 — Verification sweep
+# 11 — Verification sweep
 # ===========================================================================
 # What makes provisioning a control rather than a script. Runs in the Audit
 # account via the Lambda that owns it.
 
-if should_run 10 verification-sweep; then
-  manual 10 verification-sweep \
+if should_run 11 verification-sweep; then
+  manual 11 verification-sweep \
 "The verification sweep cannot be invoked from here.
 
 provisioning/src/verify.py implements design 13's checklist and, like the rest
@@ -639,12 +726,12 @@ docs/verification-sweep.md."
 fi
 
 # ===========================================================================
-# 11 — Go-live gate
+# 12 — Go-live gate
 # ===========================================================================
 # Deliberately has no action and never will.
 
-if should_run 11 go-live-gate; then
-  manual 11 go-live-gate \
+if should_run 12 go-live-gate; then
+  manual 12 go-live-gate \
 "Go-live is a human decision, owned by Jamie, and is not automated.
 
 Three things start on the transition to live: SLA measurement, billing, and
@@ -698,7 +785,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     log "${BLOCKS} step(s) would block. A real run stops at the first;"
     log "this run continued so that one rehearsal shows all of them."
   fi
-  # Exits 0 even with blocks, deliberately. Steps 4, 10 and 11 can never
+  # Exits 0 even with blocks, deliberately. Steps 4, 11 and 12 can never
   # succeed from here, so a non-zero exit would be non-zero on every run ever
   # and would mean nothing. A rehearsal's exit code says the REHEARSAL
   # completed; the table says whether the tenant would be ready.
@@ -708,7 +795,7 @@ else
     warn "Onboarding HALTED at step ${HALTED}. Earlier steps were completed and"
     warn "  are idempotent — fix the cause and resume:"
     warn "    scripts/onboard-client.sh --questionnaire ${QUESTIONNAIRE} \\"
-    warn "      ${ROSTER:+--roster ${ROSTER} }--from ${HALTED} --confirm-onboard"
+    warn "      ${ROSTER:+--roster ${ROSTER} }${TRUVEON_ROSTER:+--truveon-roster ${TRUVEON_ROSTER} }--from ${HALTED} --confirm-onboard"
     exit 1
   fi
   if [[ ${#MANUAL[@]} -gt 0 ]]; then

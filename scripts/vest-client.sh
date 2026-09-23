@@ -42,9 +42,9 @@ Usage: vest-client.sh --questionnaire <path> [--dry-run] [--confirm-vest]
                     created. Creates nothing.
   --confirm-vest    Required for a real run. Creates AWS accounts, which cannot
                     be deleted.
-  --defer-truveon   Proceed without a confirmed Truveon first-evidence receipt.
-                    Records a deviation on the account rather than skipping
-                    silently. See the Truveon section below.
+  --defer-truveon   Proceed without a linked Truveon tenant for the client.
+                    Records a declared override on each account rather than
+                    skipping silently. See the Truveon section below.
 USAGE
 }
 
@@ -286,16 +286,31 @@ done
 # not confirm first evidence receipt. A vested account that is not sending
 # evidence is worse than no account."
 #
-# The integration is not built. That leaves two honest options — fail, or make
-# the deferral explicit and recorded — and exactly one dishonest one, which is
-# to skip the step because it is not wired yet. This takes the second: the gate
-# fails by default, and --defer-truveon proceeds while writing a declared
-# override against every account, owned and dated.
+# What this gate checks is REGISTRATION, not receipt -- D-021. Accounts created
+# seconds ago have emitted nothing, and the evidence tenant map that attributes
+# them is published at onboarding step 8, after this. First receipt cannot be
+# confirmed here by construction; asking for it would make this gate either
+# impossible or a lie. So vesting requires the client's Truveon tenant to be
+# LINKED -- registry names it, ingest key stored -- which means every record
+# these accounts produce has somewhere to go. Receipt is the verification
+# sweep's check 1, before go-live.
 #
-# That way the gap appears in `registry.sh report-overrides` alongside every
-# other declared difference, rather than living in a comment in this file.
+# Unlinked leaves two honest options — fail, or make the deferral explicit and
+# recorded — and exactly one dishonest one, which is to skip the step. The gate
+# fails by default, and --defer-truveon proceeds while writing a declared
+# override against every account, owned and dated, so the gap appears in
+# `registry.sh report-overrides` rather than living in a comment in this file.
 hr
-if [[ ${DEFER_TRUVEON} -eq 1 ]]; then
+TRUVEON_LINKED=0
+if bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" status \
+     --partner "${PARTNER}" --client "${CLIENT}" >/dev/null 2>&1; then
+  TRUVEON_LINKED=1
+fi
+if [[ ${TRUVEON_LINKED} -eq 1 ]]; then
+  ok "Truveon tenant linked for ${PARTNER}/${CLIENT}; ingest key stored."
+  log "  First-evidence receipt is confirmed by the verification sweep, not here"
+  log "  — these accounts have not emitted anything yet. D-021."
+elif [[ ${DEFER_TRUVEON} -eq 1 ]]; then
   warn "Truveon evidence receipt NOT verified — deferred by --defer-truveon."
   warn "A declared override is recorded against each account so this appears in"
   warn "report-overrides rather than being forgotten."
@@ -307,19 +322,23 @@ if [[ ${DEFER_TRUVEON} -eq 1 ]]; then
     else
       bash "${REPO_ROOT}/scripts/registry.sh" put-override \
         --account-id "${ACCT}" --name TruveonEvidenceUnverified \
-        --reason "Vested before the Truveon integration existed. First evidence receipt was never confirmed, so this account may be sending no evidence and nothing would report it. Prompt 3.1 requires this to block; it was deferred deliberately." \
+        --reason "Vested without a linked Truveon tenant for the client. Its evidence is buffered and pending and the pipeline raises a no-credential finding hourly, but it is reaching no Truveon tenant. Prompt 3.1 requires this to block; it was deferred deliberately. Link with scripts/truveon-tenant-handoff.sh, then drop this override." \
         --owner "Jamie Vernon" --review-by "$(date -u -d '+90 days' +%Y-%m-%d)" >/dev/null
     fi
   done
 else
-  die "Truveon tenant registration and first-evidence receipt are NOT verified.
+  die "The client ${PARTNER}/${CLIENT} has no linked Truveon tenant.
 
       Prompt 3.1: a vested account that is not sending evidence is worse than
       no account, so this blocks rather than warns.
 
-      The integration is not built yet (phase 9.1). To proceed anyway, pass
-      --defer-truveon, which records a declared, owned, dated override against
-      every account rather than skipping the step silently.
+      Link it (one tenant per client):
+        scripts/truveon-tenant-handoff.sh prepare --questionnaire <q> --truveon-roster <r>
+        # ...hand the pack to Truveon; its last step stores the key and links...
+        scripts/truveon-tenant-handoff.sh status --partner ${PARTNER} --client ${CLIENT}
+
+      Or pass --defer-truveon, which records a declared, owned, dated override
+      against every account rather than skipping the step silently.
 
       Note that the accounts above may already exist. Re-running is safe."
 fi
@@ -339,9 +358,9 @@ info "Vesting evidence record"
 LOG_ARCHIVE_ACCT="$(get_param /org/account/altdig-security-logarchive)"
 EVIDENCE_KEY="vesting-evidence/${PARTNER}/${CLIENT}/${APP}/$(date -u +%Y%m%dT%H%M%SZ).json"
 
-EVIDENCE="$("${PY}" - "${QPATH}" "${CREATED_IDS}" "${DEFER_TRUVEON}" <<'PYEOF'
+EVIDENCE="$("${PY}" - "${QPATH}" "${CREATED_IDS}" "${TRUVEON_LINKED}" <<'PYEOF'
 import hashlib, json, sys, datetime, pathlib
-qpath, ids, defer = sys.argv[1], sys.argv[2], sys.argv[3]
+qpath, ids, linked = sys.argv[1], sys.argv[2], sys.argv[3]
 raw = pathlib.Path(qpath).read_bytes()
 print(json.dumps({
     "record_type": "vesting-evidence",
@@ -353,7 +372,11 @@ print(json.dumps({
     "questionnaire_sha256": hashlib.sha256(raw).hexdigest(),
     "questionnaire_filename": pathlib.Path(qpath).name,
     "accounts": dict(p.split(":", 1) for p in ids.split() if ":" in p),
-    "truveon_evidence_verified": defer != "1",
+    # Linked is what vesting checks. Receipt is never verified at vesting --
+    # the accounts have emitted nothing yet -- and the record says so
+    # rather than implying a check that did not happen. D-021.
+    "truveon_tenant_linked": linked == "1",
+    "truveon_evidence_verified": False,
 }, indent=2))
 PYEOF
 )"

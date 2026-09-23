@@ -1,0 +1,46 @@
+# Example Truveon roster -- questionnaire section 16.5. PLACEHOLDERS ONLY.
+#
+# The people who get accounts in the client's Truveon tenant. A real roster is
+# personal data: it lives in completed_qs/ as <client>.truveon.roster.yaml,
+# which .gitignore and the pre-commit hook both block, and it is never
+# committed.
+#
+# Why a second roster rather than reusing the developer one
+# ---------------------------------------------------------
+# Different people, and deriving one from the other would be wrong in both
+# directions. The developer roster grants AWS access to people who deploy the
+# application; this grants GRC access to people who read compliance evidence --
+# a compliance lead, an executive sponsor, sometimes an auditor. A developer
+# does not need to see a client's risk register, and a CFO does not need a
+# production read role.
+#
+# Validated against vesting/truveon-roster.schema.json by
+# scripts/truveon-tenant-handoff.sh.
+
+schema_version: 1
+
+# Must match the questionnaire's identity block. Per client, no application:
+# one Truveon tenant per client (B-023).
+tenant:
+  partner: oeight
+  client_slug: oeight
+
+users:
+
+  # Exactly one owner when the tenant is being created. Truveon takes the owner
+  # as a separate argument from the rest of the list and forces them to global
+  # admin.
+  - display_name: "Placeholder Compliance Lead"
+    email:        compliance@example.com
+    title:        "Director of Compliance"
+    owner:        true
+
+  - display_name: "Placeholder Sponsor"
+    email:        sponsor@example.com
+    title:        "Chief Operating Officer"
+    role:         viewer
+
+  - display_name: "Placeholder Engineer"
+    email:        engineer@example.com
+    title:        "Engineering Lead"
+    role:         contributor
