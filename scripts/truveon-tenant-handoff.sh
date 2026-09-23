@@ -55,6 +55,10 @@ Usage: truveon-tenant-handoff.sh <command> [options]
              Write the handoff pack to completed_qs/<partner>-<client>.truveon/.
              The roster is required when the tenant is being created.
 
+  prepare-platform [--dry-run]
+             The same pack for AltDigital's own estate, into Truveon's
+             existing 'altdigital' tenant. Accounts from SSM; no roster.
+
   store-key  --partner P --client C --truveon-tenant T [--dry-run]
              Read a Truveon ingest key from stdin (a pipe, or typed with no
              echo) and store it for the evidence sender. Then link the tenant
@@ -168,6 +172,58 @@ print(f\"  retention floor: {s['retention_floor_days']} days   notification wind
     log "  users.csv is personal data. Do not paste it, open it in an assistant,"
     log "  or copy the pack out of completed_qs/."
   fi
+}
+
+# ---------------------------------------------------------------------------
+# prepare-platform
+# ---------------------------------------------------------------------------
+# AltDigital's own estate, into Truveon's existing `altdigital` tenant (Jamie,
+# 2026-09-23). No questionnaire and no roster: the accounts come from SSM, the
+# same list sync-evidence-tenants.sh files under altdigital-platform, and the
+# other values are stated in truveon_handoff.py build_platform_manifest with
+# their reasons.
+cmd_prepare_platform() {
+  require_cli
+  require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
+  local out accts_file reg_file audit summary
+  out="${REPO_ROOT}/completed_qs/altdigital-platform.truveon"
+  accts_file="$(mktemp)"; reg_file="$(mktemp)"
+  trap 'rm -f "${accts_file}" "${reg_file}"' RETURN
+
+  # Same sources as sync-evidence-tenants.sh, so the accounts Truveon expects
+  # are exactly the accounts the pipeline files under this tenant.
+  bash "${REPO_ROOT}/scripts/registry.sh" list-accounts >"${reg_file}" 2>/dev/null \
+    || die "Could not read the account registry."
+
+  MSYS_NO_PATHCONV=1 aws ssm get-parameters-by-path --path /platform/org/account/ \
+    --query 'Parameters[].[Name,Value]' --output text 2>/dev/null | no_cr >"${accts_file}"
+  [[ -s "${accts_file}" ]] || die "No platform accounts found under /platform/org/account/."
+  audit="$(audit_account)"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    printf '%s DRY%s  would write the platform Truveon pack to %s\n' "${C_YELLOW}" "${C_RESET}" "${out}"
+    out="$(mktemp -d)"
+  fi
+  summary="$("${PY}" "$(win_path "${REPO_ROOT}/scripts/lib/truveon_handoff.py")" \
+    --platform-accounts "$(win_path "${accts_file}")" \
+    --registry-accounts "$(win_path "${reg_file}")" \
+    --pipeline-account "${audit}" \
+    --out "$(win_path "${out}")" \
+    --pack-win "$(win_path "${REPO_ROOT}/completed_qs/altdigital-platform.truveon")" \
+    --msp-win "$(win_path "${REPO_ROOT}")")" \
+    || die "The platform pack could not be built."
+  [[ "${DRY_RUN}" == "1" ]] && rm -rf "${out}"
+
+  hr
+  log "Truveon handoff pack — AltDigital platform -> tenant 'altdigital'"
+  printf '%s' "${summary}" | "${PY}" -c "
+import json,sys
+s=json.load(sys.stdin)
+print(f\"  accounts       : {s['member_accounts']} platform + the pipeline account\")
+print(f\"  retention floor: {s['retention_floor_days']} days\")
+"
+  log "  pack           : ${REPO_ROOT}/completed_qs/altdigital-platform.truveon"
+  hr
 }
 
 # ---------------------------------------------------------------------------
@@ -291,6 +347,7 @@ except Exception: print('')
 
 case "${CMD}" in
   prepare)   cmd_prepare ;;
+  prepare-platform) cmd_prepare_platform ;;
   store-key) cmd_store_key ;;
   status)    cmd_status ;;
   -h|--help|help) usage ;;
