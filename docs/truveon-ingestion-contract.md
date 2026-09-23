@@ -3,11 +3,9 @@
 What the evidence pipeline needs from Truveon, and what Truveon actually
 exposes. AltDigital builds both ends.
 
-Status: **reconciled 2026-09-23.** Every section below is built on both
-sides — Truveon commit `8560fd4`, platform commit `bbe9a37` onward — and
-**not yet deployed** on the Truveon side. Until Truveon deploys, ingest (§1)
-works as it did before and count (§2) is unanswerable, which reconciliation
-reports as *unanswerable*, never *agreed*. B-088.
+Status: **live 2026-09-23.** Every section below is built on both
+sides and deployed — Truveon through `f163af2`, platform from `bbe9a37` on.
+AltDigital's own estate delivers to Truveon's `altdigital` tenant. B-088.
 
 ---
 

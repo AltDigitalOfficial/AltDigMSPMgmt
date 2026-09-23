@@ -411,7 +411,13 @@ def reconcile_counts(event=None, context=None):
     """
     endpoint = os.environ.get("TRUVEON_ENDPOINT", "").rstrip("/")
     window_hours = int(os.environ.get("EVIDENCE_RECONCILE_HOURS", "26"))
-    until = _now()
+    # The window CLOSES where the in-flight grace begins, not at now. The first
+    # live run, 2026-09-23, reported two mismatches that were exactly the 19
+    # records still inside the grace -- allocated here, legitimately not yet at
+    # Truveon. Counting them made every run a Jira ticket about the pipeline
+    # working normally. The gap detector already owns "allocated recently and
+    # not yet delivered"; reconciliation asks only about a period that is closed.
+    until = _now() - datetime.timedelta(minutes=INFLIGHT_GRACE_MINUTES)
     since = until - datetime.timedelta(hours=window_hours)
 
     if not endpoint:

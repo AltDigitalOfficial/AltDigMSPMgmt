@@ -3351,25 +3351,30 @@ evidence tenant map (they previously never did — only platform accounts were
 read); onboarding creates and links the tenant through
 `scripts/truveon-tenant-handoff.sh`.
 
-**Built in Truveon, 2026-09-23 (commit `8560fd4`), NOT yet deployed:** the
-content-conflict `409`, the key-authenticated `count`, `watermark` and
-`receipt` endpoints, `onboard_tenant.py --owner-from-users-csv`,
-`apply_msp_manifest.py` with its `87-apply-msp-manifest.sh` wrapper, and `uat`
-as a member-account environment (Truveon migration 88, written, not run).
+**LIVE 2026-09-23.** Truveon deployed through `f163af2` after migration 88.
+AltDigital's own estate is linked to Truveon's `altdigital` tenant
+(`prepare-platform`; key at `platform/truveon/ingest/altdigital-platform`) and
+`platform-evidence` delivers to `https://app.truveon.ai`. The buffered backlog
+(1,503 records) drained, and the first count reconciliation over a closed
+window reported 3 streams, 0 mismatches.
 
-**This item stays open until**, in order:
+The first live delivery found two Truveon bugs and one here, all fixed the same
+day:
 
-1. Truveon runs migration 88, then deploys (`npm run deploy` in provenir) —
-   migration first, or its API accepts `uat` for tables that still refuse it.
-2. `provisioning/src/verify.py` `check_evidence` and verification sweep check
-   1 call `GET /api/ingest/evidence/receipt` from the Audit account. Until
-   then both still report *undeterminable*. Platform-side work, not started.
-3. The first client tenant is linked and `platform-evidence` is deployed with
-   `TruveonEndpoint` set.
+- Truveon's chain lock (`pg_advisory_xact_lock`) was taken under autocommit and
+  released immediately, so ten concurrent Lambdas collided on
+  `UNIQUE (chain_seq)` — 55 of ~250 submissions returned 500. No loss: the
+  constraint stopped a fork and the sender retried.
+- Two copies of one submission racing each other returned 500 instead of
+  duplicate.
+- Reconciliation's window ended at *now*, so records inside the in-flight grace
+  counted as missing and every run would have raised a mismatch. It now ends
+  where the grace begins.
 
-**To start delivering** once a tenant is linked: deploy `platform-evidence`
-with `TruveonEndpoint=https://app.truveon.ai`. Ingest works today; items 1–3
-affect whether completeness can be *proven*, not whether evidence arrives.
+**This item stays open for one thing:** `provisioning/src/verify.py`
+`check_evidence` and verification sweep check 1 should call
+`GET /api/ingest/evidence/receipt` from the Audit account. Until then both
+report *undeterminable*. The first client tenant has the same dependency.
 
 ## B-089 · I invented event source names instead of reading them
 

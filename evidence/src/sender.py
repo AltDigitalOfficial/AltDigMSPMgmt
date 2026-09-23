@@ -33,9 +33,8 @@ intact stream.
 
 A 409 is different and is NOT retried. It means Truveon holds that key with
 different content, so one of the two stores is wrong and neither side should
-guess which. That is a finding for a human. (Truveon does not yet return it --
-the contract requires it and B-088 tracks it -- but the handling is here so the
-day it does, nothing on this side has to change.)
+guess which. That is a finding for a human. Truveon returns it since
+2026-09-23, including when two copies of one submission race each other.
 
 One key per tenant
 ------------------
@@ -356,7 +355,15 @@ def send(event, context=None):
            "delivered": delivered, "duplicates": duplicates,
            "conflicts": len(conflicts), "failed": len(failures),
            "uncredentialed_tenants": sorted(uncredentialed)}
-    print(json.dumps(out, default=str))
+    # A sample of WHY, not only how many. The first live delivery failed 24
+    # records and this line said so and nothing more; the cause had to be dug
+    # out of Truveon's logs. Five is enough to see a pattern without writing a
+    # batch's worth of Truveon error bodies per invocation. Errors carry
+    # Truveon's response detail and never the key.
+    log_out = dict(out, failure_sample=[
+        {"stream_id": f["stream_id"], "sequence": f["sequence"],
+         "error": str(f["error"])[:300]} for f in failures[:5]])
+    print(json.dumps(log_out, default=str))
 
     # Partial batch failure, so only the undelivered records redrive. A
     # conflict is NOT returned here: it will not succeed on retry and belongs
