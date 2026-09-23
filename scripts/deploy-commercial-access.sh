@@ -67,16 +67,7 @@ fi
 # Organization and its ARN is generated at enablement, so reading it is
 # strictly better than recording it in platform.env where it could drift.
 
-read -r INSTANCE_ARN IDENTITY_STORE_ID < <(
-  aws sso-admin list-instances \
-    --query 'Instances[0].[InstanceArn,IdentityStoreId]' \
-    --output text 2>/dev/null | no_cr
-) || true
-
-[[ -n "${INSTANCE_ARN:-}" && "${INSTANCE_ARN}" != "None" ]] \
-  || die "No IAM Identity Center instance found in ${AWS_DEFAULT_REGION}.
-      Identity Center must be enabled in the home region before this runs.
-      See docs/bootstrap-runbook.md step 4."
+identity_center_init
 
 # The home region is also the Identity Center home region and cannot be changed
 # without deleting the instance. If these ever disagree, something is being
@@ -84,66 +75,6 @@ read -r INSTANCE_ARN IDENTITY_STORE_ID < <(
 # different instance.
 ok "Identity Center ${INSTANCE_ARN}"
 ok "Identity store ${IDENTITY_STORE_ID}"
-
-put_param /identity/instance-arn "${INSTANCE_ARN}" \
-  "IAM Identity Center instance ARN"
-put_param /identity/identity-store-id "${IDENTITY_STORE_ID}" \
-  "IAM Identity Center identity store id"
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-#
-# --alternate-identifier must be JSON, not AWS CLI shorthand. Shorthand looks
-# like it ought to work and fails with "Shorthand syntax does not support
-# document types" — AttributeValue is a document type, so the whole argument
-# has to be JSON.
-#
-# The failure mode is what makes this worth a comment. Both lookups below are
-# wrapped in `2>/dev/null || true` because "not found" is a legitimate answer,
-# and that swallows the shorthand parse error too: the call returns empty on
-# EVERY invocation, so an existing group reads as absent and the next run tries
-# to create a duplicate instead of reusing it. Cost one deploy to find.
-#
-# alternate_identifier builds the JSON with printf rather than inline escaped
-# quotes. Same result, but a shell-quoted "{\"UniqueAttribute\":{...}}" is
-# unreadable and one deleted backslash away from being silently wrong.
-#
-# Safe on Git Bash: the JSON has no leading slash, so MSYS path conversion has
-# nothing to rewrite, and common.sh disables it regardless.
-#
-# --member-id is a plain union with a string member, not a document type, so
-# shorthand is genuinely fine there. Left as shorthand rather than made
-# uniform, because the difference between the two is the point.
-
-# alternate_identifier <attribute-path> <value> -> JSON for --alternate-identifier
-alternate_identifier() {
-  printf '{"UniqueAttribute":{"AttributePath":"%s","AttributeValue":"%s"}}' "$1" "$2"
-}
-
-# group_id_by_name <display-name> -> group id, or empty
-group_id_by_name() {
-  aws identitystore get-group-id \
-    --identity-store-id "${IDENTITY_STORE_ID}" \
-    --alternate-identifier "$(alternate_identifier displayName "$1")" \
-    --query GroupId --output text 2>/dev/null | no_cr || true
-}
-
-# user_id_by_name <user-name> -> user id, or empty
-user_id_by_name() {
-  aws identitystore get-user-id \
-    --identity-store-id "${IDENTITY_STORE_ID}" \
-    --alternate-identifier "$(alternate_identifier userName "$1")" \
-    --query UserId --output text 2>/dev/null | no_cr || true
-}
-
-# is_member <group-id> <user-id> -> 0 if already a member
-is_member() {
-  aws identitystore get-group-membership-id \
-    --identity-store-id "${IDENTITY_STORE_ID}" \
-    --group-id "$1" --member-id "UserId=$2" \
-    --query MembershipId --output text >/dev/null 2>&1
-}
 
 # ---------------------------------------------------------------------------
 # 1. The group
@@ -329,18 +260,7 @@ if [[ -n "${GROUP_ID}" && "${DRY_RUN}" != "1" ]]; then
       warn "In the group but not in config/identity.env: ${member_username}"
       warn "  Not removed. Remove deliberately if this is a leaver."
     fi
-  done < <(
-    aws identitystore list-group-memberships \
-      --identity-store-id "${IDENTITY_STORE_ID}" --group-id "${GROUP_ID}" \
-      --query 'GroupMemberships[].MemberId.UserId' --output text 2>/dev/null \
-      | no_cr | tr '\t' '\n' \
-      | while read -r u; do
-          [[ -n "${u}" ]] || continue
-          aws identitystore describe-user \
-            --identity-store-id "${IDENTITY_STORE_ID}" --user-id "${u}" \
-            --query UserName --output text 2>/dev/null | no_cr
-        done
-  )
+  done < <(group_member_usernames "${GROUP_ID}")
 fi
 
 if [[ "${DRY_RUN}" != "1" ]]; then

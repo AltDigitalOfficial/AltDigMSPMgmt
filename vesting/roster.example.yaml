@@ -1,0 +1,69 @@
+# Example developer roster -- questionnaire section 3b. PLACEHOLDERS ONLY.
+#
+# A real roster is personal data. It lives beside the completed questionnaire
+# in completed_qs/, which is gitignored as a whole directory and blocked by the
+# pre-commit hook, and it is never committed. Name real ones
+# <client>.roster.yaml.
+#
+# Why this is a sidecar and not part of the questionnaire YAML
+# ------------------------------------------------------------
+# vesting/questionnaire.schema.json sets additionalProperties:false at every
+# level, so there is nowhere in the manifest to put a roster without amending
+# the schema -- and the questionnaire has a committed example copy, which is
+# exactly the file a roster must never be able to reach. Two documents with two
+# lifetimes: the questionnaire is answered once and is mostly irreversible, the
+# roster changes every time somebody joins or leaves.
+#
+# Shaped on the OEight / Arc8 relationship, matching
+# vesting/questionnaire.example.yaml so the two can be derived together.
+
+schema_version: 1
+
+# Must match the questionnaire's identity block exactly. derive-roster.py
+# refuses to proceed if it does not -- a roster applied to the wrong tenant
+# grants real people access to another client's accounts, and no downstream
+# step would question it.
+tenant:
+  partner: oeight
+  client_slug: oeight
+  application_code: arc8
+
+developers:
+
+  # Broad in dev, narrower upward. This is the ordinary shape.
+  - given_name:  Placeholder
+    family_name: Developer
+    email:       dev1@example.com
+    environments: [dev, test]
+
+  # Reaches production, so `exception` is REQUIRED and derive-roster.py blocks
+  # without it. Production access is read-and-observe (design 11), not a way
+  # to change anything -- but it is still the grant an auditor asks about, and
+  # "who approved this and why" should be answered in the file rather than
+  # from memory.
+  - given_name:  Placeholder
+    family_name: Lead
+    email:       lead1@example.com
+    environments: [dev, test, prod]
+    exception:   "Application owner on call for Arc8. Approved by Jamie Vernon, 2026-09-23."
+
+  # user_name points at an EXISTING Identity Center entry whose sign-in name is
+  # not their email -- people created by hand before the platform existed.
+  # Without it the lookup finds nothing and a SECOND identity is created for
+  # the same human, of which only one is in the group. Prefer fixing the
+  # directory; this is a bridge, not a convention.
+  - given_name:  Placeholder
+    family_name: Veteran
+    email:       vet1@example.com
+    environments: [dev]
+    user_name:   vet1
+
+  # Pipeline-only. Recorded and currently advisory: the permission sets are not
+  # split on console access yet, so this person still receives the same grant
+  # as anyone else in dev. B-131 carries the gap rather than the roster
+  # implying a control that does not exist.
+  - given_name:  Placeholder
+    family_name: Contractor
+    email:       contractor1@example.com
+    environments: [dev]
+    console_access: false

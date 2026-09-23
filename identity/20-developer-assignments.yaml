@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — per-tenant developer access assignments.
+  Binds one Identity Center group per member account to the permission set
+  design 11's gradient calls for. One stack per tenant, deployed by
+  scripts/grant-developer-access.sh.
+
+# ---------------------------------------------------------------------------
+# One group per ACCOUNT, and that is the whole idea
+# ---------------------------------------------------------------------------
+# Not one group per person, and not one group per role across the estate. The
+# mapping is 1:1 with the member accounts a tenant has, which buys three
+# things:
+#
+#   * a reader checks this file by confirming each group reaches exactly one
+#     account. There is no arithmetic and no cross-referencing.
+#   * the access GRADIENT is expressed by which permission set a group is bound
+#     to, not by who is in the group. Changing what dev access means is a
+#     change to identity/10-developer-access.yaml, in one place, reviewed.
+#   * joiners and leavers are group membership and touch nothing here. design
+#     doc 03: "access is granted by group membership, never per-account
+#     configuration."
+#
+# ---------------------------------------------------------------------------
+# UAT takes the PRODUCTION permission set
+# ---------------------------------------------------------------------------
+# design 11: "UAT is treated as production for access purposes, because it
+# holds real data." derive-vesting.py reaches the same conclusion independently
+# for data handling — uat_compliance_posture is production-equivalent — and
+# this is the access half of that rule.
+#
+# It is worth stating in the template rather than only in the script, because
+# the two parameters below make it visible: UatGroupId is bound to
+# DeveloperProdArn, and a reviewer who expected a DeveloperUat set will look
+# for it, not find one, and read this.
+#
+# ---------------------------------------------------------------------------
+# Why the permission set ARNs come from SSM
+# ---------------------------------------------------------------------------
+# identity/10-developer-access.yaml publishes them to /platform/identity/
+# permission-set/*. Reading them here rather than passing them in means
+# redeploying the permission sets cannot leave a tenant stack bound to a stale
+# ARN — CloudFormation resolves the parameter at deploy time and the drift is
+# impossible rather than merely unlikely.
+#
+# It also means this stack cannot be deployed before the permission sets
+# exist, which is the correct dependency and fails with a missing-parameter
+# error that names the parameter.
+#
+# ---------------------------------------------------------------------------
+# No tags anywhere in this template, deliberately
+# ---------------------------------------------------------------------------
+# AWS::SSO::Assignment does not support them. The CLAUDE.md hard rule —
+# everything the platform builds carries platform-layer: infrastructure —
+# cannot be satisfied on this resource type, and the stack-level
+# platform-managed=true from cfn_deploy is what marks it instead.
+#
+# An assignment is not a resource that raises alarms, so the routing concern
+# the tag exists for (B-119, B-127) does not arise here. Recorded so the
+# absence reads as a known limit rather than an oversight.
+
+Parameters:
+
+  InstanceArn:
+    Type: String
+    Description: IAM Identity Center instance ARN.
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16,32}$'
+    ConstraintDescription: Must be an IAM Identity Center instance ARN.
+
+  TenantStem:
+    Type: String
+    Description: >-
+      partner-client-app, matching the member account aliases. Used only in
+      descriptions and outputs; nothing is derived from it.
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{1,48}[a-z0-9])$'
+    ConstraintDescription: Lowercase alphanumeric and hyphens.
+
+  # -------------------------------------------------------------------------
+  # Groups. Created by the script, not here.
+  # -------------------------------------------------------------------------
+  # AWS::IdentityStore::Group is deliberately not used, for the reason
+  # identity/00-commercial-readonly.yaml gives for the same decision: the group
+  # must survive the eventual switch of the identity source to Entra as a
+  # PARAMETER rather than as a managed resource. A CloudFormation-owned group
+  # would be deleted on stack replacement and recreated with a new id, which
+  # SCIM would then not match.
+
+  DevGroupId:
+    Type: String
+    Description: Identity store group id for the dev account.
+    AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ConstraintDescription: Must be an identity store group id (UUID form).
+
+  TestGroupId:
+    Type: String
+    Description: Identity store group id for the test account.
+    AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ConstraintDescription: Must be an identity store group id (UUID form).
+
+  ProdGroupId:
+    Type: String
+    Description: Identity store group id for the prod account.
+    AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ConstraintDescription: Must be an identity store group id (UUID form).
+
+  UatGroupId:
+    Type: String
+    Default: ''
+    Description: >-
+      Identity store group id for the UAT account, or empty where the tenant
+      did not elect UAT (questionnaire 5.1, which is Locked).
+    AllowedPattern: '^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ConstraintDescription: Must be an identity store group id, or empty.
+
+  # -------------------------------------------------------------------------
+  # Target accounts
+  # -------------------------------------------------------------------------
+
+  DevAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account id.
+    Description: The tenant's dev member account.
+
+  TestAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account id.
+    Description: The tenant's test member account.
+
+  ProdAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account id.
+    Description: The tenant's prod member account.
+
+  UatAccountId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account id, or empty.
+    Description: The tenant's UAT member account, or empty where not elected.
+
+  # -------------------------------------------------------------------------
+  # Permission sets, resolved from SSM at deploy time. See the header.
+  # -------------------------------------------------------------------------
+
+  DeveloperDevArn:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: /platform/identity/permission-set/developer-dev
+    Description: Published by identity/10-developer-access.yaml.
+
+  DeveloperTestArn:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: /platform/identity/permission-set/developer-test
+    Description: Published by identity/10-developer-access.yaml.
+
+  DeveloperProdArn:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: /platform/identity/permission-set/developer-prod
+    Description: >-
+      Published by identity/10-developer-access.yaml. Used for BOTH prod and
+      UAT — see the header.
+
+Conditions:
+
+  # Both must be present. A group id with no account, or an account with no
+  # group, is a half-configured UAT election and would fail at create time with
+  # an error naming neither — so the condition requires the pair and the script
+  # passes them together or not at all.
+  HasUat: !And
+    - !Not [!Equals [!Ref UatGroupId, '']]
+    - !Not [!Equals [!Ref UatAccountId, '']]
+
+Resources:
+
+  # =========================================================================
+  # dev — full within guardrails
+  # =========================================================================
+
+  DevAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref DeveloperDevArn
+      # GROUP, never USER. design doc 03: "assigned to Entra groups; access is
+      # granted by group membership, never per-account configuration." A user
+      # assignment would make a leaver a CloudFormation change.
+      PrincipalType: GROUP
+      PrincipalId: !Ref DevGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref DevAccountId
+
+  # =========================================================================
+  # test — read-only plus restart
+  # =========================================================================
+
+  TestAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref DeveloperTestArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref TestGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref TestAccountId
+
+  # =========================================================================
+  # prod — read and observe
+  # =========================================================================
+
+  ProdAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref DeveloperProdArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref ProdGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref ProdAccountId
+
+  # =========================================================================
+  # uat — the PROD grant, where elected
+  # =========================================================================
+  # DeveloperProdArn is not a copy-paste error. See the header: design 11
+  # treats UAT as production for access because it holds real data.
+
+  UatAssignment:
+    Type: AWS::SSO::Assignment
+    Condition: HasUat
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref DeveloperProdArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref UatGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref UatAccountId
+
+Outputs:
+
+  Tenant:
+    Description: The tenant these assignments belong to.
+    Value: !Ref TenantStem
+
+  UatAssigned:
+    Description: >-
+      Whether a UAT assignment was created. Explicit because its absence is a
+      legitimate state and reads identically to a failure otherwise.
+    Value: !If [HasUat, 'true', 'false']
+
+  GrantSummary:
+    Description: Which permission set each environment received.
+    Value: !Sub 'dev=${DeveloperDevArn} test=${DeveloperTestArn} prod=${DeveloperProdArn} uat=${DeveloperProdArn}'

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://altdigital.ai/schemas/roster/1",
+  "title": "Developer roster",
+  "description": "Questionnaire section 3b, held as a sidecar beside the completed questionnaire in completed_qs/ rather than inside the questionnaire itself. The questionnaire schema sets additionalProperties:false throughout and its example copy is committed; a roster is personal data and must not be able to reach either. See completed_qs/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tenant", "developers"],
+  "properties": {
+
+    "schema_version": { "const": 1 },
+
+    "tenant": {
+      "description": "Repeated from the questionnaire so the roster names the tenant it grants access to. derive-roster.py refuses to proceed unless these three match the questionnaire exactly -- a roster applied to the wrong tenant grants the wrong people access to real accounts, and nothing downstream would question it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["partner", "client_slug", "application_code"],
+      "properties": {
+        "partner":          { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$" },
+        "client_slug":      { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$" },
+        "application_code": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,8}[a-z0-9])?$" }
+      }
+    },
+
+    "developers": {
+      "description": "One entry per person. An empty list is legal: section 3b is marked Dev, not Vest, so a tenant can be vested before its roster is known.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["given_name", "family_name", "email", "environments"],
+        "properties": {
+          "given_name":  { "type": "string", "minLength": 1 },
+          "family_name": { "type": "string", "minLength": 1 },
+          "email":       { "type": "string", "format": "email", "pattern": "^[^@ |,\t]+@[^@ |,\t]+[.][^@ |,\t]+$" },
+
+          "environments": {
+            "description": "Which of the tenant's vested environments this person reaches. Checked against the questionnaire's UAT election -- uat here with uat_required false is an error, not a silently ignored line.",
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "enum": ["dev", "test", "uat", "prod"] }
+          },
+
+          "user_name": {
+            "description": "Identity Center sign-in name, when it is not the email. Points at an EXISTING directory entry; without it a lookup by email finds nothing and a second identity is created for the same human. Same semantics as the fourth field in config/identity.env.",
+            "type": ["string", "null"]
+          },
+
+          "console_access": {
+            "description": "Questionnaire 3.7. False means pipeline-only: recorded, and currently advisory. The permission sets are not yet split on it -- B-131.",
+            "type": "boolean",
+            "default": true
+          },
+
+          "exception": {
+            "description": "Questionnaire 3b: 'If somebody needs an exception, tell us who and why rather than working around it.' Free text, required by derive-roster.py for anyone reaching prod.",
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}

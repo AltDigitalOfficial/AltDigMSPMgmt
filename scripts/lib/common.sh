@@ -725,3 +725,99 @@ store_secret_everywhere() {
 
   ok "all consuming accounts hold the same credential (${want})"
 }
+
+# --- IAM Identity Center ----------------------------------------------------
+#
+# Lifted out of scripts/deploy-commercial-access.sh when a second script needed
+# the same five lookups. They were not made shared pre-emptively; they were
+# made shared the moment there were two callers, which is the point at which
+# two copies start to drift. B-104 is the same lesson from the publish scripts.
+#
+# Every function here depends on IDENTITY_STORE_ID, which identity_center_init
+# sets. Passing it to each call would be tidier and would also mean a caller
+# could pass a different store to two adjacent lookups, which is not a mistake
+# worth leaving available.
+
+identity_center_init() {
+  # Sets INSTANCE_ARN and IDENTITY_STORE_ID, and publishes both to SSM.
+  #
+  # Resolved LIVE rather than configured. There can be only one instance per
+  # Organization and its ARN is generated at enablement, so reading it is
+  # strictly better than recording it in platform.env where it could drift
+  # away from reality without anything noticing.
+  read -r INSTANCE_ARN IDENTITY_STORE_ID < <(
+    aws sso-admin list-instances \
+      --query 'Instances[0].[InstanceArn,IdentityStoreId]' \
+      --output text 2>/dev/null | no_cr
+  ) || true
+
+  [[ -n "${INSTANCE_ARN:-}" && "${INSTANCE_ARN}" != "None" ]] \
+    || die "No IAM Identity Center instance found in ${AWS_DEFAULT_REGION}.
+      Identity Center must be enabled in the home region before this runs.
+      See docs/bootstrap-runbook.md step 4."
+
+  export INSTANCE_ARN IDENTITY_STORE_ID
+  put_param /identity/instance-arn "${INSTANCE_ARN}" \
+    "IAM Identity Center instance ARN"
+  put_param /identity/identity-store-id "${IDENTITY_STORE_ID}" \
+    "IAM Identity Center identity store id"
+}
+
+# alternate_identifier <attribute-path> <value> -> JSON for --alternate-identifier
+#
+# Must be JSON, not AWS CLI shorthand: AttributeValue is a document type and
+# shorthand fails with "Shorthand syntax does not support document types".
+#
+# The failure mode is what makes this worth a comment. The lookups below are
+# wrapped in `2>/dev/null || true` because "not found" is a legitimate answer,
+# and that swallows the shorthand parse error too — so the call returns empty
+# on EVERY invocation, an existing group reads as absent, and the next run
+# creates a duplicate instead of reusing it. Cost one deploy to find.
+#
+# Built with printf rather than inline escaped quotes: the shell-quoted form is
+# unreadable and one deleted backslash away from being silently wrong.
+alternate_identifier() {
+  printf '{"UniqueAttribute":{"AttributePath":"%s","AttributeValue":"%s"}}' "$1" "$2"
+}
+
+# group_id_by_name <display-name> -> group id, or empty
+group_id_by_name() {
+  aws identitystore get-group-id \
+    --identity-store-id "${IDENTITY_STORE_ID}" \
+    --alternate-identifier "$(alternate_identifier displayName "$1")" \
+    --query GroupId --output text 2>/dev/null | no_cr || true
+}
+
+# user_id_by_name <user-name> -> user id, or empty
+user_id_by_name() {
+  aws identitystore get-user-id \
+    --identity-store-id "${IDENTITY_STORE_ID}" \
+    --alternate-identifier "$(alternate_identifier userName "$1")" \
+    --query UserId --output text 2>/dev/null | no_cr || true
+}
+
+# is_member <group-id> <user-id> -> 0 if already a member
+is_member() {
+  aws identitystore get-group-membership-id \
+    --identity-store-id "${IDENTITY_STORE_ID}" \
+    --group-id "$1" --member-id "UserId=$2" \
+    --query MembershipId --output text >/dev/null 2>&1
+}
+
+# group_member_usernames <group-id> -> the sign-in name of each member
+#
+# Used for the leaver report. Nobody is ever REMOVED by a script here — see
+# the header of deploy-commercial-access.sh — so this only ever feeds a
+# warning.
+group_member_usernames() {
+  aws identitystore list-group-memberships \
+    --identity-store-id "${IDENTITY_STORE_ID}" --group-id "$1" \
+    --query 'GroupMemberships[].MemberId.UserId' --output text 2>/dev/null \
+    | no_cr | tr '\t' '\n' \
+    | while read -r u; do
+        [[ -n "${u}" ]] || continue
+        aws identitystore describe-user \
+          --identity-store-id "${IDENTITY_STORE_ID}" --user-id "${u}" \
+          --query UserName --output text 2>/dev/null | no_cr
+      done
+}

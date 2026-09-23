@@ -1,12 +1,14 @@
 # Build Backlog
 
 Technical debt and deferred work arising from the build itself. Distinct from
-two other lists:
+three other lists:
 
 - [deviations.md](deviations.md) — accepted departures from the design package,
   each with a close condition
 - [design/open-items.md](../design/open-items.md) — the design
   package's own open questions, owned by Jamie, Art and Wayne
+- [scale-watch.md](scale-watch.md) — things that are correct at today's scale
+  and stop being correct at an identifiable point, each with its trigger
 
 Items here are things the build created or discovered, and that nobody has
 asked for yet.
@@ -1357,6 +1359,13 @@ point-in-time recovery, and a separate 2-hourly snapshot plan for EBS and EC2,
 which cannot. A single 2-hourly plan over everything would cost twelve times a
 daily one on resources that gain nothing from it.
 
+**Two scale-watch items fire on the day this deploys** — the restore test reads
+the LOCAL recovery point rather than the cross-account copy this policy exists
+to create ([W-003](scale-watch.md#w-003--restore-tests-read-the-local-copy-not-the-protected-one)),
+and the recovery point's age is captured but never compared to the RPO
+([W-004](scale-watch.md#w-004--rto-is-measured-rpo-is-captured-and-never-evaluated)).
+Both are cheap and both touch this policy's output.
+
 Two things in it are worth knowing before it is deployed. Vault Lock in
 compliance mode is **irreversible by anyone including AWS**, so
 `ChangeableForDays` is set rather than locking immediately. And the vault
@@ -1437,6 +1446,13 @@ P4 by requiring a function per mode.
 
 The answer is unchanged — an executor launched INTO the target subnet at run
 time — and it is still not built speculatively.
+
+**Before it is built, one thing is owed from outside.** Checks 2-4 are
+statements about somebody else's application, and the platform should not be
+the one inventing them. [scale-watch W-006](scale-watch.md#w-006--the-validation-split-is-a-contract-question-not-just-a-build-one)
+carries the split: AltDigital proves the infrastructure and the data came back,
+the application team defines what proves the application is usable, the
+platform runs both and combines the evidence.
 
 The original entry follows.
 
@@ -5391,3 +5407,108 @@ and the claim and the provenance are the same thing.
 
 **Trigger:** when SCP 04 is widened to the Members OU. That is the moment the
 tag starts being asserted by somebody other than us.
+
+## B-130 · Onboarding is an operator script, and the saga it mirrors is not deployed
+
+**Open** — 2026-09-23. Owner: Jamie.
+
+`scripts/onboard-client.sh` drives design 13's sequence from a workstation.
+`provisioning/src/saga.py` implements the same sequence as a Lambda. Only the
+first of the two can actually run: `provisioning/src/` has no CloudFormation
+template and no publish script, so there is no `platform-provisioning`
+function to invoke, and `scripts/jira-check.sh` is the only thing that reaches
+that code path — through a function that does not exist either.
+
+**Why two implementations is the wrong end state.** They will drift. The
+script is what gets used, so it is what gets fixed, and the saga becomes a
+description of how onboarding used to work. That is worse than having only
+one, because the saga is the artefact an auditor would be shown.
+
+**Why the script exists anyway.** Half of this work cannot live in a Lambda.
+PagerDuty is applied by Terraform from a working copy, and
+`render-pagerduty-tenants.sh` writes a file into the repository — design 13
+requires PagerDuty to be versioned and drift-detected like the AWS baseline,
+and a Lambda calling the API would put every tenant service outside Terraform
+state. So the operator half is not a stopgap; it is load-bearing, and the
+question is which steps belong on each side rather than which one wins.
+
+**What to do about it.** Not a rewrite. Publish the saga, reduce it to the
+steps that genuinely belong in a Lambda — registry, Truveon, verification —
+and have the script own the staged-apply steps and call the function for the
+rest. The step numbering in `onboard-client.sh --list` already carries the
+design 13 mapping both would share.
+
+**Trigger:** the second real tenant. One tenant can be onboarded by hand with
+the script and the drift costs nothing; two means the sequence is being
+repeated from memory, which is the point at which the two copies start to
+disagree about what happened.
+
+## B-131 · `console_access` is collected, recorded, and enforces nothing
+
+**Open** — 2026-09-23. Owner: Jamie.
+
+Questionnaire 3.7 asks whether staff need direct AWS console access as opposed
+to pipeline-only. `vesting/roster.schema.json` carries the answer per person
+and `scripts/derive-roster.py` warns about it. Nothing acts on it: a person
+marked `console_access: false` is put in exactly the same Identity Center
+group, bound to exactly the same permission set, as everyone else in that
+environment.
+
+**Why it is a warning and not silence.** The alternative was to drop the field
+until it could be enforced. That is worse — the question is already in a
+client-facing questionnaire, so a client has answered it and reasonably
+believes it means something. A recorded answer that visibly does nothing is
+honest; a question whose answer is discarded is not.
+
+**Why enforcing it is not trivial.** There is no clean AWS control for "API
+yes, console no". The nearest real mechanism is an SCP or permission-set
+policy keyed on the federated session, and the console and the CLI both arrive
+as the same federated principal. What would actually express the intent is not
+issuing the grant at all and having the person work through the pipeline — in
+which case the honest implementation is to leave them off the roster for that
+environment rather than to invent a half-grant.
+
+**Trigger:** the first client who asks what `console_access: false` did. That
+conversation decides whether it becomes a real control or is removed from the
+questionnaire — and either is better than the current state.
+
+## B-132 · The saga's PagerDuty check cannot see that the tier services are missing
+
+**Open** — 2026-09-23. Owner: Jamie. Found while building
+`scripts/onboard-client.sh`.
+
+PagerDuty has to be applied **twice** per tenant, and only one of the two
+passes is visible to `provisioning/src/saga.py`.
+
+`pagerduty/modules/tenant/main.tf` builds its tier business services and every
+technical service from `var.tiers`, and `scripts/render-pagerduty-tenants.sh`
+derives tiers from ACCOUNT records in the registry. Before vesting there are
+no accounts, so an apply at design 13's step 3 creates exactly one thing: the
+client-conversation business service, which is not keyed on tiers. The tier
+services, the per-`app` technical services, the reserved `infra` service and
+**all of the routing keys** come from a second apply after the accounts exist.
+
+**The gap.** The saga's step 3 check keys on `pagerduty_business_service_id`,
+which the first pass sets. A saga run would therefore mark step 3 complete and
+never perform the second pass — leaving a tenant with alarms, no routing keys,
+and a provisioning record that says PagerDuty is done. That is precisely the
+failure design 13 put PagerDuty before the accounts to prevent, reintroduced
+by the check that was supposed to confirm it had been prevented.
+
+**Why the check looked right.** The comment on it reasons that every tenant has
+exactly one conversations business service regardless of which tiers it runs,
+so its presence is a reliable "this tenant has a PagerDuty footprint" — and a
+paging service id would be absent for a client with no accounts yet, which is
+a legitimate state. All true. The error is that a footprint is not the same as
+a paging surface, and step 3 is responsible for the second.
+
+**Fix.** The check needs to compare against the tenant's ACCOUNT records: a
+tenant with N vested environments needs a routing key for each. `counts` is
+already an output of the tenant module for roughly this purpose.
+`scripts/onboard-client.sh` works around it by running the render twice as
+separate numbered steps, which makes the second pass visible to an operator
+but does nothing for the saga.
+
+**Trigger:** before the saga is deployed (B-130). While onboarding runs from
+the script the workaround holds; the moment the Lambda can advance a tenant on
+its own, this becomes a tenant that reports provisioned and cannot page.

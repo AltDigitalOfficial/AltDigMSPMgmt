@@ -66,6 +66,20 @@ completed_qs/*
 !questionnaire.example.yaml
 !questionnaire.schema.json
 
+# Developer rosters — questionnaire section 3b, held as a sidecar beside the
+# completed questionnaire. A roster is nothing BUT personal data: one row per
+# person, with name, email and which environments they reach.
+#
+# completed_qs/* already covers the intended location. This covers the
+# unintended ones — a roster saved at the repository root or next to the
+# template while somebody is filling it in, which is exactly when it is most
+# likely to be staged by accident.
+*.roster.yaml
+*.roster.yml
+*.roster.json
+!roster.example.yaml
+!roster.schema.json
+
 # Terraform variable files hold responder email addresses — personal data by
 # the same rule as config/contacts.env. Same glob-not-exact-match reasoning:
 # a terraform.tfvars.bak must not survive the rule. The .example file holds

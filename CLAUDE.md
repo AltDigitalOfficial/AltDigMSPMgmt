@@ -57,6 +57,12 @@ B-043 (no backup infrastructure), B-044 (in-guest validation) and open item V4
   the platform created without it routes to the application team. Entity-blind
   by design: the tag names the layer, never the team, and the tenant's registry
   record maps layer to PagerDuty service. B-127 carries the enforcement.
+- **An emitter may downgrade its own event; it may never escalate one.**
+  Discovery decides what must be monitored. The central router decides who must
+  care, when, and how urgently. No individual component promotes itself into
+  paging, and no path reaches PagerDuty without passing tier routing. B-117 was
+  this rule being absent: meta-alarms bypassed tier routing and dev drift paged
+  people. See [docs/scale-watch.md](docs/scale-watch.md) W-010.
 
 ## Windows / Git Bash traps
 
@@ -98,6 +104,11 @@ the script reports success. Redirect to a file and read the file.
 
 See [docs/deviations.md](docs/deviations.md) for accepted departures from the
 design package.
+
+[docs/scale-watch.md](docs/scale-watch.md) holds the things that are correct at
+today's scale and stop being correct at an identifiable point — each with the
+trigger that makes it live. It is not a work list. Read it before building
+anything that assumes one tenant.
 
 ## Working style
 
