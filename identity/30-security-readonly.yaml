@@ -1,0 +1,379 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — SecurityReadOnly permission set. Estate-wide
+  visibility into security controls, findings and evidence. Reads everything,
+  changes nothing, and cannot assume its way out.
+
+# ---------------------------------------------------------------------------
+# Why this exists
+# ---------------------------------------------------------------------------
+# Art is already wired into two controls and could see neither.
+#
+# He is an authorised quorum approver — `config/quorum.env` carries his
+# Atlassian accountId — which gates destructive actions including KMS key
+# deletion, the one action that can destroy six years of Object Lock evidence.
+# That approval happens in Jira. He is also the named AWS security contact, so
+# AWS emails him about abuse and security events.
+#
+# So before this template, the CISO could authorise the deletion of a key he
+# could not see, in an account he could not open, prompted by a finding he
+# could not read. His only view of what he was approving was whatever the
+# requester wrote in the ticket.
+#
+# That is not a missing account. It is an approver with no independent view of
+# the thing he is approving, which is the difference between two-party control
+# and one person with a witness.
+#
+# ---------------------------------------------------------------------------
+# Where the read-only boundary actually comes from
+# ---------------------------------------------------------------------------
+# Jamie, 2026-09-23: "let's start with read-only, and then we'll make him
+# complain about it."
+#
+# The boundary is the two attached AWS managed policies. Both are maintained by
+# AWS as read-only job-function policies and neither grants a mutating action.
+# The inline policy below is purely SUBTRACTIVE -- it contains no Allow at all,
+# because a Deny never grants. Effective access is
+#
+#     (SecurityAudit UNION ViewOnlyAccess) MINUS the denies below
+#
+# ---------------------------------------------------------------------------
+# The construction this template WANTED, and why it does not exist
+# ---------------------------------------------------------------------------
+# The first version denied everything that did not look like a read:
+#
+#     Effect: Deny
+#     NotAction: ['*:Get*', '*:List*', '*:Describe*', ...]
+#
+# which would have failed closed against any action AWS ships in future. It is
+# not expressible. IAM requires the `service:action` form and rejects a
+# wildcard in the SERVICE portion -- "the service *:Get* does not exist".
+# Confirmed twice: `accessanalyzer validate-policy` errored on all twelve
+# patterns, and cfn-lint flagged the same thing independently as W3037.
+#
+# Recorded rather than quietly dropped, because it is the obvious idea and the
+# next person wanting a read-only-by-construction role will try it first.
+# Service-QUALIFIED verb wildcards (`iam:Create*`) ARE accepted; only the
+# unqualified form is not.
+#
+# ---------------------------------------------------------------------------
+# So what are the denies below actually for
+# ---------------------------------------------------------------------------
+# They are aimed at the MANAGEMENT ACCOUNT, and are defence in depth elsewhere.
+#
+# In member accounts this permission set sits behind SCPs 01, 02 and 03, which
+# already deny tampering with detective controls, data protection and platform
+# identity for every principal regardless of what their IAM policy says. A
+# read-only role there is protected twice.
+#
+# SCPs do not apply to the management account. That is an AWS property, not a
+# configuration choice, and it is the same reason CommercialReadOnly carries
+# heavy denies. Management holds the Organization, the SCPs themselves and
+# Identity Center -- so a role with estate-wide read and no outer guardrail is
+# exactly where the escalation paths below matter.
+#
+# ---------------------------------------------------------------------------
+# What a CISO should NOT be able to read, even read-only
+# ---------------------------------------------------------------------------
+# "Read-only" and "may read anything" are different claims and the second is
+# wrong. Three categories are denied outright:
+#
+#   Secret material      Reading a secret's VALUE is a read by verb shape and
+#                        an escalation by consequence.
+#   Decryption           kms:Decrypt is what turns an encrypted evidence object
+#                        or a SecureString parameter into plaintext. Denying it
+#                        makes every SecureString unreadable WITHOUT enumerating
+#                        SSM paths -- the parameter can be fetched and cannot be
+#                        decrypted, including parameters created after this
+#                        template was written.
+#   Role assumption      SecurityAudit can LIST every role in the estate, which
+#                        is right for the job. But reading every trust policy
+#                        plus the ability to assume is the ability to find the
+#                        weakest one and use it. Without this, the real boundary
+#                        would not be what this template says -- it would be
+#                        whatever the most permissive trust policy in the estate
+#                        happens to allow. B-125, from the other direction.
+
+Parameters:
+
+  InstanceArn:
+    Type: String
+    Description: IAM Identity Center instance ARN. Published at /platform/identity/instance-arn.
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16}$'
+
+  GroupId:
+    Type: String
+    Description: >-
+      Identity Center group id for SecurityReadOnly. A GROUP, never a user —
+      membership is configuration in config/identity.env, and a permission set
+      assigned directly to a person cannot be reviewed as a list.
+    AllowedPattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-zA-Z-]{1,47}$'
+
+  SsmPrefix:
+    Type: String
+    Default: /platform
+    Description: SSM Parameter Store namespace for published platform facts.
+    AllowedPattern: '^/[a-zA-Z0-9._/-]+$'
+
+Resources:
+
+  SecurityReadOnlyPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: SecurityReadOnly
+      Description: >-
+        Estate-wide read access to security controls, findings and evidence.
+        No write action anywhere, no secret values, no decryption, no role
+        assumption. Assigned to every account including management.
+      InstanceArn: !Ref InstanceArn
+
+      # Four hours. Same reasoning as CommercialReadOnly: this role cannot
+      # change anything, so the re-authentication tax buys little, and an
+      # incident review that needs six sign-ins is a review that gets
+      # abandoned. Literal rather than a parameter because cfn-guard evaluates
+      # statically and cannot resolve a !Ref — a parameterised duration would
+      # pass SSO_PERMISSION_SET_SESSION_DURATION_BOUNDED by being unreadable
+      # rather than by being correct.
+      SessionDuration: PT4H
+
+      # Security Hub is the aggregated findings view and the right landing
+      # page for this role. Home region, because that is where the delegated
+      # administrator aggregates.
+      RelayStateType: 'https://us-east-2.console.aws.amazon.com/securityhub/home?region=us-east-2#/summary'
+
+      ManagedPolicies:
+        # The security-specific read policy: config, trails, findings,
+        # policies, trust relationships.
+        - arn:aws:iam::aws:policy/SecurityAudit
+        # SecurityAudit is deliberately narrow and does not cover ordinary
+        # infrastructure. A CISO asking "what is actually deployed in this
+        # account" needs to see the resources, not only their security
+        # metadata, and ViewOnlyAccess is the read-only complement.
+        - arn:aws:iam::aws:policy/job-function/ViewOnlyAccess
+
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+
+          # -----------------------------------------------------------------
+          # 1. Identity and Organization mutation
+          # -----------------------------------------------------------------
+          # The management-account gap, named. Identity Center, IAM and
+          # Organizations all live here and none of them is behind an SCP. A
+          # read-only role that could create a principal, attach a policy, move
+          # an account between OUs or detach an SCP would not be read-only in
+          # any sense that matters -- it would be one API call from whatever it
+          # wanted.
+          #
+          # Service-qualified verb prefixes, which IAM does accept. Four
+          # services rather than every service, deliberately: an exhaustive
+          # list is unmaintainable, the managed policies grant no writes
+          # anywhere, and these four are the ones where a write in THIS account
+          # ends the platform's identity model.
+          - Sid: DenyIdentityAndOrganizationMutation
+            Effect: Deny
+            Action:
+              - 'iam:Create*'
+              - 'iam:Delete*'
+              - 'iam:Put*'
+              - 'iam:Update*'
+              - 'iam:Attach*'
+              - 'iam:Detach*'
+              - 'iam:Add*'
+              - 'iam:Remove*'
+              - 'iam:Set*'
+              - 'iam:Change*'
+              - 'iam:Upload*'
+              - 'iam:Enable*'
+              - 'iam:Deactivate*'
+              - 'iam:Reset*'
+              - 'iam:Tag*'
+              - 'iam:Untag*'
+              - 'sso:Create*'
+              - 'sso:Delete*'
+              - 'sso:Put*'
+              - 'sso:Update*'
+              - 'sso:Attach*'
+              - 'sso:Detach*'
+              - 'sso:Provision*'
+              - 'sso:Tag*'
+              - 'sso:Untag*'
+              - 'identitystore:Create*'
+              - 'identitystore:Delete*'
+              - 'identitystore:Update*'
+              - 'organizations:Create*'
+              - 'organizations:Delete*'
+              - 'organizations:Update*'
+              - 'organizations:Attach*'
+              - 'organizations:Detach*'
+              - 'organizations:Move*'
+              - 'organizations:Enable*'
+              - 'organizations:Disable*'
+              - 'organizations:Remove*'
+              - 'organizations:Invite*'
+              - 'organizations:Accept*'
+              - 'organizations:Decline*'
+              - 'organizations:Leave*'
+              - 'organizations:Register*'
+              - 'organizations:Deregister*'
+              - 'organizations:Close*'
+              - 'organizations:Tag*'
+              - 'organizations:Untag*'
+              - 'sso-directory:*'
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # 1a. Turning the controls off
+          # -----------------------------------------------------------------
+          # Named actions rather than verb prefixes, because these are the
+          # specific ones whose consequence is that nobody finds out about the
+          # next thing. Each is already denied by SCP 01 or 02 in member
+          # accounts; this is the management-account copy, and a second layer
+          # where the SCP already holds.
+          #
+          # CLAUDE.md's first hard rule is that nothing this platform builds
+          # deletes or purges as automation. A standing human role should not be
+          # the exception to it.
+          - Sid: DenyDisablingTheControls
+            Effect: Deny
+            Action:
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DisableKey'
+              - 'kms:DisableKeyRotation'
+              - 'kms:PutKeyPolicy'
+              - 'cloudtrail:StopLogging'
+              - 'cloudtrail:DeleteTrail'
+              - 'cloudtrail:UpdateTrail'
+              - 'config:StopConfigurationRecorder'
+              - 'config:DeleteConfigurationRecorder'
+              - 'config:DeleteDeliveryChannel'
+              - 'guardduty:DeleteDetector'
+              - 'guardduty:DisassociateFromMasterAccount'
+              - 'securityhub:DisableSecurityHub'
+              - 'securityhub:DeleteMembers'
+              - 'access-analyzer:DeleteAnalyzer'
+              - 'macie2:DisableMacie'
+              - 'inspector2:Disable'
+              - 'backup:DeleteBackupVault'
+              - 'backup:DeleteBackupPlan'
+              - 'backup:DeleteRecoveryPoint'
+              - 'backup:DeleteBackupVaultLockConfiguration'
+              - 's3:PutBucketPolicy'
+              - 's3:DeleteBucketPolicy'
+              - 's3:BypassGovernanceRetention'
+              - 'logs:DeleteLogGroup'
+              - 'logs:DeleteRetentionPolicy'
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # 2. Secret material
+          # -----------------------------------------------------------------
+          # Caught by verb shape as a read, and it is not the kind of read this
+          # role is for. No attached policy grants these today; the deny is
+          # here so that remains true if one grows them.
+          - Sid: DenySecretValues
+            Effect: Deny
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:BatchGetSecretValue'
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # 3. Decryption
+          # -----------------------------------------------------------------
+          # The load-bearing one, and the reason this template does not need to
+          # enumerate SSM parameter paths.
+          #
+          # A SecureString parameter can be FETCHED by anyone with
+          # ssm:GetParameter, and is returned encrypted unless the caller also
+          # holds kms:Decrypt. Denying decryption therefore makes every
+          # SecureString in the estate unreadable to this role without naming a
+          # single one of them — and stays true for parameters created after
+          # this template was written, which an enumerated path list would not.
+          #
+          # Same argument covers encrypted evidence objects in the log archive:
+          # the object can be listed and its metadata read; its contents cannot
+          # be turned into plaintext.
+          - Sid: DenyDecryption
+            Effect: Deny
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:GenerateDataKeyWithoutPlaintext'
+              - 'kms:GenerateDataKeyPair'
+              - 'kms:GenerateDataKeyPairWithoutPlaintext'
+              - 'kms:ReEncryptFrom'
+              - 'kms:ReEncryptTo'
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # 4. Role assumption
+          # -----------------------------------------------------------------
+          # SecurityAudit grants iam:ListRoles and iam:GetRole across the
+          # estate, which is exactly right for the job — seeing every trust
+          # relationship is most of what a security review is.
+          #
+          # But the ability to READ every trust policy plus the ability to
+          # ASSUME is the ability to find the weakest one and use it. Without
+          # this statement the real boundary of this permission set would not
+          # be what this template says; it would be whatever the most
+          # permissive trust policy anywhere in the estate happens to allow.
+          #
+          # B-125 was this same lesson from the other direction: a deny keyed
+          # on a role ARN is only as strong as control over who can create
+          # roles.
+          - Sid: DenyRoleAssumption
+            Effect: Deny
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:AssumeRoleWithSAML'
+              - 'sts:AssumeRoleWithWebIdentity'
+              - 'sts:GetFederationToken'
+            Resource: '*'
+
+  # -------------------------------------------------------------------------
+  # Where the permission set ARN is published
+  # -------------------------------------------------------------------------
+  # Assignments are NOT created here. Identity Center assignments are
+  # per-account, and this permission set is meant for every account in the
+  # Organization including ones that do not exist yet — every tenant vested
+  # from here on.
+  #
+  # A template with a fixed list of target accounts would be a second copy of
+  # the account list, maintained by hand, and would silently stop covering the
+  # estate the first time somebody vested a tenant and forgot. So assignment is
+  # derived from Organizations by scripts/assign-security-readonly.sh, which is
+  # the same rule cost_categories.py follows: derive from the source of truth,
+  # do not keep a second copy of it.
+  PermissionSetArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/security-readonly'
+      Type: String
+      Value: !GetAtt SecurityReadOnlyPermissionSet.PermissionSetArn
+      Description: >-
+        SecurityReadOnly permission set ARN. Read by
+        scripts/assign-security-readonly.sh.
+
+  GroupIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/security-readonly/group'
+      Type: String
+      Value: !Ref GroupId
+      Description: >-
+        Identity Center group assigned SecurityReadOnly. A group id is not
+        personal data; its membership is, and lives in config/identity.env.
+
+Outputs:
+
+  PermissionSetArn:
+    Description: Pass to scripts/assign-security-readonly.sh.
+    Value: !GetAtt SecurityReadOnlyPermissionSet.PermissionSetArn
+    Export:
+      Name: !Sub '${AWS::StackName}-PermissionSetArn'
+
+  GroupId:
+    Description: The group this permission set is assigned to.
+    Value: !Ref GroupId
