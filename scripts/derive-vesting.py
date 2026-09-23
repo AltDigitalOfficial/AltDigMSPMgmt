@@ -119,6 +119,40 @@ def check_phi_baa(q):
     return []
 
 
+def check_cardholder_pci(q):
+    """Cardholder data without pci-dss derives nothing, and says nothing.
+
+    The mirror of check_phi_baa, which did not exist. `cardholder_data` is a
+    REQUIRED question that no code read: a tenant could answer yes, omit
+    'pci-dss' from frameworks, and be vested with no PCI conformance pack and
+    no PCI retention floor. Nothing in the output would have mentioned it.
+
+    That asymmetry was not a decision. PHI got a cross-check because the
+    incident clock made the consequence obvious. Cardholder data has the same
+    shape and a quieter failure, which is the worse of the two.
+
+    Blocks rather than warns, for the reason check_phi_baa blocks: the answer
+    is almost always a form error, and the cost of vesting on it is a
+    compliance scope that is wrong from the first day and discovered by an
+    assessor.
+    """
+    c = q["compliance"]
+    if c["cardholder_data"] and "pci-dss" not in c["frameworks"]:
+        return [
+            "compliance: cardholder_data is true but 'pci-dss' is not in frameworks.\n"
+            "    Conformance packs and the retention floor both derive from frameworks\n"
+            "    and not from this flag, so as answered this tenant would be vested\n"
+            "    holding cardholder data with no PCI conformance pack and no PCI\n"
+            "    retention floor. Add 'pci-dss', or correct the flag."
+        ]
+    # The reverse -- pci-dss listed with cardholder_data false -- is a WARNING
+    # and not a block. See warnings_for. A tenant can be in PCI scope without
+    # ever storing a card number, because the processor does; that is ordinary
+    # rather than unusual, and a gate that refuses a true answer teaches people
+    # to give it a false one.
+    return []
+
+
 def check_hoop(q):
     errs = []
     env = q["environments"]
@@ -216,6 +250,7 @@ def check_residency(q):
 CHECKS = [
     check_frameworks,
     check_phi_baa,
+    check_cardholder_pci,
     check_hoop,
     check_maintenance_window,
     check_dedicated_infrastructure,
@@ -308,6 +343,16 @@ def warnings_for(q, d):
             "    network step, after the accounts exist. Choose 'isolated' or 'dns-filtered',\n"
             "    or implement B-010 first. Note that 'isolated' is both cheaper and MORE\n"
             "    restrictive than 'locked' — see docs/isolation-tiers.md."
+        )
+    if ("pci-dss" in q["compliance"]["frameworks"]
+            and not q["compliance"]["cardholder_data"]):
+        w.append(
+            "'pci-dss' is in frameworks and cardholder_data is false.\n"
+            "    Legitimate and common -- a tenant is often in PCI scope through a\n"
+            "    processor without ever storing a card number themselves. Worth\n"
+            "    confirming out loud, because the framework drives a 365-day retention\n"
+            "    floor and the PCI conformance pack either way, and both are easier to\n"
+            "    agree now than to explain to an assessor later."
         )
     if d["egress_profile_overridden"]:
         w.append(
