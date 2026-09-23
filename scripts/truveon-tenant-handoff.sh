@@ -196,7 +196,7 @@ cmd_store_key() {
   # client's name would send this client's evidence into another client's
   # Truveon -- Truveon trusts the key, not the body.
   [[ -n "${key}" ]] || die "No key arrived on stdin. Nothing was stored.
-      If this was piped from 81-apply-msp-manifest.sh, that step failed -- read its output above."
+      If this was piped from 87-apply-msp-manifest.sh, that step failed -- read its output above."
   if [[ ! "${key}" =~ ^truveon_ing\.([a-z0-9-]+)\.[A-Za-z0-9_-]{20,}$ ]]; then
     key=""
     die "What arrived is not a Truveon ingest key (expected truveon_ing.<tenant>.<secret>). Nothing was stored."

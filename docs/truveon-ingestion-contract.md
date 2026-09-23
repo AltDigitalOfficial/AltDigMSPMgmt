@@ -3,10 +3,11 @@
 What the evidence pipeline needs from Truveon, and what Truveon actually
 exposes. AltDigital builds both ends.
 
-Status: **reconciled 2026-09-23.** Ingest (§1) exists in Truveon and the
-platform's sender is built against it. Count (§2), watermark (§3) and the
-content-conflict `409` (§1) are Truveon work outstanding under B-088; until
-they land, reconciliation reports *unanswerable*, never *agreed*.
+Status: **reconciled 2026-09-23.** Every section below is built on both
+sides — Truveon commit `8560fd4`, platform commit `bbe9a37` onward — and
+**not yet deployed** on the Truveon side. Until Truveon deploys, ingest (§1)
+works as it did before and count (§2) is unanswerable, which reconciliation
+reports as *unanswerable*, never *agreed*. B-088.
 
 ---
 
@@ -73,15 +74,15 @@ A re-POST of a submission Truveon already holds returns `200` with
 retry and `replay_pending` safe: without it every retry would add a row, and
 count reconciliation would report a mismatch on a stream that is intact.
 
-### Same key, different content: `409` — REQUIRED, not yet built
+### Same key, different content: `409` — built
 
 If Truveon holds `(stream, idempotency_key)` with a different payload from the
 one being posted, it must return `409` naming both, **not** `200 duplicate`.
 
-Today it returns `200 duplicate` without comparing. That is the one place
-Truveon's current behaviour is actively wrong for this pipeline: the same
-sequence number with different content means one of the two stores is wrong,
-and a `200` tells the platform to stop looking. The sender already handles
+"Content" is the account, sequence number, event time and events, compared
+in Postgres so that jsonb's number normalisation cannot turn a faithful
+redelivery into a conflict. The refusal is recorded on Truveon's side as an
+`idempotency_conflict` rejection carrying both digests. The sender treats
 `409` as a finding for a human and does not retry it.
 
 ### The response means PERSISTED — built
@@ -114,7 +115,7 @@ so a stopped pipeline is noticed from both ends independently.
 
 ---
 
-## 2. Count — REQUIRED, not yet built
+## 2. Count — built
 
 ```
 GET {TRUVEON_ENDPOINT}/api/ingest/evidence/count?stream=<category>&from=<iso8601>&to=<iso8601>
@@ -139,7 +140,7 @@ from "Truveon could not be asked" throughout, and a `404` would blur them.
 
 ---
 
-## 3. Watermark — REQUIRED, not yet built
+## 3. Watermark — built
 
 ```
 GET {TRUVEON_ENDPOINT}/api/ingest/evidence/watermark?stream=<category>
@@ -147,14 +148,35 @@ X-Truveon-Ingest-Key: ...
 ```
 
 ```json
-{ "stream": "security-finding", "highest_sequence": 4204,
-  "missing": [4188, 4190] }
+{ "stream": "security-finding", "lowest_sequence": 3001, "highest_sequence": 4204,
+  "held": 1202, "missing_ranges": [[4188, 4188], [4190, 4190]],
+  "missing": [4188, 4190], "missing_truncated": false }
 ```
+
+`missing_ranges` is complete; `missing` flattens it and is capped at 1000,
+with `missing_truncated` saying so. Nothing below `lowest_sequence` is
+claimed missing — Truveon cannot know whether a stream began at 1.
 
 `missing` is Truveon's own view of holes below its high-water mark. Truveon
 already records these as `sequence_gap` events at arrival; this exposes them to
 the sender. It lets the two sides compare notes rather than the platform being
 the only one with an opinion about its own completeness.
+
+---
+
+## 4. Receipt — built
+
+```
+GET {TRUVEON_ENDPOINT}/api/ingest/evidence/receipt?aws_account_id=<id>
+X-Truveon-Ingest-Key: ...
+```
+
+The same answer as Truveon's session-authenticated
+`/api/provisioning/evidence-receipt` — registered, received any, submission
+count, last received — reachable by a machine. This is the question the
+verification sweep's check 1 asks before go-live, from the Audit account.
+Without `aws_account_id` it returns the tenant's whole expected-versus-actual
+account picture.
 
 ---
 

@@ -252,12 +252,12 @@ def commands_text(pack_win, msp_win, manifest, creating, has_users, has_entities
         "# 2. Configure: service model, retention floor, notification windows,",
         "#    applications and member accounts. Idempotent -- safe to re-run, and it",
         "#    MUST be re-run after vesting, when the pack is regenerated with accounts.",
-        './81-apply-msp-manifest.sh --manifest "$PACK/manifest.json"',
+        './87-apply-msp-manifest.sh --manifest "$PACK/manifest.json"',
         "",
         "# 3. Mint the evidence-pipeline ingest key and store it in the platform.",
         "#    Only needed once per tenant (and on rotation). stdout carries ONLY the",
         "#    key; the platform side reads it from the pipe without echoing it.",
-        './81-apply-msp-manifest.sh --manifest "$PACK/manifest.json" --mint-ingest-key msp-evidence-pipeline \\',
+        './87-apply-msp-manifest.sh --manifest "$PACK/manifest.json" --mint-ingest-key msp-evidence-pipeline \\',
         f'  | ( cd "$MSP" && bash scripts/truveon-tenant-handoff.sh store-key --partner {partner} --client {client} --truveon-tenant {slug} )',
         "",
         "# 4. Confirm from the platform side:",
@@ -289,11 +289,11 @@ Contract: MSP `docs/truveon-ingestion-contract.md`. Manifest v{manifest['manifes
 HARD CONSTRAINTS
 - DO NOT open, print, summarise or quote `users.csv` or any email address. Personal data; org policy forbids it in any conversation. Pass the path only.
 - The ingest key must NEVER appear in output, logs, files or chat. Step 3 pipes it; never run the mint without the pipe; never `echo`/`cat` it.
-- `git status` in provenir first: 44/81 wrappers run the WORKING TREE's api/ against production. Uncommitted unrelated api/ changes = stop and report.
+- `git status` in provenir first: 44/87 wrappers run the WORKING TREE's api/ against production. Uncommitted unrelated api/ changes = stop and report.
 - Prod DB. No DDL outside step 1. No deletes.
 
 STEPS (commands in `{pack_win}/commands.sh`; run each step separately, check exit code, stop on failure)
-0. Verify `infra/scripts/81-apply-msp-manifest.sh` and `api/apply_msp_manifest.py` exist and `onboard_tenant.py` supports `--owner-from-users-csv`. If not: STOP, report which is missing. Do not improvise equivalents.
+0. Verify `infra/scripts/87-apply-msp-manifest.sh` and `api/apply_msp_manifest.py` exist and `onboard_tenant.py` supports `--owner-from-users-csv`. If not: STOP, report which is missing. Do not improvise equivalents.
 {create_line}
 2. CONFIGURE: step 2 of commands.sh. Expect a per-item summary (config, windows, applications, accounts: created/unchanged). Report it.
 3. KEY: step 3 of commands.sh exactly as written (pipe into MSP store-key). Success = MSP prints a fingerprint and `linked to Truveon tenant`. If the tenant already has an active `msp-evidence-pipeline` credential, ask the operator before minting another (rotation = mint, store, then revoke old).

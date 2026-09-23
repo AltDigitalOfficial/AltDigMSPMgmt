@@ -566,7 +566,7 @@ The pack in completed_qs/${PARTNER}-${CLIENT}.truveon/ now lists them. From
 Truveon's infra/scripts, re-run ONLY the configure step (step 2 of
 commands.sh):
 
-  ./81-apply-msp-manifest.sh --manifest <pack>/manifest.json
+  ./87-apply-msp-manifest.sh --manifest <pack>/manifest.json
 
 Do not re-run step 1 or step 3: the tenant exists and its key is stored.
 Until this is done Truveon holds this client's evidence against accounts it

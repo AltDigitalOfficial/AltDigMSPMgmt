@@ -3351,21 +3351,21 @@ evidence tenant map (they previously never did — only platform accounts were
 read); onboarding creates and links the tenant through
 `scripts/truveon-tenant-handoff.sh`.
 
-**Still owed by Truveon** — this item stays open until all four land:
+**Built in Truveon, 2026-09-23 (commit `8560fd4`), NOT yet deployed:** the
+content-conflict `409`, the key-authenticated `count`, `watermark` and
+`receipt` endpoints, `onboard_tenant.py --owner-from-users-csv`,
+`apply_msp_manifest.py` with its `87-apply-msp-manifest.sh` wrapper, and `uat`
+as a member-account environment (Truveon migration 88, written, not run).
 
-1. `409` when `(stream, idempotency_key)` arrives again with a different
-   payload. Today it answers `200 duplicate` without comparing.
-2. `GET /api/ingest/evidence/count`, ingest-key authenticated.
-3. `GET /api/ingest/evidence/watermark`, ingest-key authenticated.
-4. `GET /api/ingest/evidence/receipt?aws_account_id=`, ingest-key
-   authenticated — the same answer as `/api/provisioning/evidence-receipt`,
-   reachable by a machine. This is what `provisioning/src/verify.py`
-   `check_evidence` and verification sweep check 1 need, and is why both still
-   report *undeterminable*.
+**This item stays open until**, in order:
 
-Plus the onboarding tooling the handoff pack calls: `onboard_tenant.py
---owner-from-users-csv`, `apply_msp_manifest.py` with its
-`81-apply-msp-manifest.sh` wrapper, and `uat` as a member-account environment.
+1. Truveon runs migration 88, then deploys (`npm run deploy` in provenir) —
+   migration first, or its API accepts `uat` for tables that still refuse it.
+2. `provisioning/src/verify.py` `check_evidence` and verification sweep check
+   1 call `GET /api/ingest/evidence/receipt` from the Audit account. Until
+   then both still report *undeterminable*. Platform-side work, not started.
+3. The first client tenant is linked and `platform-evidence` is deployed with
+   `TruveonEndpoint` set.
 
 **To start delivering** once a tenant is linked: deploy `platform-evidence`
 with `TruveonEndpoint=https://app.truveon.ai`. Ingest works today; items 1–3
