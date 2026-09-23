@@ -31,6 +31,22 @@ config/quorum.env*
 config/rates.env*
 !config/rates.env.example
 
+# Completed client questionnaires. The whole directory, not a filename glob.
+#
+# A completed questionnaire carries a client's full developer roster -- names,
+# email addresses, phone numbers -- alongside their architecture. It is the
+# richest single piece of personal data this repository will ever sit next to,
+# and unlike config/*.env there is no predictable filename to match on: it will
+# be called whatever the client is called.
+#
+# So the boundary is the DIRECTORY. Anything in it is assumed personal.
+# README.md is re-included so the directory exists in a fresh clone and
+# explains itself -- an ignored directory that is not in the repository is
+# invisible, and somebody will put a completed form next to the blank template
+# instead.
+completed_qs/*
+!completed_qs/README.md
+
 # Local AWS and tooling state
 .aws-sam/
 *.tfstate
