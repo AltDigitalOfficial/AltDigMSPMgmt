@@ -42,9 +42,16 @@
 # Personal data
 # ---------------------------------------------------------------------------
 # Names and email addresses are read from config/identity.env, which is
-# gitignored and blocked by the pre-commit hook. This script prints usernames
-# during reconciliation because an operator needs to see which account it is
-# acting on; it prints no email address and no display name.
+# gitignored and blocked by the pre-commit hook.
+#
+# This script PRINTS THE USERNAME during reconciliation, and for anybody
+# provisioned by it the username IS their email address -- an operator has to
+# see which identity is being created. Display names and the name fields are
+# never printed.
+#
+# That is a deliberate trade and not an oversight, but it means the OUTPUT of
+# this script is personal data. Do not paste a run into a ticket, a chat or a
+# commit message without masking the addresses.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
