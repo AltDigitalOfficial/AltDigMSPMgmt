@@ -82,11 +82,23 @@ Description: >-
 #   Secret material      Reading a secret's VALUE is a read by verb shape and
 #                        an escalation by consequence.
 #   Decryption           kms:Decrypt is what turns an encrypted evidence object
-#                        or a SecureString parameter into plaintext. Denying it
-#                        makes every SecureString unreadable WITHOUT enumerating
-#                        SSM paths -- the parameter can be fetched and cannot be
-#                        decrypted, including parameters created after this
-#                        template was written.
+#                        into plaintext.
+#
+#                        This entry originally claimed that denying decryption
+#                        is what makes SecureString parameters unreadable -- "the
+#                        parameter can be fetched and cannot be decrypted".
+#                        TESTED 2026-09-23 and that is wrong: neither
+#                        SecurityAudit nor ViewOnlyAccess grants
+#                        ssm:GetParameter at all, so a parameter of ANY type
+#                        cannot be fetched in the first place.
+#
+#                        The deny still matters, for a narrower reason than the
+#                        one first written down. It is what keeps SecureStrings
+#                        unreadable if somebody later attaches a policy that
+#                        DOES grant parameter reads -- a likely enough change,
+#                        since "let him read the platform config" sounds
+#                        harmless. Without it that one grant would also hand
+#                        over every secret the platform stores.
 #   Role assumption      SecurityAudit can LIST every role in the estate, which
 #                        is right for the job. But reading every trust policy
 #                        plus the ability to assume is the ability to find the
@@ -94,6 +106,36 @@ Description: >-
 #                        would not be what this template says -- it would be
 #                        whatever the most permissive trust policy in the estate
 #                        happens to allow. B-125, from the other direction.
+
+# ---------------------------------------------------------------------------
+# Proved, not asserted -- 2026-09-23
+# ---------------------------------------------------------------------------
+# A probe role carrying the DEPLOYED inline policy plus both managed policies
+# was assumed and attacked. Every denial below was attempted against a REAL
+# resource, because a deny that "passes" against a resource that does not exist
+# has proved nothing -- the first run of this test reported two false passes
+# for exactly that reason, having been given a secret id of "None".
+#
+#   ALLOWED   organizations:ListPolicies, cloudtrail:DescribeTrails,
+#             configservice:DescribeConfigurationRecorders,
+#             guardduty:ListDetectors, iam:ListRoles, s3:ListAllMyBuckets,
+#             kms:ListAliases, secretsmanager:ListSecrets,
+#             secretsmanager:DescribeSecret
+#
+#   DENIED    sts:AssumeRole into a real role in another account
+#             iam:CreateRole, iam:AttachRolePolicy
+#             organizations:DetachPolicy, real policy against a real OU
+#             cloudtrail:StopLogging against the REAL trail
+#             secretsmanager:GetSecretValue against a real secret
+#             kms:Decrypt against a real ciphertext under a real key
+#             ssm:GetParameter --with-decryption
+#
+# All denials returned AccessDeniedException rather than a not-found or a
+# validation error, which is the difference between the control holding and the
+# call failing for an unrelated reason.
+#
+# The probe role, the test key, the test secret and the test parameter were all
+# removed afterwards.
 
 Parameters:
 
