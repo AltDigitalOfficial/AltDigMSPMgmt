@@ -211,10 +211,12 @@ cold start or after a `401`, whichever comes first.
 > the Log Archive account** under Object Lock. An auditor may want the raw
 > record; know which store answers which question.
 
-Confirmed 2026-09-23 as the near-term position. Truveon will receive evidence
-*about* the raw logs — that each account's logs arrived, when, and their
-hashes — without the logs themselves. Shipping raw logs into Truveon is a
-long-term product question, not an integration task.
+Confirmed 2026-09-23 as the near-term position. Truveon receives evidence
+*about* the raw logs instead: the `log-custody` stream, one record per account
+per source per hour — what arrived, a digest of the listing, and whether each
+CloudTrail region's digest file landed (B-134). Read access to the raw logs in
+place is deferred until Truveon has code that reads them (B-133). Shipping raw
+logs into Truveon is a long-term product question, not an integration task.
 
 **Personal data.** Approver and requester identities travel as opaque account
 identifiers, never names or email addresses.

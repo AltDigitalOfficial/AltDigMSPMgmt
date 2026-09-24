@@ -96,8 +96,19 @@ Parameters:
       owned by that account.
     AllowedPattern: '^[0-9]{12}$'
 
+  AuditAccountId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^([0-9]{12})?$'
+    Description: >-
+      The Audit account, whose PlatformEvidenceCustody role lists the archives
+      hourly to attest that each account's logs arrived (evidence/src/custody.py).
+      Passed from SSM at deploy. Empty grants nothing -- and log custody then
+      fails with AccessDenied, which it reports as a finding.
+
 Conditions:
   HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
+  HasCustody: !Not [!Equals [!Ref AuditAccountId, '']]
 
   # Replication is off until the destination stack exists in the replica
   # region. Both parameters must be supplied; a half-configured rule is worse
@@ -590,6 +601,20 @@ Resources:
               StringEquals:
                 'aws:SourceOrgID': !Ref OrganizationId
 
+          # s3:ListBucket for the evidence pipeline's custody role, and NOTHING
+          # else -- no GetObject. Custody attests that objects arrived (key,
+          # size, ETag, time); reading their contents is not its job, and raw
+          # logs stay readable only where they already were. 2026-09-23.
+          - !If
+            - HasCustody
+            - Sid: EvidenceCustodyList
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:role/PlatformEvidenceCustody'
+              Action: 's3:ListBucket'
+              Resource: !GetAtt ConfigArchiveBucket.Arn
+            - !Ref AWS::NoValue
+
   # -------------------------------------------------------------------------
   # Flow log archive — a THIRD bucket
   # -------------------------------------------------------------------------
@@ -801,6 +826,20 @@ Resources:
                 's3:x-amz-acl': 'bucket-owner-full-control'
               StringLike:
                 'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cloudtrail:*:${ManagementAccountId}:trail/*'
+
+          # s3:ListBucket for the evidence pipeline's custody role, and NOTHING
+          # else -- no GetObject. Custody attests that objects arrived (key,
+          # size, ETag, time); reading their contents is not its job, and raw
+          # logs stay readable only where they already were. 2026-09-23.
+          - !If
+            - HasCustody
+            - Sid: EvidenceCustodyList
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:role/PlatformEvidenceCustody'
+              Action: 's3:ListBucket'
+              Resource: !GetAtt LogArchiveBucket.Arn
+            - !Ref AWS::NoValue
 
 
   # -------------------------------------------------------------------------

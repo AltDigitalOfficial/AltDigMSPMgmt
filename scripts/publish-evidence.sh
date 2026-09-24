@@ -30,7 +30,7 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 > "${BUILD}/.sources"
-for MODULE in record collect sender completeness; do
+for MODULE in record collect sender completeness custody; do
   cp "${REPO_ROOT}/evidence/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
   printf '%s\n' "$(win_path "${REPO_ROOT}/evidence/src/${MODULE}.py")" \
     >> "${BUILD}/.sources"
@@ -97,26 +97,36 @@ SEQEOF
 ok "sequence allocated on ingest"
 
 info "Checking the ledger is written before the queue"
-"${PY}" - "$(win_path "${REPO_ROOT}/evidence/src/collect.py")" <<'ORDEREOF'
+"${PY}" - "$(win_path "${REPO_ROOT}/evidence/src/collect.py")"          "$(win_path "${REPO_ROOT}/evidence/src/custody.py")" <<'ORDEREOF'
+import os
+import re
 import sys
 
 nl = chr(10)
-source = open(sys.argv[1], encoding="utf-8").read()
-body = nl.join(l for l in source.split(nl) if not l.strip().startswith("#"))
-
-put = body.find("put_item(")
-send = body.find("send_message(")
-if put < 0:
-    sys.exit("collect.py no longer writes a ledger row. A record with no row"
-             + nl + "      cannot be missed, because nothing knows it exists.")
-if send >= 0 and send < put:
-    sys.exit("collect.py queues before writing the ledger." + nl
-             + "      A crash between the two would leave a record in flight"
-             + nl + "      with no row behind it: delivered or not, nothing"
-             + nl + "      would ever notice its absence.")
-print("  ledger write precedes the queue send")
+# Every module that creates evidence records, not only the collector. custody.py
+# joined on 2026-09-23 and owes the same ordering for the same reason. Checked
+# inside the function that does the write (custody.py's _write), because
+# custody.py also calls put_item for its done-markers, which come AFTER.
+for path in sys.argv[1:]:
+    name = os.path.basename(path)
+    source = open(path, encoding="utf-8").read()
+    body = nl.join(l for l in source.split(nl) if not l.strip().startswith("#"))
+    fn = re.search(r"^def _write\(.*?(?=^def |\Z)", body, re.M | re.S)
+    if fn:
+        body = fn.group(0)
+    put = body.find("put_item(")
+    send = body.find("send_message(")
+    if put < 0:
+        sys.exit(name + " no longer writes a ledger row. A record with no row"
+                 + nl + "      cannot be missed, because nothing knows it exists.")
+    if send >= 0 and send < put:
+        sys.exit(name + " queues before writing the ledger." + nl
+                 + "      A crash between the two would leave a record in flight"
+                 + nl + "      with no row behind it: delivered or not, nothing"
+                 + nl + "      would ever notice its absence.")
+    print("  " + name + ": ledger write precedes the queue send")
 ORDEREOF
-[[ $? -eq 0 ]] || die "collect.py is not safe to publish."
+[[ $? -eq 0 ]] || die "an evidence producer is not safe to publish."
 ok "ledger precedes queue"
 
 info "Checking the sender will not claim a delivery it did not make"
@@ -241,11 +251,18 @@ else
 fi
 
 hr
+LOGARCHIVE_ACCT="$(get_param /org/account/altdig-security-logarchive)"
+ORG_ID="$(get_param /org/id)"
 info "Deploy into the Audit account:"
 log "  scripts/deploy-to-account.sh --account altdig-security-audit \\"
 log "    --template evidence/10-evidence.yaml --stack platform-evidence \\"
 log "    ArtifactBucket=${BUCKET} ArtifactKey=${KEY} \\"
-log "    LogsKeyArn=<alerts key>"
+log "    LogArchiveBucketName=altdig-log-archive-${LOGARCHIVE_ACCT} \\"
+log "    ConfigArchiveBucketName=altdig-config-archive-${LOGARCHIVE_ACCT} \\"
+log "    OrganizationId=${ORG_ID}"
+log ""
+log "  Log custody also needs the archive buckets to grant PlatformEvidenceCustody"
+log "  s3:ListBucket: redeploy security/10-log-archive.yaml with AuditAccountId set."
 log ""
 info "To start delivering, add TruveonEndpoint=https://app.truveon.ai."
 log "  Each tenant also needs its ingest key at platform/truveon/ingest/<tenant>"

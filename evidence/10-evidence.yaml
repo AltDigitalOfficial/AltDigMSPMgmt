@@ -106,6 +106,43 @@ Parameters:
       account can be re-parented and evidence about March must not change in
       September. D-016.
 
+  LogArchiveBucketName:
+    Type: String
+    Default: ''
+    Description: >-
+      The locked CloudTrail archive (altdig-log-archive-<log archive account>).
+      Read by log custody with s3:ListBucket only. Passed at deploy from SSM,
+      never written here: nothing hardcodes an account id. Empty means custody
+      is not deployed at all, and publish-evidence.sh prints the deploy line
+      that supplies it.
+
+  ConfigArchiveBucketName:
+    Type: String
+    Default: ''
+    Description: >-
+      The Config archive (altdig-config-archive-<log archive account>),
+      versioned and delete-denied but not Object Lock -- see
+      security/10-log-archive.yaml for why it cannot be.
+
+  OrganizationId:
+    Type: String
+    Default: ''
+    Description: >-
+      The organization trail writes under AWSLogs/<org id>/<account>/, so
+      custody cannot find CloudTrail objects without it.
+
+  LogRegions:
+    Type: CommaDelimitedList
+    Default: 'us-east-1,us-east-2,us-west-2'
+    Description: >-
+      Regions custody expects CloudTrail digests from. The allowed regions
+      (config/platform.env). The multi-region trail writes a digest per region
+      per hour; a region missing here is a region nobody would notice go dark.
+
+  CustodySchedule:
+    Type: String
+    Default: 'rate(1 hour)'
+
   InflightGraceMinutes:
     Type: Number
     Default: 60
@@ -142,6 +179,10 @@ Conditions:
 
   UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
   HasEndpoint: !Not [!Equals [!Ref TruveonEndpoint, '']]
+  HasCustody: !And
+    - !Not [!Equals [!Ref LogArchiveBucketName, '']]
+    - !Not [!Equals [!Ref ConfigArchiveBucketName, '']]
+    - !Not [!Equals [!Ref OrganizationId, '']]
 
 Resources:
 
@@ -597,6 +638,130 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceAccount: !Ref AWS::AccountId
+
+  # -------------------------------------------------------------------------
+  # Log custody
+  # -------------------------------------------------------------------------
+  # Hourly evidence that each account's raw logs landed in the Log Archive,
+  # without the logs leaving it (custody.py). Decided 2026-09-23 as the
+  # near-term answer to "all of a tenant's logs into Truveon".
+  #
+  # s3:ListBucket and nothing else on the archives. A listing carries key,
+  # size, ETag and time, which is everything custody records; GetObject would
+  # let the evidence pipeline read raw logs, which design 04 keeps in one
+  # place on purpose. The buckets grant this role the same single action in
+  # their own policies -- cross-account access needs both halves, and the
+  # bucket half is what an auditor of the Log Archive account will read.
+  CustodyRole:
+    Type: AWS::IAM::Role
+    Condition: HasCustody
+    Properties:
+      RoleName: PlatformEvidenceCustody
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  CustodyPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasCustody
+    Properties:
+      PolicyName: AttestLogArrival
+      Roles: [!Ref CustodyRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListArchivesOnly
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${LogArchiveBucketName}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${ConfigArchiveBucketName}'
+          # UpdateItem to allocate sequence numbers; GetItem/PutItem for the
+          # per-hour done-markers kept in the same table.
+          - Sid: AllocateAndMark
+            Effect: Allow
+            Action: [dynamodb:UpdateItem, dynamodb:GetItem, dynamodb:PutItem]
+            Resource: !GetAtt SequenceTable.Arn
+          - Sid: RecordOwedEvidence
+            Effect: Allow
+            Action: dynamodb:PutItem
+            Resource: !GetAtt LedgerTable.Arn
+          - Sid: Queue
+            Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt EvidenceQueue.Arn
+          - Sid: ReadTenantMap
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TenantMapParam}'
+          - Sid: ReportFindings
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  CustodyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: HasCustody
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-evidence-custody
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  CustodyFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasCustody
+    DependsOn: CustodyLogGroup
+    Properties:
+      FunctionName: platform-evidence-custody
+      Runtime: python3.12
+      Handler: custody.handler
+      Role: !GetAtt CustodyRole.Arn
+      Timeout: 900
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          EVIDENCE_SEQUENCE_TABLE: !Ref SequenceTable
+          EVIDENCE_LEDGER_TABLE: !Ref LedgerTable
+          EVIDENCE_QUEUE_URL: !Ref EvidenceQueue
+          EVIDENCE_TENANT_MAP_PARAM: !Ref TenantMapParam
+          LOG_ARCHIVE_BUCKET: !Ref LogArchiveBucketName
+          CONFIG_ARCHIVE_BUCKET: !Ref ConfigArchiveBucketName
+          ORGANIZATION_ID: !Ref OrganizationId
+          LOG_REGIONS: !Join [',', !Ref LogRegions]
+          ALERT_BUS_NAME: !Ref AlertBusName
+
+  CustodyRule:
+    Type: AWS::Events::Rule
+    Condition: HasCustody
+    Properties:
+      Name: platform-evidence-log-custody
+      ScheduleExpression: !Ref CustodySchedule
+      State: ENABLED
+      Targets:
+        - Id: custody
+          Arn: !GetAtt CustodyFunction.Arn
+
+  CustodyPermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasCustody
+    Properties:
+      FunctionName: !GetAtt CustodyFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CustodyRule.Arn
 
   # The remedy for what the gap scan detects. See the header: a detection with
   # no remedy is half a control.

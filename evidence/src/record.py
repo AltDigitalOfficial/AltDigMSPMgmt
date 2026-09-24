@@ -71,6 +71,11 @@ CATEGORIES = {
     # puts the evidence pipeline inside AltDigital's own SOC 2 scope -- so
     # evidence that the pipeline worked is itself required evidence. D-016.
     "pipeline-completeness",
+    # That each account's raw logs arrived in the Log Archive, hour by hour
+    # (custody.py). Not in design 04's list either: design 04 keeps raw logs out
+    # of Truveon, which left "were they there at all?" answered by nobody.
+    # Decided 2026-09-23 as the near-term form of "all logs into Truveon".
+    "log-custody",
 }
 
 

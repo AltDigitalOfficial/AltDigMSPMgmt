@@ -5576,3 +5576,46 @@ but does nothing for the saga.
 **Trigger:** before the saga is deployed (B-130). While onboarding runs from
 the script the workaround holds; the moment the Lambda can advance a tenant on
 its own, this becomes a tenant that reports provisioned and cannot page.
+
+## B-133 · Truveon has no read access to raw logs, deliberately
+
+**Deferred with a trigger** — Jamie, 2026-09-23.
+
+The lightweight form of "all of a tenant's logs into Truveon" has three parts:
+close the collection gaps, attest arrival (`log-custody`, B-134), and give
+Truveon read access to the raw logs in place. The third is not built.
+
+**Why not now.** Truveon's AWS account (852064978666, organization
+`o-gnh5qyx6rs`) is outside this platform's organization (`o-61yvddd7d0`).
+Read access means a cross-organization trust into the Log Archive account and a
+written exception to every organization-scoped condition that protects it. That
+is attack surface, and today nothing in Truveon would use it — it has no code
+that reads raw logs. An unused trust path into the most sensitive account in
+the estate is the wrong trade.
+
+**Trigger to revive:** Truveon has code that reads raw logs (an investigation
+view, an auditor's raw-record request), or a tenant contract requires Truveon
+to present raw records. Then: a role in the Log Archive account assumable by a
+named Truveon role, `s3:GetObject` scoped per tenant to
+`AWSLogs/<org>/<account>/` for that tenant's accounts, plus Athena, and the
+organization-policy exception recorded in `docs/deviations.md`.
+
+## B-134 · Log custody: hourly evidence that each account's raw logs arrived
+
+**Built 2026-09-23** — `evidence/src/custody.py`, category `log-custody`.
+
+One evidence record per account, per source (CloudTrail, Config), per hour:
+object count, bytes, first and last file, a digest of the listing, and for
+CloudTrail whether every region's hourly digest file arrived. A missing digest
+is a finding; a quiet hour is not. Runs in the Audit account with
+`s3:ListBucket` on the two archive buckets and nothing else.
+
+**What it does not cover yet:** VPC flow logs (B-012 — none are collected),
+Route 53 Resolver query logs and CloudWatch Logs (not centralised). Each joins
+as a source when its gap is closed; that is the next piece of this work.
+
+**Worth doing when convenient:** declare a 60-minute cadence for each member
+account's `log-custody` stream in Truveon's manifest apply, as is done for the
+pipeline heartbeat. Truveon would then notice a stopped custody job per account
+on its own. Not done now because it is a Truveon-side change and the platform
+already detects the same thing through sequence gaps.
