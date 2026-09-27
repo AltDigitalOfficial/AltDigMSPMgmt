@@ -20,8 +20,15 @@ shapes this whole module:
     Jira permissions are easy to get subtly wrong.
 
 That is not abstract caution here. The Authorize stage in AMI is satisfied by
-"one person from each group in Approver groups", and the group has one member.
-Jira would call a single self-approval sufficient. design 03 would not. Where
+approvals from the Approver groups -- two since 2026-09-26. But Jira's two are
+any two group members, group membership is managed in Jira rather than against
+the quorum list, and nothing in the workflow as configured is known to exclude
+the requester. So Jira could call an approval set sufficient that design 03
+would not.
+
+The quorum set itself is wider than the quotation above: all four partners,
+Tina included, per D-022 in docs/deviations.md. The list lives in SSM, so this
+module does not change with it. Where
 the two disagree, this module implements design 03 and ignores the workflow's
 opinion -- which is exactly what "validates rather than trusts" means.
 

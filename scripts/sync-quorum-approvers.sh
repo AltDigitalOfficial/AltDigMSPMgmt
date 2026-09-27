@@ -12,6 +12,8 @@
 # requester and approvers distinct, for KMS key deletion, backup vault deletion
 # or lock modification, account removal from the Organization, and disabling
 # CloudTrail or the Config recorder.
+#
+# The set is all four partners, not the three design 03 names -- D-022.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 

@@ -2902,7 +2902,8 @@ the verifier must say which it is.
 Jira's rule and does not satisfy design 03, which requires two approvals from
 distinct people with the requester excluded. The quorum verifier enforces that
 itself rather than trusting the workflow, so quorum actions will correctly
-refuse until Wayne and Art are in the group. Tracked as B-079.
+refuse until Wayne and Art are in the group. Tracked as B-079 — closed
+2026-09-26, see there.
 
 ### Original diagnosis, kept because it was wrong in an instructive way
 
@@ -2914,10 +2915,30 @@ volunteer which one applies.
 
 ## B-079 · One approver is not two-party control
 
-**Open** — needs people, not configuration. **Blocks quorum execution,
-correctly.**
+**Closed 2026-09-26.** Jamie added Wayne, Art and Tina to
+`AWS Core Infra Approvers`, so the group can now supply two distinct approvers.
+Jamie then changed the Authorize rule to require two approvers (same day), so
+Jira's rule is no longer the weaker one on count. It still is on *who*: requester
+exclusion is not known to be enforced by the workflow, and group membership is
+managed in Jira rather than checked against the quorum list. The verifier remains the thing enforcing
+design 03. Every change record, ordinary ones included, now needs two people to
+approve it. Two things this does not cover on its own:
 
-`AWS Core Infra Approvers` has one member. The Authorize rule is one approval
+- Quorum execution reads `/platform/quorum/approvers` in SSM, not the Jira
+  group. `config/quorum.env` must list the design 03 approvers' accountIds and
+  `scripts/sync-quorum-approvers.sh` must have been run after they were added.
+- Tina is a quorum approver: Jamie, 2026-09-26, "she's a peer partner in
+  AltDigital, and should be treated as such". design 03 names only {Jamie,
+  Wayne, Art}; D-022 records the departure. Her accountId goes in
+  `config/quorum.env` as `QUORUM_APPROVER_4`, then re-run the sync.
+
+The change-record note explaining the one-member gap is retired. Records filed
+before this date keep it, because editing an approved record breaks design 08
+condition 4.
+
+Original entry:
+
+`AWS Core Infra Approvers` had one member. The Authorize rule is one approval
 per group, so a single approval from Jamie satisfies Jira.
 
 design 03 requires **two approvals from {Jamie, Wayne, Art}, with requester and

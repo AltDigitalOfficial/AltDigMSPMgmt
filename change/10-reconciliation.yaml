@@ -94,8 +94,8 @@ Parameters:
     Default: ''
     Description: >-
       Comma-separated Jira group name(s) written to a change record's Approver
-      groups field. The change workflow's Authorize stage needs one approval
-      from each; a record filed without any group cannot be approved at all,
+      groups field. The change workflow's Authorize stage takes its approvers
+      from these; a record filed without any group cannot be approved at all,
       and an unapproved record does not cover a deployment. Empty is allowed
       so a project with no approval stage still files records.
 

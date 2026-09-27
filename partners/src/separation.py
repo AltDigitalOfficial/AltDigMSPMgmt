@@ -34,9 +34,10 @@ Jamie acting as the MSP-side approver leaves a genuinely different person on
 the other side every time. A rule that is correct and unsatisfiable teaches
 people to route around it, and this one is not.
 
-So it BLOCKS rather than warns. B-079 records the opposite case -- one approver
-group of one person, which satisfies Jira and does not satisfy design 03 -- and
-the difference is that this rule can actually be met today.
+So it BLOCKS rather than warns. B-079 recorded the opposite case -- an approver
+group of one person, which satisfied Jira and could not satisfy design 03 --
+and the difference was that this rule could be met at the time. B-079 is
+resolved as of 2026-09-26.
 
 An unrecorded second party is a violation, not a pass
 -------------------------------------------------------

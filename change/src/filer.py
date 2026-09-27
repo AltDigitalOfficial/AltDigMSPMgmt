@@ -85,18 +85,19 @@ TIMEOUT = int(os.environ.get("JIRA_TIMEOUT_SECONDS", "30"))
 
 # Groups whose members authorise a change.
 #
-# The Authorize stage of the change workflow requires one approval from each
-# group named in the record's "Approver groups" field. A record filed without
-# any group is therefore UNAPPROVABLE -- and an unapproved record does not
-# cover a deployment, so the platform's own build work would be reported as
-# unapproved change by the control the build work is creating.
+# The Authorize stage of the change workflow requires approval from the groups
+# named in the record's "Approver groups" field -- two approvers since
+# 2026-09-26. A record filed without any group is therefore UNAPPROVABLE -- and
+# an unapproved record does not cover a deployment, so the platform's own build
+# work would be reported as unapproved change by the control the build work is
+# creating.
 #
-# Worth being exact about what this does and does not achieve: one group
-# containing one person satisfies Jira's rule and does NOT satisfy design 03,
-# which requires two approvals from distinct people with the requester
-# excluded. Nothing here enforces that. The quorum verifier counts distinct
-# approver identities itself, which is design 08's instruction to validate
-# rather than trust the ticket.
+# Worth being exact about what this does and does not achieve: Jira's two are
+# any two members of the group, whoever they are, and the workflow is not known
+# to exclude the requester. The quorum rule (design 03 as widened by D-022) is
+# two distinct partners with the requester excluded. Nothing here enforces
+# that. The quorum verifier checks approver identities against its own list,
+# which is design 08's instruction to validate rather than trust the ticket.
 APPROVER_GROUPS = [g.strip() for g in
                    os.environ.get("JIRA_APPROVER_GROUPS", "").split(",")
                    if g.strip()]
@@ -409,7 +410,7 @@ def _apply_deferred(project, key, deferred, labels):
                       reported as unapproved -- a false accusation produced by
                       a half-successful filing.
 
-      Approver groups the Authorize stage needs one approval per named group.
+      Approver groups the Authorize stage takes its approvers from these.
                       A record with none cannot be approved at all, and an
                       unapproved record does not cover a deployment either.
 

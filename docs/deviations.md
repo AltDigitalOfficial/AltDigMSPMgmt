@@ -1325,3 +1325,36 @@ Before 2026-09-23 the gate could not pass at all and every vesting took
 **Closing condition** — none expected; this is the right place for each
 check. Revisit if the verification sweep's evidence check (B-088) is ever
 dropped from the go-live gate, because then nothing would ask for receipt.
+
+---
+
+## D-022 · The quorum set is all four partners, not {Jamie, Wayne, Art}
+
+**Design position** — [03-identity-and-access.md](../design/03-identity-and-access.md)
+requires *"two approvals from {Jamie, Wayne, Art}, with requester and approvers
+being distinct people"* for KMS key deletion, backup vault deletion or lock
+modification, removal of a member account from the Organization, and disabling
+CloudTrail or the Config recorder.
+
+**Actual** — any two of the four AltDigital partners (Jamie, Wayne, Art, Tina),
+still distinct, still with the requester excluded. The count, the distinctness
+rule and the requester exclusion are unchanged; only the set of eligible people
+is wider.
+
+**Reason** — Jamie, 2026-09-26: Tina is a peer partner in AltDigital and is to
+be treated as one. The three-name list in design 03 is not a judgement that she
+should be excluded. She was added to `AWS Core Infra Approvers` in Jira the same
+day, and the Authorize rule now requires two approvers.
+
+**Where it is enforced** — `config/quorum.env` (gitignored; an accountId
+identifies an individual) published to `/platform/quorum/approvers` by
+`scripts/sync-quorum-approvers.sh`. The verifier reads that list, not the Jira
+group, so membership in the group alone does not make anyone a quorum approver.
+
+**Cost** — a fourth person can take part in approving a destructive action.
+Two-party control is unaffected: a quorum of two distinct people from four is no
+weaker than one from three, and makes one partner being unavailable less likely
+to block a legitimate action.
+
+**Closing condition** — design 03 amended to name all four partners, at which
+point this record closes.
