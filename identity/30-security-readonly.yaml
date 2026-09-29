@@ -25,6 +25,25 @@ Description: >-
 # the thing he is approving, which is the difference between two-party control
 # and one person with a witness.
 #
+# Added 2026-09-29, for two different reasons that happen to need the same
+# access. The permission set did not change for either of them, and nothing in
+# it is scoped to one person.
+#
+#   Wayne   A second security function. He holds CCISO, and a security
+#           function with one person in it has no cover when that person is
+#           unavailable. He is also a quorum approver, so the approver
+#           argument above applies to him as well.
+#
+#   Tina    A quorum approver, and that is the whole reason. Since the
+#           Authorize rule went to two approvers from four partners (B-079),
+#           she has been able to approve a destructive change while being
+#           unable to see it -- the position Art was in before this template.
+#
+# So membership of this group is the union of two things: the security function,
+# and everyone who can approve a destructive change. The second is the one that
+# goes stale. Anyone added to the approver set in config/quorum.env without also
+# being added here reopens the gap this template was written to close.
+#
 # ---------------------------------------------------------------------------
 # Where the read-only boundary actually comes from
 # ---------------------------------------------------------------------------
