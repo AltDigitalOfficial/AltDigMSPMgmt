@@ -150,16 +150,20 @@ Parameters:
     Type: String
     Description: 'Platform Tooling bucket holding the packaged canary script.'
 
-  ArtifactsBucketName:
-    Type: String
-    Description: >-
-      Where this canary writes its screenshots and HAR files. Created once per
-      account by canaries/00-canary-artifacts.yaml and shared by every canary
-      in the account, each under its own prefix.
-
-      Not created here: a bucket created by a stack that can fail is a stack
-      that cannot be retried, because the retained bucket then fails the next
-      create's existence check. See that template's header.
+  # No ArtifactsBucketName parameter. The canary writes its screenshots and HAR
+  # files to the account's own bucket, which canaries/00-canary-artifacts.yaml
+  # creates as altdig-canary-artifacts-<account>-<region>. The name is derived
+  # below rather than passed in.
+  #
+  # It used to be a parameter. On a StackSet a parameter has ONE value for
+  # every account, so the Canary account's bucket name went to Sandbox
+  # Exercise as well, and the canary there could never be created ("You do
+  # not have access to the bucket"). B-062 recorded that as an ordering
+  # failure. It was not: a retry could never have fixed it.
+  #
+  # Still not created here: a bucket created by a stack that can fail is a
+  # stack that cannot be retried, because the retained bucket then fails the
+  # next create's existence check. See that template's header.
 
   ArtifactKey:
     Type: String
@@ -255,10 +259,10 @@ Resources:
                 # Scoped to this canary's prefix. Canaries in one account share
                 # a bucket, and one canary overwriting another's evidence is
                 # the kind of thing only noticed while relying on it.
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsBucketName}/${CanaryName}/*'
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::altdig-canary-artifacts-${AWS::AccountId}-${AWS::Region}/${CanaryName}/*'
               - Effect: Allow
                 Action: 's3:GetBucketLocation'
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsBucketName}'
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::altdig-canary-artifacts-${AWS::AccountId}-${AWS::Region}'
               - Effect: Allow
                 Action: ['kms:GenerateDataKey', 'kms:Decrypt']
                 # The artifacts bucket is SSE-KMS, so PutObject without this
@@ -310,7 +314,7 @@ Resources:
       Name: !Ref CanaryName
       # Prefixed by canary name so one account-level bucket serves every
       # canary without their artifacts interleaving.
-      ArtifactS3Location: !Sub 's3://${ArtifactsBucketName}/${CanaryName}'
+      ArtifactS3Location: !Sub 's3://altdig-canary-artifacts-${AWS::AccountId}-${AWS::Region}/${CanaryName}'
       ExecutionRoleArn: !GetAtt CanaryRole.Arn
       # Pinned, and checked against `aws synthetics describe-runtime-versions`
       # rather than taken from documentation: syn-python-selenium-4.1 was the

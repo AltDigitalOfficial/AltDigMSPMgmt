@@ -2229,7 +2229,21 @@ ordering:
 | `platform-canary-smoke` | "You do not have access to the bucket" — the canary's artifact bucket is in another account |
 
 The first two are genuinely transient and a retry fixed both. That is the
-problem: nothing retries. The stack instances sit at `OUTDATED` indefinitely,
+problem: nothing retries.
+
+**Correction, 2026-09-30: the third row was never an ordering failure.**
+`platform-canary-smoke` carried `ArtifactsBucketName` as one StackSet-level
+value: the Canary account's bucket, entered by hand at deploy. On a StackSet
+a parameter has one value for every account, so Sandbox Exercise's canary
+pointed at a bucket in another account. No retry could ever have fixed it.
+The Exercise stack is `DELETE_COMPLETE` behind an `OUTDATED` instance, and
+Exercise's own artifacts bucket exists.
+
+`canaries/10-canary.yaml` now derives the bucket name per account, and the
+parameter is gone. The live StackSet is left as it is. It is management-owned
+and due to be recreated under Infra Tooling (F-2), where the corrected
+template creates Exercise's canary fresh. Only Canary's instance needs the
+retain-and-import path. The stack instances sit at `OUTDATED` indefinitely,
 the account looks provisioned, and the missing pieces are exactly the ones that
 make it monitored — instrumentation is how alarms get created at all.
 
