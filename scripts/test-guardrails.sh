@@ -266,7 +266,9 @@ check() {
   # Denied, but the service did not say by what. How we resolve that depends on
   # what the test had available:
   #
-  #   yes   an exclusion exists -> run the same call as the excluded probe
+  #   yes   an exclusion exists -> run the same call as the excluded probe.
+  #         NEVER on a real resource: the probe is exempt, so its call SUCCEEDS
+  #         and does the damage the check exists to prevent (B-137). Use `real`.
   #   real  the target resource genuinely exists, and the subject holds
   #         AdministratorAccess, so an AccessDenied can only be an SCP
   #   no    neither -> honestly ambiguous, say so
@@ -352,7 +354,7 @@ check 04 RequireApplicationTag "ec2:CreateVolume with only Owner" yes --   aws e
 check 04 DataClassificationMustBeOneOfFour "ec2:CreateVolume, invalid classification" yes --   aws ec2 create-volume --availability-zone "${AZ}" --size 1   --volume-type gp3 --region "${TEST_REGION}"   --tag-specifications "${BADCLASS}"
 
 if [[ "${HARNESS_VOL}" == vol-* ]]; then
-  check 04 ProtectPlatformManagedTags "ec2:CreateTags on a platform tag" yes --     aws ec2 create-tags --region "${TEST_REGION}"     --resources "${HARNESS_VOL}" --tags Key=BackupPolicy,Value=none
+  check 04 ProtectPlatformManagedTags "ec2:CreateTags on a platform tag" real --     aws ec2 create-tags --region "${TEST_REGION}"     --resources "${HARNESS_VOL}" --tags Key=BackupPolicy,Value=none
   # The volume is NOT deleted here. Check 07 takes a snapshot from it, and
   # deleting it at this point left that check with nothing to test.
 else
@@ -400,7 +402,7 @@ if [[ "${HARNESS_VOL}" == vol-* ]]; then
 fi
 
 if [[ "${HARNESS_SNAP}" == snap-* ]]; then
-  check 07 NoSnapshotOrImageSharing "ec2:ModifySnapshotAttribute" yes --     aws ec2 modify-snapshot-attribute --region "${TEST_REGION}"     --snapshot-id "${HARNESS_SNAP}" --attribute createVolumePermission     --operation-type add --user-ids 999999999999
+  check 07 NoSnapshotOrImageSharing "ec2:ModifySnapshotAttribute" real --     aws ec2 modify-snapshot-attribute --region "${TEST_REGION}"     --snapshot-id "${HARNESS_SNAP}" --attribute createVolumePermission     --operation-type add --user-ids 999999999999
   as_test aws ec2 delete-snapshot --snapshot-id "${HARNESS_SNAP}"     --region "${TEST_REGION}" >/dev/null 2>&1 ||     warn "Could not delete harness snapshot ${HARNESS_SNAP} — remove it by hand."
 else
   emit AMBIG "ec2:ModifySnapshotAttribute" "07/NoSnapshotOrImageSharing"     "no real snapshot to test against; a synthetic id fails validation before authorization and would test nothing"
@@ -438,7 +440,208 @@ else
   emit FAIL "iam:CreateRole WITH the boundary" "control"     "a correctly bounded role was REFUSED. Either the boundary policy is not deployed to this account, or SCP 05 names a different ARN than baseline/80-developer-boundary.yaml creates — the two must agree exactly"
 fi
 
-check 05 NeverEditTheBoundaryItself "iam:CreatePolicyVersion on the boundary" yes --   aws iam create-policy-version --policy-arn "${BOUNDARY_ARN}"   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'   --set-as-default
+check 05 NeverEditTheBoundaryItself "iam:CreatePolicyVersion on the boundary" real --   aws iam create-policy-version --policy-arn "${BOUNDARY_ARN}"   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'   --set-as-default
+
+# --- Exemption squatting: names that match an SCP exemption (B-135) -------
+#
+# Every SCP exempts principals by NAME. A name is only a control if nobody
+# outside the platform can create a role that carries it, and 03's squatting
+# deny covers exactly one shape: an unpathed role/Platform*. Three other shapes
+# match an exemption and are not covered:
+#
+#   /xrole/PlatformSquatPath    04-07 exempt `*role/Platform*`, and the leading
+#                               wildcard absorbs a path ending in "role/".
+#                               03 matches `role/Platform*` only, which a path
+#                               breaks.
+#   stacksets-exec-squat        exempt from 01-07. Nothing denies the name.
+#   OrganizationAccountAccessRoleSquat
+#                               04-07 exempt `OrganizationAccountAccessRole*`
+#                               with a trailing wildcard; 03 and the boundary
+#                               protect only the exact name.
+#
+# Each is created the way a developer would: by the non-exempt subject, WITH
+# the developer boundary, so SCP 05 allows it. A created squatter is then
+# assumed and tried against one action from each of 01, 04, 06 and 07:
+#
+#   01  access-analyzer:DeleteAnalyzer. Chosen because the boundary does NOT
+#       deny it, so the result is the SCP's alone. For the pathed role this is
+#       also the open question from B-001: if aws:PrincipalArn is the
+#       assumed-role ARN (which carries no path), 01's
+#       `assumed-role/Platform*/*` exemption matches and this gets through.
+#   04  ec2:CreateVolume, untagged    --dry-run: nothing is created
+#   06  ec2:DescribeVpcs in ${DENIED_REGION} --dry-run
+#   07  ec2:CreateInternetGateway     --dry-run. Snapshot sharing sits in the
+#       same policy under an identical exemption list, so IGW answers for both.
+#
+# EC2 dry-run authorizes fully, SCPs included, and then returns DryRunOperation
+# instead of acting. That is "got past authorization" with nothing to clean up.
+#
+# All of these are expected to FAIL until the exemption rewrite lands. That is
+# the point: they record the exposure before it is fixed, and they are what
+# proves the fix.
+SQUAT_TRUST="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::${PLATFORM_MGMT_ACCOUNT_ID}:root\"},\"Action\":\"sts:AssumeRole\"}]}"
+
+# past_auth <output> — the call was authorized: it either ran, dry-ran, or
+# failed on a resource lookup that happens only after authorization.
+past_auth() { printf '%s' "$1" | grep -qiE 'DryRunOperation|ResourceNotFound|NotFoundException|ClusterNotFound|not found'; }
+boundary_denied() { printf '%s' "$1" | grep -qi 'permissions boundary'; }
+
+# exposure_check <ref> <label> <key> <secret> <token> -- <cmd...>
+#
+# Like check(), but as an arbitrary principal and with a third outcome that
+# matters here: denied by the BOUNDARY rather than the SCP. That still holds
+# the line for this principal, but it is not the SCP doing it, and the SCP is
+# what the next account without a boundary relies on.
+exposure_check() {
+  local ref="$1" label="$2" k="$3" s="$4" t="$5"; shift 5
+  [[ "$1" == "--" ]] && shift
+  local out rc
+  out="$(AWS_ACCESS_KEY_ID="${k}" AWS_SECRET_ACCESS_KEY="${s}" AWS_SESSION_TOKEN="${t}" \
+         "$@" 2>&1)" && rc=0 || rc=$?
+  if [[ ${rc} -eq 0 ]] || past_auth "${out}"; then
+    emit FAIL "${label}" "${ref}" "got past authorization — the name is exempt"
+  elif scp_denied "${out}"; then
+    emit PASS "${label}" "${ref}" "denied, SCP named explicitly"
+  elif boundary_denied "${out}"; then
+    emit AMBIG "${label}" "${ref}" "denied by the permissions boundary, NOT the SCP"
+  elif denied "${out}"; then
+    emit AMBIG "${label}" "${ref}" "denied, by a policy the service did not name"
+  else
+    emit FAIL "${label}" "${ref}" \
+      "unexpected — $(printf '%s' "${out}" | tr -d '\n' | grep -o 'An error occurred.*' | cut -c1-100)"
+  fi
+}
+
+# Harness-created roles only. Inline policies go first because containment may
+# have put one there during the run (B-091), and DeleteRole refuses while any
+# policy remains.
+remove_harness_role() {
+  local role="$1" pol
+  for pol in $(as_org aws iam list-role-policies --role-name "${role}" \
+                 --query 'PolicyNames' --output text 2>/dev/null | no_cr); do
+    as_org aws iam delete-role-policy --role-name "${role}" --policy-name "${pol}" >/dev/null 2>&1
+  done
+  for pol in $(as_org aws iam list-attached-role-policies --role-name "${role}" \
+                 --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null | no_cr); do
+    as_org aws iam detach-role-policy --role-name "${role}" --policy-arn "${pol}" >/dev/null 2>&1
+  done
+  as_org aws iam delete-role --role-name "${role}" >/dev/null 2>&1 \
+    || warn "Could not delete harness role ${role} — remove it by hand."
+}
+
+SQUATTERS=("/xrole/:PlatformSquatPath" "/:stacksets-exec-squat" "/:OrganizationAccountAccessRoleSquat")
+CREATED_SQUATTERS=()
+
+# A previous run that died mid-way leaves squatters behind, and CreateRole then
+# fails with EntityAlreadyExists, which would read as neither pass nor fail.
+for entry in "${SQUATTERS[@]}"; do
+  as_org aws iam get-role --role-name "${entry#*:}" >/dev/null 2>&1 \
+    && { warn "Squatter ${entry#*:} left by a previous run — removing it first."; remove_harness_role "${entry#*:}"; }
+done
+
+for entry in "${SQUATTERS[@]}"; do
+  sq_path="${entry%%:*}" sq_name="${entry#*:}"
+  out="$(as_test aws iam create-role --path "${sq_path}" --role-name "${sq_name}" \
+           --assume-role-policy-document "${SQUAT_TRUST}" \
+           --permissions-boundary "${BOUNDARY_ARN}" 2>&1)" && rc=0 || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    if scp_denied "${out}"; then
+      emit PASS "iam:CreateRole ${sq_path}${sq_name}" "03/squatting" "denied, SCP named explicitly"
+    else
+      emit AMBIG "iam:CreateRole ${sq_path}${sq_name}" "03/squatting" \
+        "refused, but not provably by the SCP — $(printf '%s' "${out}" | tr -d '\n' | grep -o 'An error occurred.*' | cut -c1-100)"
+    fi
+    continue
+  fi
+  emit FAIL "iam:CreateRole ${sq_path}${sq_name}" "03/squatting" \
+    "a non-platform principal created a role whose name matches an SCP exemption"
+  # Allowed because the role carries the boundary: 05 only refuses policies on
+  # unbounded roles. Effective permissions are AdministratorAccess ∩ boundary,
+  # which is what a developer's role would have.
+  as_test aws iam attach-role-policy --role-name "${sq_name}" \
+    --policy-arn arn:aws:iam::aws:policy/AdministratorAccess >/dev/null 2>&1 || true
+  CREATED_SQUATTERS+=("${sq_name}")
+done
+
+if [[ ${#CREATED_SQUATTERS[@]} -gt 0 ]]; then
+  sleep 10   # sts:AssumeRole is eventually consistent after role creation
+  for sq_name in "${CREATED_SQUATTERS[@]}"; do
+    sq_arn="$(as_org aws iam get-role --role-name "${sq_name}" --query Role.Arn --output text | no_cr)"
+    read -r S_KEY S_SECRET S_TOKEN <<<"$(assume "${sq_arn}" gr-squat)"
+    if [[ -z "${S_KEY:-}" ]]; then
+      emit AMBIG "assume ${sq_name}" "squatting" "created but could not be assumed — its exemptions went untested"
+      continue
+    fi
+    exposure_check 01/ProtectThreatDetection "${sq_name}: access-analyzer:DeleteAnalyzer" \
+      "${S_KEY}" "${S_SECRET}" "${S_TOKEN}" -- \
+      aws accessanalyzer delete-analyzer --analyzer-name "${NOPE}" --region "${TEST_REGION}"
+    exposure_check 04/RequireOwnerTag "${sq_name}: ec2:CreateVolume untagged" \
+      "${S_KEY}" "${S_SECRET}" "${S_TOKEN}" -- \
+      aws ec2 create-volume --dry-run --availability-zone "${AZ}" --size 1 \
+        --volume-type gp3 --region "${TEST_REGION}"
+    exposure_check 06/DenyOutsideApprovedRegions "${sq_name}: ec2:DescribeVpcs ${DENIED_REGION}" \
+      "${S_KEY}" "${S_SECRET}" "${S_TOKEN}" -- \
+      aws ec2 describe-vpcs --dry-run --region "${DENIED_REGION}"
+    exposure_check 07/NoNetworkingAroundTheBaseline "${sq_name}: ec2:CreateInternetGateway" \
+      "${S_KEY}" "${S_SECRET}" "${S_TOKEN}" -- \
+      aws ec2 create-internet-gateway --dry-run --region "${TEST_REGION}"
+  done
+  for sq_name in "${CREATED_SQUATTERS[@]}"; do remove_harness_role "${sq_name}"; done
+fi
+
+# --- The tenant app deployer's exemptions (B-136) --------------------------
+#
+# change/00-appdeployer.yaml names the tenant CI role PlatformAppDeployer-<app>.
+# Every SCP's Platform* exemption therefore covers a pipeline AltDigital does
+# not control. The real role trusts GitHub OIDC only, so the harness cannot
+# assume it. The exemption depends on the NAME alone, so a clone carrying the
+# real role's boundary and its Deploy policy is an exact test of it.
+#
+# Runs only where an app deployer is deployed; skipped elsewhere, and says so.
+#
+#   06  lambda:ListFunctions in ${DENIED_REGION}. Deploy grants lambda:* on *
+#       with no region condition, so the SCP is the only thing in the way.
+#   04  ecs:CreateService, untagged, against a cluster that does not exist.
+#       ClusterNotFound means authorization passed and the tags were never
+#       required. Nothing is created either way.
+APP_SRC="$(as_org aws iam list-roles --query "Roles[?starts_with(RoleName,'PlatformAppDeployer-')].RoleName | [0]" \
+             --output text 2>/dev/null | no_cr | sed 's/^None$//')"
+APP_CLONE="PlatformAppDeployer-harness"
+if [[ -z "${APP_SRC}" || "${APP_SRC}" == "${APP_CLONE}" ]]; then
+  skip "No PlatformAppDeployer-* in ${TARGET_ACCOUNT}; the app deployer's exemptions are tested where one is deployed."
+else
+  as_org aws iam get-role --role-name "${APP_CLONE}" >/dev/null 2>&1 && remove_harness_role "${APP_CLONE}"
+  app_boundary="$(as_org aws iam get-role --role-name "${APP_SRC}" \
+                    --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text | no_cr)"
+  app_deploy="$(as_org aws iam get-role-policy --role-name "${APP_SRC}" --policy-name Deploy \
+                  --query PolicyDocument --output json 2>/dev/null)"
+  # OrganizationAccountAccessRole creates it: 03 lets that role create Platform*
+  # names, which is how the real one gets created too.
+  if as_org aws iam create-role --role-name "${APP_CLONE}" \
+       --assume-role-policy-document "${SQUAT_TRUST}" \
+       --permissions-boundary "${app_boundary}" \
+       --description "Guardrail harness: clone of ${APP_SRC}'s permissions" >/dev/null 2>&1 \
+     && as_org aws iam put-role-policy --role-name "${APP_CLONE}" --policy-name Deploy \
+       --policy-document "${app_deploy}" >/dev/null 2>&1; then
+    sleep 10
+    read -r A_KEY A_SECRET A_TOKEN <<<"$(assume \
+      "arn:aws:iam::${TARGET_ACCOUNT}:role/${APP_CLONE}" gr-appdeployer)"
+    if [[ -n "${A_KEY:-}" ]]; then
+      exposure_check 06/DenyOutsideApprovedRegions "app deployer: lambda:ListFunctions ${DENIED_REGION}" \
+        "${A_KEY}" "${A_SECRET}" "${A_TOKEN}" -- \
+        aws lambda list-functions --max-items 1 --region "${DENIED_REGION}"
+      exposure_check 04/RequireOwnerTag "app deployer: ecs:CreateService untagged" \
+        "${A_KEY}" "${A_SECRET}" "${A_TOKEN}" -- \
+        aws ecs create-service --cluster "${NOPE}" --service-name "${NOPE}" \
+          --task-definition "${NOPE}" --desired-count 0 --region "${TEST_REGION}"
+    else
+      emit AMBIG "assume ${APP_CLONE}" "app-deployer" "clone created but could not be assumed"
+    fi
+  else
+    emit AMBIG "create ${APP_CLONE}" "app-deployer" "could not clone ${APP_SRC}; its exemptions went untested"
+  fi
+  remove_harness_role "${APP_CLONE}"
+fi
 
 check 01 ProtectCloudTrail "cloudtrail:StopLogging" yes -- \
   aws cloudtrail stop-logging --name "${NOPE}"
@@ -452,8 +655,18 @@ check 01 ProtectThreatDetection "guardduty:DeleteDetector" yes -- \
 check 01 ProtectFlowAndDnsLogging "ec2:DeleteFlowLogs" yes -- \
   aws ec2 delete-flow-logs --flow-log-ids "fl-00000000000000000"
 
+# `real`, NOT the differential. The differential re-runs the call as the probe,
+# which is exempt, so on a REAL key the probe's call succeeds: on 2026-09-20 it
+# scheduled this fixture for deletion (B-137). A real key plus
+# AdministratorAccess needs no differential. If the subject is denied, only an
+# SCP can have done it, which is the same inference the Backup vault check uses.
 if [[ -n "${KEY_ID}" ]]; then
-  check 02 ProtectKmsKeys "kms:ScheduleKeyDeletion" yes -- \
+  KEY_STATE="$(as_org aws kms describe-key --key-id "${KEY_ID}" \
+                 --query KeyMetadata.KeyState --output text 2>/dev/null | no_cr)"
+  [[ "${KEY_STATE}" == "Enabled" ]] || warn "KMS fixture ${KEY_ID} is ${KEY_STATE}, not Enabled. \
+Authorization is expected to run before the key state is read, so the check below \
+should still test the SCP, but a PendingDeletion fixture is gone on its deletion date. B-137."
+  check 02 ProtectKmsKeys "kms:ScheduleKeyDeletion" real -- \
     aws kms schedule-key-deletion --key-id "${KEY_ID}" --pending-window-in-days 30
 fi
 

@@ -958,6 +958,21 @@ appeal:
 **Do not** simply keep adding exclusions and discover the limit during a
 production policy update.
 
+**Correction, 2026-09-29: the first option above is backwards.** A harness
+role at `/xrole/PlatformSquatPath` was denied `access-analyzer:DeleteAnalyzer`
+by SCP 01 (B-135). If `aws:PrincipalArn` were the assumed-role ARN, which drops
+the path, 01's `arn:aws:sts::*:assumed-role/Platform*/*` exemption would have
+matched `assumed-role/PlatformSquatPath/gr-squat` and let it through. It did
+not. SCPs see the IAM role ARN, path included, which is what the AWS
+documentation says. So the three `assumed-role` variants are the dead weight,
+and the `iam::role` variants are the ones doing the work. Dropping those would
+have removed every exemption in 01–03 at once. The earlier "live run
+confirmed" observation is not reproducible from anything recorded, and it is
+superseded. Dropping the `assumed-role` variants recovers the same bytes.
+The exemption rewrite (B-135) does that, and the harness probe (still exempt
+afterwards, or every differential turns AMBIGUOUS) is what proves it changed
+nothing.
+
 ---
 
 ## B-002 · cfn-lint and cfn-guard — CLOSED
@@ -5656,3 +5671,113 @@ account's `log-custody` stream in Truveon's manifest apply, as is done for the
 pipeline heartbeat. Truveon would then notice a stopped custody job per account
 on its own. Not done now because it is a Truveon-side change and the platform
 already detects the same thing through sequence gaps.
+
+---
+
+## B-135 · Three role-name shapes match an SCP exemption, and anyone can create them
+
+**Observed** — 2026-09-29, `scripts/test-guardrails.sh` against Sandbox Canary.
+Every SCP exempts principals by name. SCP 03's squatting deny protects one
+shape, an unpathed `role/Platform*`. The harness subject (AdministratorAccess,
+matching no exemption) created each of these with the developer boundary
+attached, which is what a developer can do:
+
+| Role | 01 | 04 | 06 | 07 |
+|---|---|---|---|---|
+| `/xrole/PlatformSquatPath` | held | **exempt** | **exempt** | **exempt** |
+| `stacksets-exec-squat` | **exempt** | **exempt** | **exempt** | **exempt** |
+| `OrganizationAccountAccessRoleSquat` | held | **exempt** | **exempt** | **exempt** |
+
+Why each one gets through:
+- 04–07 write the exemption as `arn:aws:*:*:*:*role/Platform*`. The leading
+  wildcard absorbs a path that ends in `role/`.
+- 04–07 exempt `OrganizationAccountAccessRole*` with a trailing wildcard.
+- Nothing anywhere denies creating `stacksets-exec-*`.
+
+The developer boundary denies none of the 04, 06 or 07 actions, so for a
+bounded squatter the SCP is the only control, and the name defeats it. The 01
+column holds for the pathed role only because SCPs see the path (B-001
+correction).
+
+Against the rest of 01, the boundary is what holds. It repeats most of 01's
+denies, but not all of them: `access-analyzer:DeleteAnalyzer`, the Macie and
+Inspector disables and `logs:PutRetentionPolicy` are in 01 only.
+`stacksets-exec-squat` is exempt from 01 outright, so against those actions
+nothing stops it.
+
+**Fix** — the exemption rewrite:
+- explicit per-SCP lists, as `arn:aws:iam::*:role/<Name>` with no leading
+  wildcard;
+- exact `OrganizationAccountAccessRole`, with no trailing wildcard;
+- 03's squatting deny extended to `stacksets-exec-*`, `OrganizationAccountAccessRole*`
+  and pathed roles, exempting the StackSets service-linked role
+  (`/aws-service-role/member.org.stacksets.cloudformation.amazonaws.com/`),
+  which is what creates the real `stacksets-exec-*` roles.
+
+The pathed-role deny must also exempt `/aws-service-role/` and
+`/aws-reserved/sso.amazonaws.com/`. Design 11 needs no pathed roles.
+
+**Blocks Arc8** — these accounts would be the first developer-accessible
+accounts in Members. Close before vesting.
+
+---
+
+## B-136 · The tenant app deployer is exempt from the guardrails meant for it
+
+**Observed** — 2026-09-29, same run. `change/00-appdeployer.yaml` names the
+tenant CI role `PlatformAppDeployer-<app>`. The `Platform` prefix was chosen so
+that SCP 03 would protect the role from tampering. It also puts the role inside
+every SCP's `Platform*` exemption. A harness clone carrying
+`PlatformAppDeployer-demo`'s live boundary and `Deploy` policy:
+- listed Lambda functions in eu-west-1: exempt from 06;
+- reached ECS validation on an untagged `CreateService`: exempt from 04.
+
+That role serves a pipeline AltDigital does not control. `Deploy` grants
+`lambda:*`, `ecs:*`, `elasticloadbalancing:*` and more on `*` with no region
+condition, so the SCP was the only region control it had.
+
+**Fix** — rename it to `TenantAppDeployer-<app>` so that it is exempt from
+nothing, and keep it tamper-protected by adding the new pattern to 03 and to
+the boundary's `NeverThePlatformIdentities`. Scope its compute to the approved
+regions with `aws:RequestedRegion`.
+`change/src/reconcile.py` matches the literal `PlatformAppDeployer` and must
+change in the same commit, or every tenant deploy reconciles as an
+unaccounted-for credential. Changing `RoleName` replaces the role, which
+changes the ARN the tenant pipeline assumes.
+
+**Blocks Arc8** — Arc8's pipeline would be the first real user of the role.
+
+---
+
+## B-137 · The harness probe scheduled its own KMS fixture for deletion
+
+**Observed** — 2026-09-29. The Canary fixture `alias/guardrail-harness-fixture`
+is `PendingDeletion`, due on 2026-10-20. CloudTrail shows `ScheduleKeyDeletion`
+by session `gr-probe` on 2026-09-20 at 20:53:27 and 21:01:25 (MDT), which is
+`PlatformHarnessProbe`, the exempt differential principal.
+
+**Cause** — `check()` in `yes` mode re-runs a denied call as the probe to
+prove that the SCP made the difference. For the KMS check the resource is
+real, so the probe's call succeeded and did what the check exists to prevent.
+The same mode was in use for three other real-resource checks. For those, the
+probe path never ran, only because the services named the SCP in their
+denials:
+- the developer-boundary `CreatePolicyVersion` check, whose probe run would
+  have published an `Allow *` default version and stripped every deny;
+- the snapshot share, whose probe run would have shared a harness snapshot
+  with an external account id;
+- the platform-tag change.
+
+The Canary boundary is intact: v1 only, and every `CreatePolicyVersion` in
+CloudTrail is the subject's.
+
+**Fixed 2026-09-29** — all four checks now use `real` mode. A real resource
+plus AdministratorAccess means a denial can only be an SCP, so no probe run is
+needed. `check()`'s documentation now says `yes` must never target a real
+resource.
+
+**Open** — the fixture itself. Either `kms:CancelKeyDeletion` plus
+`kms:EnableKey` restores it before 2026-10-20, or it deletes and the next run
+creates another. That is the "permanent fixture" the harness header describes,
+replaced once. It is a Sandbox change and the operator's call. The harness
+warns while the fixture is not `Enabled`.
