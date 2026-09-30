@@ -5757,7 +5757,7 @@ changes the ARN the tenant pipeline assumes.
 
 ---
 
-## B-137 · The harness probe scheduled its own KMS fixture for deletion
+## B-137 · The harness probe scheduled its own KMS fixture for deletion — CLOSED
 
 **Observed** — 2026-09-29. The Canary fixture `alias/guardrail-harness-fixture`
 is `PendingDeletion`, due on 2026-10-20. CloudTrail shows `ScheduleKeyDeletion`
@@ -5784,11 +5784,9 @@ plus AdministratorAccess means a denial can only be an SCP, so no probe run is
 needed. `check()`'s documentation now says `yes` must never target a real
 resource.
 
-**Open** — the fixture itself. Either `kms:CancelKeyDeletion` plus
-`kms:EnableKey` restores it before 2026-10-20, or it deletes and the next run
-creates another. That is the "permanent fixture" the harness header describes,
-replaced once. It is a Sandbox change and the operator's call. The harness
-warns while the fixture is not `Enabled`.
+**Fixture restored 2026-09-30** — `kms:CancelKeyDeletion` then `kms:EnableKey`,
+by the operator's decision. State `Enabled`, no deletion date. The harness
+still warns if it ever finds the fixture in any other state. B-137 closed.
 
 ---
 

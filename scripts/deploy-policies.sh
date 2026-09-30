@@ -7,6 +7,8 @@
 #   scripts/deploy-policies.sh                      # create/update only
 #   scripts/deploy-policies.sh --attach             # ...and attach per manifest
 #   scripts/deploy-policies.sh --drift              # compare live vs files
+#   scripts/deploy-policies.sh --only 00-no-external-principals.json
+#                                                   # one policy (repeatable)
 #
 # ---------------------------------------------------------------------------
 # Create/update and attach are separate on purpose
@@ -21,16 +23,34 @@
 # command line. Any policy targeting 'members' or 'root' requires
 # --confirm-production: those reach tenant accounts, and an over-broad deny
 # there is an outage.
+#
+# ---------------------------------------------------------------------------
+# Only what changed, and only what was asked for
+# ---------------------------------------------------------------------------
+# A policy whose live content already matches its file is not updated. An
+# update to an attached policy is live at once under every attachment point,
+# and 01-03 are attached to four OUs as single objects. Re-pushing unchanged
+# content is harmless only while nobody has edited a file without deploying
+# it. On 2026-09-29 04 was in exactly that state (B-127), and a routine run to
+# ship an RCP fix would have deployed 04 with it.
+#
+# --only narrows the run to named files. Use it for every change that is not a
+# deliberate whole-set deployment.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 PY_BIN="$(command -v python || command -v python3)" || die "python not found."
 
-DO_ATTACH=0; DO_DRIFT=0
+DO_ATTACH=0; DO_DRIFT=0; ONLY=()
 
 usage() {
   cat <<'USAGE'
-Usage: deploy-policies.sh [--attach] [--drift] [--dry-run] [--confirm-production]
+Usage: deploy-policies.sh [--only <file>]... [--attach] [--drift] [--dry-run]
+                          [--confirm-production]
+
+  --only <file>         Restrict the run to this policy file, by basename, e.g.
+                        00-no-external-principals.json. Repeatable. Applies to
+                        create/update, --attach and --drift alike.
 
   --attach              Attach each policy to the targets declared in
                         policies/scp/attachments.tsv. Targets reaching tenant
@@ -44,6 +64,7 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --only)               ONLY+=("$2"); shift 2 ;;
     --attach)             DO_ATTACH=1; shift ;;
     --drift)              DO_DRIFT=1; shift ;;
     --dry-run)            DRY_RUN=1; shift ;;
@@ -96,6 +117,24 @@ find_policy_id() {
 mapfile -t FILES < <(find "${REPO_ROOT}/policies/scp" "${REPO_ROOT}/policies/rcp" \
   -name '*.json' 2>/dev/null | sort)
 [[ ${#FILES[@]} -gt 0 ]] || die "No policy documents found."
+
+# An --only name that matches no file is an error, not an empty run. A typo
+# that deploys nothing and reports success is the B-098 shape again.
+if [[ ${#ONLY[@]} -gt 0 ]]; then
+  SELECTED=()
+  for o in "${ONLY[@]}"; do
+    hit=""
+    for f in "${FILES[@]}"; do [[ "$(basename "${f}")" == "${o}" ]] && hit="${f}"; done
+    [[ -n "${hit}" ]] || die "--only ${o}: no such file under policies/scp or policies/rcp."
+    SELECTED+=("${hit}")
+  done
+  FILES=("${SELECTED[@]}")
+  info "Restricted to: $(for f in "${FILES[@]}"; do printf '%s ' "$(basename "${f}")"; done)"
+fi
+
+# canonical <json on stdin> -> sorted, compact JSON. Whitespace and key order
+# are not content.
+canonical() { python -c 'import json,sys;print(json.dumps(json.load(sys.stdin),sort_keys=True,separators=(",",":")))'; }
 
 # --- drift mode ------------------------------------------------------------
 if [[ ${DO_DRIFT} -eq 1 ]]; then
@@ -159,6 +198,13 @@ json.dump(json.load(open(sys.argv[1],encoding="utf-8")),sys.stdout,separators=("
 ' "$(win_path "${f}")")" || die "Could not read ${f} as JSON."
 
   if [[ -n "${pid}" ]]; then
+    live="$(aws organizations describe-policy --policy-id "${pid}" \
+      --query 'Policy.Content' --output text | no_cr | canonical)"
+    if [[ "${live}" == "$(printf '%s' "${content}" | canonical)" ]]; then
+      skip "${name} (${pid}) unchanged"
+      POLICY_IDS+=("${pid}"); POLICY_NAMES+=("${name}")
+      continue
+    fi
     # Not via run(): its dry-run mode echoes the full command, which here would
     # scroll 4KB of policy JSON past per document. The content is on disk and
     # reviewable with git diff; the useful line is which policy changed.
@@ -238,15 +284,27 @@ while IFS=$'\t' read -r pfile ptargets; do
       pid="${POLICY_IDS[$j]}"; pname="${POLICY_NAMES[$j]}"; break
     fi
   done
-  [[ -n "${pid}" ]] || { warn "${pfile} is in the manifest but has no policy document — skipped"; continue; }
+  if [[ -z "${pid}" ]]; then
+    # Under --only, every other manifest line is simply out of scope.
+    [[ ${#ONLY[@]} -gt 0 ]] || warn "${pfile} is in the manifest but has no policy document — skipped"
+    continue
+  fi
+  if [[ -f "${REPO_ROOT}/policies/rcp/${pfile}" ]]; then
+    pfilter=RESOURCE_CONTROL_POLICY
+  else
+    pfilter=SERVICE_CONTROL_POLICY
+  fi
 
   IFS=',' read -ra tlist <<<"${ptargets}"
   for t in "${tlist[@]}"; do
     tgt="$(resolve_target "${t}")"
     [[ -n "${tgt}" && "${tgt}" != "None" ]] || die "Could not resolve target '${t}'."
 
+    # Filter by THIS policy's type. It was SERVICE_CONTROL_POLICY for every
+    # policy, so an attached RCP never read as attached and each --attach run
+    # tried to attach it again.
     attached="$(aws organizations list-policies-for-target --target-id "${tgt}" \
-      --filter SERVICE_CONTROL_POLICY --query 'Policies[].Name' --output text 2>/dev/null \
+      --filter "${pfilter}" --query 'Policies[].Name' --output text 2>/dev/null \
       | no_cr | tr '\t\n' '  ')"
 
     if [[ " ${attached} " == *" ${pname} "* ]]; then
