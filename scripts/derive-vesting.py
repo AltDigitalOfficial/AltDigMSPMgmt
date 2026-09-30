@@ -119,38 +119,50 @@ def check_phi_baa(q):
     return []
 
 
-def check_cardholder_pci(q):
-    """Cardholder data without pci-dss derives nothing, and says nothing.
+def check_cardholder_scope(q):
+    """Any PCI answer halts vesting until the platform has a CDE design (D-025).
 
-    The mirror of check_phi_baa, which did not exist. `cardholder_data` is a
-    REQUIRED question that no code read: a tenant could answer yes, omit
-    'pci-dss' from frameworks, and be vested with no PCI conformance pack and
-    no PCI retention floor. Nothing in the output would have mentioned it.
+    The platform has no cardholder data environment: no CDE OU, no `locked`
+    egress profile (B-010), and no position on what a CDE in Members does to
+    the PCI scope of the shared Security and Infrastructure accounts. Vesting a
+    PCI tenant would put it on a platform that cannot meet the requirement, and
+    the gap would be found by its assessor.
 
-    That asymmetry was not a decision. PHI got a cross-check because the
-    incident clock made the consequence obvious. Cardholder data has the same
-    shape and a quieter failure, which is the worse of the two.
+    Either answer halts, not only cardholder_data. 'pci-dss' with
+    cardholder_data false is the processor-hosted case (SAQ A): the tenant never
+    touches a card number and the platform's scope is arguably unaffected. It
+    halts anyway, deliberately, because the platform has no process for
+    deciding "arguably" and the founders chose a hard stop. The message names
+    that case, so the answer is escalated rather than changed to get past the
+    gate. If SAQ A tenants become common, this is the line D-025's close
+    condition revisits.
 
-    Blocks rather than warns, for the reason check_phi_baa blocks: the answer
-    is almost always a form error, and the cost of vesting on it is a
-    compliance scope that is wrong from the first day and discovered by an
-    assessor.
+    A Halt and not an error: the answers are coherent, and describe something
+    this platform must not yet do. Same stance as check_residency.
     """
     c = q["compliance"]
-    if c["cardholder_data"] and "pci-dss" not in c["frameworks"]:
-        return [
-            "compliance: cardholder_data is true but 'pci-dss' is not in frameworks.\n"
-            "    Conformance packs and the retention floor both derive from frameworks\n"
-            "    and not from this flag, so as answered this tenant would be vested\n"
-            "    holding cardholder data with no PCI conformance pack and no PCI\n"
-            "    retention floor. Add 'pci-dss', or correct the flag."
-        ]
-    # The reverse -- pci-dss listed with cardholder_data false -- is a WARNING
-    # and not a block. See warnings_for. A tenant can be in PCI scope without
-    # ever storing a card number, because the processor does; that is ordinary
-    # rather than unusual, and a gate that refuses a true answer teaches people
-    # to give it a false one.
-    return []
+    cardholder, pci = c["cardholder_data"], "pci-dss" in c["frameworks"]
+    if not (cardholder or pci):
+        return []
+    declared = " and ".join(
+        s for s, on in (("cardholder_data is true", cardholder),
+                        ("'pci-dss' is in frameworks", pci)) if on)
+    raise Halt(
+        f"compliance: {declared} (questions 2.1 / 2.4).\n\n"
+        "    Vesting stops here. The platform has no cardholder data environment\n"
+        "    design, and PCI tenants are out of scope until it does (D-025).\n\n"
+        "    Vesting a PCI tenant needs a founder decision on four things first:\n"
+        "      1. a CDE design for the platform\n"
+        "      2. a dedicated OU for CDE accounts, with its own SCP set\n"
+        "      3. the 'locked' egress profile, which is not built (B-010)\n"
+        "      4. the PCI scope impact on the shared Security and Infrastructure\n"
+        "         accounts, which every tenant's logs and findings pass through\n\n"
+        "    If the tenant never stores, processes or transmits card numbers and a\n"
+        "    processor carries that scope (SAQ A), that still halts. Do not change\n"
+        "    the answer to get past this gate. Escalate it to the founders with the\n"
+        "    processor's name and integration method; it is the case D-025 expects\n"
+        "    to revisit first."
+    )
 
 
 def check_hoop(q):
@@ -250,11 +262,13 @@ def check_residency(q):
 CHECKS = [
     check_frameworks,
     check_phi_baa,
-    check_cardholder_pci,
     check_hoop,
     check_maintenance_window,
     check_dedicated_infrastructure,
+    # Halting checks last, so every form error is collected before a Halt ends
+    # the run. main() prints both; the operator fixes the form once, not twice.
     check_residency,
+    check_cardholder_scope,
 ]
 
 
@@ -344,16 +358,7 @@ def warnings_for(q, d):
             "    or implement B-010 first. Note that 'isolated' is both cheaper and MORE\n"
             "    restrictive than 'locked' — see docs/isolation-tiers.md."
         )
-    if ("pci-dss" in q["compliance"]["frameworks"]
-            and not q["compliance"]["cardholder_data"]):
-        w.append(
-            "'pci-dss' is in frameworks and cardholder_data is false.\n"
-            "    Legitimate and common -- a tenant is often in PCI scope through a\n"
-            "    processor without ever storing a card number themselves. Worth\n"
-            "    confirming out loud, because the framework drives a 365-day retention\n"
-            "    floor and the PCI conformance pack either way, and both are easier to\n"
-            "    agree now than to explain to an assessor later."
-        )
+    # No PCI warning here: any PCI answer halts in check_cardholder_scope (D-025).
     if d["egress_profile_overridden"]:
         w.append(
             f"egress_profile '{d['egress_profile']}' differs from the '{d['egress_profile_default']}'\n"
@@ -420,6 +425,10 @@ def main():
             problems.extend(check(q))
     except Halt as h:
         print(f"\nHALT — vesting must not proceed.\n\n    {h}\n", file=sys.stderr)
+        if problems:
+            print("The questionnaire also has these errors:\n", file=sys.stderr)
+            for p in problems:
+                print(f"  - {p}\n", file=sys.stderr)
         sys.exit(2)
 
     if problems:

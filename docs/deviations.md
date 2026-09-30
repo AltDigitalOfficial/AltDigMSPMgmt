@@ -1364,3 +1364,51 @@ to block a legitimate action.
 
 **Closing condition** — design 03 amended to name all four partners, at which
 point this record closes.
+
+---
+
+## D-025 · PCI tenants are halted at vesting until a CDE design exists
+
+**Design position** — the package supports PCI-DSS tenants.
+[readme.md](../design/readme.md) describes the platform as hosting *"independent
+member applications under HIPAA, PCI-DSS and SOC 2"*. The
+[onboarding questionnaire](../design/onboarding-questionnaire.md) asks for
+PCI-DSS as a framework (2.1) and for cardholder data (2.4, *"PCI CDE
+scoping"*). [04](../design/04-security-controls-and-evidence.md) enables PCI
+Security Hub standards and a PCI conformance pack, and gives a one-year PCI
+retention floor.
+
+**Actual** — `scripts/derive-vesting.py` `check_cardholder_scope` halts vesting
+(exit 2) when `cardholder_data` is true **or** `pci-dss` is in `frameworks`.
+The PCI rows in `vesting/derivation-rules.yaml` (conformance pack, 365-day
+floor) stay. They are unreachable, and they are what a PCI tenant would derive
+once this closes.
+
+**Reason** — founders, Phase 15 scope decisions, 2026-09-25: no prospective
+application stores, processes or transmits cardholder data, and PCI DSS work is
+out of scope. A tenant declaring it must be blocked until a CDE design exists.
+The platform has none of what a CDE needs:
+- a CDE OU with its own SCP set;
+- the `locked` egress profile (B-010, not built);
+- a position on what a CDE in Members does to the PCI scope of the shared
+  Security and Infrastructure accounts, which every tenant's logs and findings
+  pass through.
+
+Before this, a PCI tenant would have been vested with a conformance pack and a
+retention floor, and nothing else. That looks like PCI support, and isn't.
+
+**Cost** — the SAQ A case halts too. That is a tenant listing `pci-dss` with
+`cardholder_data` false, because a hosted processor carries the card data. Its
+effect on platform scope is arguably nil. It halts anyway, because the platform
+has no process for deciding "arguably". The earlier code warned in this case
+instead, on the grounds that a gate refusing a true answer teaches people to
+give a false one. That risk is real. The halt message names the SAQ A case and
+says to escalate it rather than change the answer.
+`scripts/test-derive-vesting.py` asserts that it does.
+
+**Closing condition** — a CDE design is written and the four items in the halt
+message are decided. At that point `check_cardholder_scope` is removed and the
+existing PCI derivation applies. A narrower partial close is possible if SAQ A
+tenants become common: a founder decision that processor-hosted card handling
+does not bring the platform into scope, with the processor integration recorded
+at vesting.
