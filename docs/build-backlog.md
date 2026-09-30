@@ -665,7 +665,7 @@ rarer clause. Until then this is documented exposure, not a gap.
 
 ---
 
-## B-014 · Two deviation IDs are used twice
+## B-014 · Two deviation IDs are used twice — CLOSED
 
 **Observed** — 2026-09-17. `docs/deviations.md` contains two different D-009
 entries (account alias prefix; `CommercialReadOnly` assignment) and two
@@ -681,6 +681,22 @@ deliberate; an ambiguous identifier undermines exactly that.
 **Fix** — renumber the later duplicates and update inbound references. Small,
 but it must be done in one pass across the repository rather than in the file
 alone, or the references break silently.
+
+**Closed 2026-09-29.** "Later" is by commit, not by position in the file:
+
+| Old | New | First recorded |
+|---|---|---|
+| D-009 `CommercialReadOnly` assignment | D-009, unchanged | d2fdc21, 2026-09-16 18:20 |
+| D-009 account alias prefix | **D-023** | be9726b, 2026-09-16 19:32 |
+| D-010 Identity Center users outside Entra | D-010, unchanged | d2fdc21, 2026-09-16 18:20 |
+| D-010 per-application Object Lock mode | **D-024** | 89a580a, 2026-09-17 07:06 |
+
+Inbound references moved in `CLAUDE.md`, this file and
+`vesting/derivation-rules.yaml`. References in `identity/`,
+`scripts/deploy-commercial-access.sh` and `README.md` already meant the entries
+that kept their numbers, so no deployed resource text changes. Each renumbered
+entry carries a note giving its old number, because commits and estate dumps
+from before today cite the old one and cannot be edited.
 
 ---
 
@@ -1042,7 +1058,7 @@ risk.
 
 | Document | Says | Actual |
 |---|---|---|
-| `15-partner-model.md` | Account alias prefix `ad-` | `altdig-` — `ad-security-audit` is taken by another AWS customer (D-009) |
+| `15-partner-model.md` | Account alias prefix `ad-` | `altdig-` — `ad-security-audit` is taken by another AWS customer (D-023) |
 | `open-items.md` B15 | "`ad-` assumed" | Tested and failed |
 | `entity-chain.mermaid` | Arc8 "owns app + data" | OEight owns the Arc8 application; Avergent owns theirs, built by OEight |
 

@@ -7,7 +7,10 @@ itself.
 
 ---
 
-## D-009 · Account alias prefix is `altdig-`, not `ad-`
+## D-023 · Account alias prefix is `altdig-`, not `ad-`
+
+*Numbered D-009 until 2026-09-29, when B-014 renumbered the later of two
+D-009 entries. Commits and estate dumps before that date cite it as D-009.*
 
 **Design position** — [15-partner-model.md](../design/15-partner-model.md)
 specifies `ad-<partner>-<client>-<env>`, justifying the prefix as: *"Account
@@ -58,7 +61,10 @@ decision is reversed.
 
 ---
 
-## D-010 · Per-application Object Lock mode is not achievable with a shared archive
+## D-024 · Per-application Object Lock mode is not achievable with a shared archive
+
+*Numbered D-010 until 2026-09-29, when B-014 renumbered the later of two
+D-010 entries. Commits and estate dumps before that date cite it as D-010.*
 
 **Decision** — Log archive default is **COMPLIANCE, 2190 days** (6 years),
 matching HIPAA's documentation retention expectation and the union of current

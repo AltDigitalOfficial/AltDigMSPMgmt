@@ -64,7 +64,7 @@ conformance_packs:
 #   hipaa    2190  six years. HIPAA §164.316(b)(2)(i) requires documentation
 #                  retention for six years from creation or last effective
 #                  date. Applied to logs as the platform's reading of
-#                  "documentation", which is conservative — see D-010.
+#                  "documentation", which is conservative — see D-024.
 #   pci-dss   365  one year, with three months immediately available.
 #                  Requirement 10.7 (10.5.1 in 3.2.1).
 #   soc2      365  no statutory period exists. SOC 2 requires evidence
