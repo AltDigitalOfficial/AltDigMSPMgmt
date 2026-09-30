@@ -5957,3 +5957,48 @@ to raise. Size it for more than Arc8:
 - the next tenants.
 
 **Blocks Arc8.**
+
+---
+
+## B-141 · Nothing patches, so nothing can wake an environment to patch it
+
+**Observed** — 2026-09-30, OEight dry run. Arc8's developers work India hours
+and want non-production maintenance after their day ends, when the
+scheduler has switched dev and test off. The decision (Jamie, 2026-09-30) is
+to **wake, patch, shut down**. Looking for the patching to wake for found none:
+no SSM maintenance window, no patch baseline and no `AWS-RunPatchBaseline`
+association in any template. Design 09's Patch Manager section was never built.
+
+**Three layers, in order:**
+
+| Layer | What | Notes |
+|---|---|---|
+| 1. Patching | Patch baseline per OS family; an SSM maintenance window per account, using the prod window for prod and the non-prod window for the rest | Scan only under service model A (evidence, no change). Scan and install under B and C. |
+| 2. Wake for maintenance | A third scheduler state, `maintenance`, beside `up` and `down`: turn up from the manifest, patch, validate, turn down, write a fresh manifest | Alarms stay suppressed and canaries paused; the digest shows it as maintenance, not use |
+| 3. The check | For a scheduled environment, a non-prod window outside the HOOP becomes a derived "wake required", not an error | Only once layer 2 exists |
+
+Most of layer 2 is already built in `scheduling/src/hoop.py`: the
+manifest-driven turnup, the full-set turnup validation and the state
+publisher. What is new is the state, the trigger at the window's start, and
+failure handling.
+
+**Failure handling, agreed 2026-09-30** — every branch notifies somebody:
+- the turnup fails: an immediate ticket, the same as a scheduled turnup failure;
+- the patch fails: shut down anyway, and a ticket naming the instances;
+- the window runs out mid-patch: **leave it running**, page nobody, and raise
+  a ticket. Never stop an instance halfway through a patch.
+
+**What was done instead, for now** — `derive-vesting.py` reports a non-prod
+window outside the HOOP as a **warning** citing this entry, not an error.
+That is safe only because nothing patches: there is no job to fail silently.
+
+**Whoever builds layer 1 must build layer 2 with it, or turn the warning back
+into an error in the same change.** Building patching alone brings back
+exactly the silent failure the check was written for: the window opens, the
+instances are stopped, and it closes having patched nothing.
+
+**Build when** — Arc8's developers recommend a compute model and it includes
+EC2, or any tenant runs EC2 instances in a scheduled environment. On Fargate
+or Lambda there is no OS to patch, and only RDS would be affected. RDS has
+its own maintenance window, and AWS restarts a stopped database after seven
+days.

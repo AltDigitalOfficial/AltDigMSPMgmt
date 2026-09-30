@@ -9,6 +9,9 @@
 #   terraform   — PagerDuty only (design doc 13); winget on Windows
 #   pyyaml      — questionnaire parsing for the vesting pipeline
 #   jsonschema  — questionnaire validation for the vesting pipeline
+#   tzdata      — IANA timezones on Windows, which has no system database.
+#                 Questionnaire schedules are compared in UTC, and a zone that
+#                 cannot be resolved stops the derivation.
 #
 # This script PRINTS what it would install and asks for confirmation. It does
 # not silently pull binaries onto the machine.
@@ -68,6 +71,16 @@ for mod in yaml jsonschema; do
   fi
 done
 
+# Checked by resolving a zone rather than importing tzdata: Linux and macOS
+# answer from the system database and need no package, so an import check
+# would report a false gap there.
+if python -c "import zoneinfo; zoneinfo.ZoneInfo('Asia/Kolkata')" >/dev/null 2>&1; then
+  ok "python timezone database"
+else
+  warn "python cannot resolve IANA timezones (tzdata not installed)"
+  need_py=1
+fi
+
 if [[ ${need_cfn_lint} -eq 0 && ${need_cfn_guard} -eq 0       && ${need_terraform} -eq 0 && ${need_py} -eq 0 ]]; then
   hr; ok "Toolchain complete."; exit 0
 fi
@@ -92,7 +105,7 @@ if [[ ${need_terraform} -eq 1 ]]; then
 fi
 if [[ ${need_py} -eq 1 ]]; then
   log ""
-  log "  python -m pip install --user pyyaml jsonschema"
+  log "  python -m pip install --user pyyaml jsonschema tzdata"
 fi
 hr
 warn "Not installing automatically. Run the commands above, then re-run this script."

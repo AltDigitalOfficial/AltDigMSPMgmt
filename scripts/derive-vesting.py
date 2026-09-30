@@ -30,8 +30,10 @@ a preference dressed up as a standard.
 """
 
 import argparse
+import datetime
 import json
 import sys
+import zoneinfo
 from pathlib import Path
 
 try:
@@ -177,7 +179,10 @@ def check_hoop(q):
         if h.get("start") and h.get("end") and minutes(h["start"]) >= minutes(h["end"]):
             errs.append(
                 f"environments.hoop.{name}: start {h['start']} is not before end {h['end']}.\n"
-                "    Overnight HOOPs are not supported; split them or use always_on."
+                "    A HOOP cannot cross midnight; the scheduler cannot run one. If these are\n"
+                "    developers' hours converted into another timezone, give them in the\n"
+                "    developers' own timezone instead (hoop.<env>.timezone) and the crossing\n"
+                "    usually disappears. Otherwise split them, or use always_on."
             )
     if env["uat_required"]:
         if "uat" not in env["hoop"]:
@@ -187,37 +192,168 @@ def check_hoop(q):
     return errs
 
 
-def check_maintenance_window(q):
-    """4.5 — the window must fall INSIDE the HOOP, or patching never runs.
+# ---------------------------------------------------------------------------
+# Schedules across timezones
+# ---------------------------------------------------------------------------
+# Every schedule may name its own timezone, falling back to
+# environments.timezone. A HOOP is usually in the developers' zone and a
+# production window in the users'. They are compared as UTC intervals rather
+# than as clock times, because clock times in two zones cannot be compared at
+# all, and they are compared twice -- once per daylight-saving state -- because
+# the offset between two zones is not constant when only one of them changes
+# its clocks.
 
-    This is the check most worth having. If the maintenance window sits outside
-    the HOOP the instances are stopped when Patch Manager fires. Nothing errors.
-    Patch compliance reports keep returning green against an instance that was
-    switched off, and the gap is found during an audit or an incident.
-    """
+
+def tz_name(schedule, q):
+    return (schedule or {}).get("timezone") or q["environments"]["timezone"]
+
+
+def hhmm(total):
+    total %= 1440
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def check_timezones(q):
+    """Every named zone must resolve. The schema checks shape; this checks existence."""
+    named = {"environments.timezone": q["environments"]["timezone"]}
+    for env, h in q["environments"]["hoop"].items():
+        if h.get("timezone"):
+            named[f"environments.hoop.{env}.timezone"] = h["timezone"]
+    for which, w in q["resilience"]["maintenance_windows"].items():
+        if isinstance(w, dict) and w.get("timezone"):
+            named[f"resilience.maintenance_windows.{which}.timezone"] = w["timezone"]
+
     errs = []
-    mw = q["resilience"]["maintenance_window"]
-    mw_start, mw_end = minutes(mw["start"]), minutes(mw["end"])
-
-    for name, h in q["environments"]["hoop"].items():
-        if h["always_on"]:
-            continue
-        h_start, h_end = minutes(h["start"]), minutes(h["end"])
-        if not (h_start <= mw_start and mw_end <= h_end):
+    for where, name in named.items():
+        try:
+            zoneinfo.ZoneInfo(name)
+        except (zoneinfo.ZoneInfoNotFoundError, ValueError):
             errs.append(
-                f"resilience.maintenance_window ({mw['start']}-{mw['end']}) falls outside the "
-                f"{name} HOOP ({h['start']}-{h['end']}).\n"
-                "    The instances are stopped when Patch Manager runs, so patching silently\n"
-                "    never happens and compliance reporting stays green against a powered-off\n"
-                "    host. Move the window inside the HOOP, or set that environment always_on."
-            )
-        missing = [d for d in mw["days"] if d not in h.get("days", [])]
-        if missing:
-            errs.append(
-                f"resilience.maintenance_window runs on {', '.join(missing)}, which are not "
-                f"{name} HOOP days ({', '.join(h.get('days', []))}). Same failure: patching never runs."
+                f"{where}: '{name}' is not a timezone this machine can resolve.\n"
+                "    If every zone fails, the timezone database is missing: on Windows,\n"
+                "    python -m pip install --user tzdata (scripts/setup-tooling.sh checks it)."
             )
     return errs
+
+
+def check_maintenance_windows(q):
+    """What the schema cannot say about 5.6 / 5.7."""
+    errs = []
+    env = q["environments"]
+    for which, w in q["resilience"]["maintenance_windows"].items():
+        if isinstance(w, dict) and w["start"] == w["end"]:
+            errs.append(
+                f"resilience.maintenance_windows.{which}: start and end are both {w['start']}.\n"
+                "    That could mean no time at all or the whole day. Give the real end."
+            )
+
+    choice = q["resilience"]["maintenance_windows"]["nonprod"]
+    if isinstance(choice, str):
+        for name, h in env["hoop"].items():
+            if h["always_on"]:
+                errs.append(
+                    f"resilience.maintenance_windows.nonprod is '{choice}', but {name} is always on.\n"
+                    "    An always-on environment has no developer hours to be inside or outside\n"
+                    "    of, so there is nothing to compute the window from. Give a window for\n"
+                    "    5.7 instead."
+                )
+    return errs
+
+
+def occurrences(days, start, end, tz, monday):
+    """UTC (start, end, start-day) for a schedule over the week beginning `monday`.
+
+    An end at or before the start crosses midnight and finishes the next day;
+    `days` are the days it starts. Local times are resolved in `tz` on each
+    date separately, which is what makes a daylight-saving change visible.
+    """
+    zone = zoneinfo.ZoneInfo(tz)
+    s_t = datetime.time.fromisoformat(start)
+    e_t = datetime.time.fromisoformat(end)
+    out = []
+    for offset in range(7):
+        date = monday + datetime.timedelta(days=offset)
+        day = DAY_ORDER[date.weekday()]
+        if day not in days:
+            continue
+        s = datetime.datetime.combine(date, s_t, tzinfo=zone)
+        e_date = date + datetime.timedelta(days=1) if e_t <= s_t else date
+        e = datetime.datetime.combine(e_date, e_t, tzinfo=zone)
+        out.append((s.astimezone(datetime.timezone.utc),
+                    e.astimezone(datetime.timezone.utc), day))
+    return out
+
+
+def uncovered(window, hoop, q, rules):
+    """Which occurrences of `window` fall outside `hoop`, per sample week.
+
+    Returns {season: [start-day, ...]} holding only the seasons with gaps. The
+    HOOP is laid out over the week either side as well, because a window in
+    another zone can land on a different UTC date from the HOOP it sits in.
+    """
+    gaps = {}
+    for season, iso in rules["schedule_sample_weeks"].items():
+        monday = datetime.date.fromisoformat(iso)
+        hoop_occ = []
+        for shift in (-7, 0, 7):
+            hoop_occ += occurrences(hoop["days"], hoop["start"], hoop["end"], tz_name(hoop, q),
+                                    monday + datetime.timedelta(days=shift))
+        missed = [day for ws, we, day in occurrences(window["days"], window["start"],
+                                                     window["end"], tz_name(window, q), monday)
+                  if not any(hs <= ws and we <= he for hs, he, _ in hoop_occ)]
+        if missed:
+            gaps[season] = missed
+    return gaps
+
+
+def describe_gaps(gaps):
+    seasons = list(gaps.values())
+    if len(gaps) > 1 and all(s == seasons[0] for s in seasons):
+        return f"on {', '.join(seasons[0])}, all year"
+    return "; ".join(f"in {season.capitalize()} on {', '.join(days)}"
+                     for season, days in gaps.items())
+
+
+def derive_nonprod_window(choice, hoop, q, rules):
+    """A window computed from a HOOP, for the 5.7 choices. Same zone, same days."""
+    rule = rules["nonprod_maintenance"][choice]
+    start_total = minutes(hoop["end"]) + rule["offset_from_hoop_end_minutes"]
+    # A start pushed past midnight starts on the next day, so the days move too.
+    day_shift = start_total // 1440
+    days = [DAY_ORDER[(DAY_ORDER.index(d) + day_shift) % 7] for d in hoop["days"]]
+    return {
+        "days": sorted(days, key=DAY_ORDER.index),
+        "start": hhmm(start_total),
+        "end": hhmm(start_total + rule["duration_minutes"]),
+        "timezone": tz_name(hoop, q),
+    }
+
+
+def derive_maintenance_windows(q, rules, envs):
+    """The window each environment will actually use, and whether it must be woken for it.
+
+    `wake_required` is the B-141 condition: the window falls outside that
+    environment's HOOP, so the environment is switched off when the window
+    opens. Nothing patches yet, so it is reported as a warning. Once patching
+    exists it is only safe if the wake exists too.
+    """
+    mw = q["resilience"]["maintenance_windows"]
+    hoops = q["environments"]["hoop"]
+    out = {"prod": {**mw["prod"], "timezone": tz_name(mw["prod"], q),
+                    "source": "specified", "wake_required": False, "gaps": {}}}
+    for env in envs:
+        if env == "prod":
+            continue
+        h = hoops[env]
+        if isinstance(mw["nonprod"], str):
+            window = derive_nonprod_window(mw["nonprod"], h, q, rules)
+            source = f"derived: {mw['nonprod']}"
+        else:
+            window, source = dict(mw["nonprod"]), "specified"
+        window["timezone"] = tz_name(window, q)
+        gaps = {} if h["always_on"] else uncovered(window, h, q, rules)
+        out[env] = {**window, "source": source, "wake_required": bool(gaps), "gaps": gaps}
+    return out
 
 
 def check_dedicated_infrastructure(q):
@@ -263,7 +399,8 @@ CHECKS = [
     check_frameworks,
     check_phi_baa,
     check_hoop,
-    check_maintenance_window,
+    check_timezones,
+    check_maintenance_windows,
     check_dedicated_infrastructure,
     # Halting checks last, so every form error is collected before a Halt ends
     # the run. main() prints both; the operator fixes the form once, not twice.
@@ -308,6 +445,10 @@ def derive(q, rules):
     d["environments"] = envs
     d["monitoring_tier"] = {e: rules["monitoring_tier"][e] for e in envs}
     d["pages_out_of_hours"] = {e: rules["pages_out_of_hours"][e] for e in envs}
+
+    # 4.5 / form 5.6-5.7 — the window each environment uses, computed from the
+    # 5.7 choice where one was given, and whether it needs waking (B-141).
+    d["maintenance_windows"] = derive_maintenance_windows(q, rules, envs)
 
     # 6.4 — dedicated host, from LICENCES not from security posture.
     held = set(q["licensing"]["customer_owned_licences"])
@@ -389,6 +530,25 @@ def warnings_for(q, d):
             "    single-AZ because this platform forbids a shared inspection VPC. Do not\n"
             "    absorb it — docs/isolation-tiers.md."
         )
+    # A warning, not an error, until B-141. If the window sits outside the HOOP
+    # the environment is switched off when patching runs. Nothing errors, and
+    # patch compliance keeps reporting green against a powered-off instance.
+    # Nothing patches yet, so there is no job to fail silently, and refusing to
+    # vest would block a tenant on infrastructure it may never need. Whoever
+    # builds patching must build the wake with it, or turn this into an error
+    # in the same change.
+    for env, mw in d["maintenance_windows"].items():
+        if not mw["wake_required"]:
+            continue
+        chosen = mw["source"] == "derived: outside-developer-hours"
+        w.append(
+            f"{env} maintenance window {mw['start']}-{mw['end']} {mw['timezone']} falls outside its\n"
+            f"    HOOP {describe_gaps(mw['gaps'])}"
+            f"{' — as chosen, outside developer hours' if chosen else ''}.\n"
+            "    The environment must be woken for it: turn up, patch, turn down. That wake is\n"
+            "    not built (B-141). Harmless today because nothing patches; not harmless the\n"
+            "    day patching ships without it."
+        )
     if not d["conformance_packs"]:
         w.append(
             "No conformance packs derived. Either frameworks is ['none'] or only 'other' was\n"
@@ -466,6 +626,12 @@ def main():
     for e in d["environments"]:
         pages = "pages out of hours" if d["pages_out_of_hours"][e] else "no out-of-hours paging"
         print(f"    {e:5s}  {d['monitoring_tier'][e]:22s}  {pages}")
+    print()
+    print("  Maintenance windows:")
+    for e, mw in d["maintenance_windows"].items():
+        days = ",".join(mw["days"]) if len(mw["days"]) < 7 else "daily"
+        wake = "  WAKE REQUIRED (B-141)" if mw["wake_required"] else ""
+        print(f"    {e:5s}  {days:20s} {mw['start']}-{mw['end']}  {mw['timezone']:20s} {mw['source']}{wake}")
 
     w = warnings_for(q, d)
     if w:

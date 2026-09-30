@@ -172,3 +172,47 @@ resilience_defaults:
 # Three always; UAT is opt-in per 3a.1 and raises cost.
 environments_always: [dev, test, prod]
 environments_optional: [uat]
+
+# ---------------------------------------------------------------------------
+# 4.5 / client form 5.7 — Non-production maintenance window, when chosen
+# ---------------------------------------------------------------------------
+# The form's recommended answer to 5.7 is a CHOICE, not a time: maintain
+# outside the developers' hours, or during them, and AltDigital picks the
+# window. It exists because the first real questionnaire was answered by a
+# non-developer leading the effort, and a partner filling a web form alone
+# can answer "outside our developers' hours" correctly where a clock time in
+# some other timezone is a guess.
+#
+# Each window is computed per scheduled environment from that environment's
+# own HOOP, in the HOOP's timezone, on the HOOP's days. Anchored to the HOOP's
+# END because that is when developers leave: the outside window starts after a
+# gap that lets late workers finish, and the during window takes the last
+# stretch of the day rather than interrupting the morning.
+#
+# `outside-developer-hours` falls outside the HOOP by definition, so the
+# environment must be woken for it (B-141, not built). derive-vesting.py warns.
+#
+# An always-on environment has no developer hours to be inside or outside of,
+# so a choice cannot be computed for it and derivation stops and asks for a
+# specified window. Nothing here guesses one.
+nonprod_maintenance:
+  outside-developer-hours:
+    offset_from_hoop_end_minutes: 120
+    duration_minutes: 120
+  during-developer-hours:
+    offset_from_hoop_end_minutes: -120
+    duration_minutes: 120
+
+# ---------------------------------------------------------------------------
+# Sample weeks for comparing schedules in different timezones
+# ---------------------------------------------------------------------------
+# Schedules in different zones are compared as UTC intervals, laid out over
+# one week in each daylight-saving state. Two weeks rather than one, because
+# the US changes its clocks and India does not: a window inside the HOOP in
+# July can be an hour outside it in January, and a single sample would pass
+# half the year's schedules and miss the other half.
+#
+# Mondays in mid-January and mid-July, clear of every transition date.
+schedule_sample_weeks:
+  january: "2026-01-12"
+  july: "2026-07-13"

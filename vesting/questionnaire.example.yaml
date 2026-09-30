@@ -53,7 +53,17 @@ resilience:
   # here; 35 is a floor rather than a starting point, because the copy vault's
   # Vault Lock rejects anything shorter.
   backup_retention_days: null
-  maintenance_window: { days: [tue], start: "08:00", end: "10:00" }
+  # Two windows (form 5.6 / 5.7). prod is always on, so its window can sit
+  # outside the users' day, and may cross midnight: days are the days it
+  # starts. Each window may name its own timezone; absent, environments.timezone.
+  #
+  # nonprod is the form's recommended answer, a choice rather than a time.
+  # derive-vesting.py computes the window from each environment's HOOP using
+  # vesting/derivation-rules.yaml. `outside-developer-hours` needs the
+  # environment woken for it (B-141, not built), which derivation warns about.
+  maintenance_windows:
+    prod:    { days: [sat], start: "23:00", end: "01:00", timezone: America/Chicago }
+    nonprod: outside-developer-hours
 
 security:
   dedicated_kms_key: false

@@ -226,9 +226,8 @@
           "description": "3a.3 — seasonal makes the account eligible for the dormant lifecycle."
         },
         "timezone": {
-          "type": "string",
-          "minLength": 1,
-          "description": "3a.7 — IANA name, e.g. America/Chicago. One timezone for all HOOPs."
+          "$ref": "#/$defs/timezone",
+          "description": "3a.7, client form 5.2 — the DEFAULT timezone for every schedule that does not name its own. Schedules may each carry their own (a HOOP in the developers' zone, a production window in the users'), because asking a partner to convert between zones is how 'IST' and a window that crosses midnight arrived on the first real questionnaire."
         },
         "hoop": {
           "type": "object",
@@ -269,7 +268,7 @@
         "rto_hours",
         "rpo_hours",
         "sla_tier",
-        "maintenance_window"
+        "maintenance_windows"
       ],
       "properties": {
         "rto_hours": {
@@ -297,9 +296,34 @@
           "minimum": 35,
           "description": "4.4 — how long backup COPIES are kept in the cross-account vault, in days. null means the platform default of 35. The floor is 35 and is not a preference: the copy vault is under Vault Lock with MinRetentionDays 35, and a copy job specifying less is rejected outright — one failure per resource per schedule, indefinitely, reported per job so it reads as a resource problem. Raising this is a client conversation; lowering it is not available while the lock stands, and after the lock hardens it is not available at all. This is NOT the local vault's retention, which follows the tier (config/tiers.yaml `backup_policy`) and is a cost decision rather than a commitment. Local retention governs how fast a restore can be; this governs how far back one can reach."
         },
-        "maintenance_window": {
-          "$ref": "#/$defs/window",
-          "description": "4.5 — MUST fall inside the HOOP for scheduled environments. derive-vesting.py checks this: a maintenance window outside the HOOP means the instances are off when Patch Manager runs, so patching silently never happens and every report says compliant."
+        "maintenance_windows": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "prod",
+            "nonprod"
+          ],
+          "description": "4.5, client form 5.6 / 5.7. Two windows because they optimise for different people: production's avoids the application's USERS, non-production's avoids the DEVELOPERS. Each may carry its own timezone, defaulting to environments.timezone.",
+          "properties": {
+            "prod": {
+              "$ref": "#/$defs/window",
+              "description": "5.6 — production is always on, so no HOOP check applies. May cross midnight."
+            },
+            "nonprod": {
+              "description": "5.7 — dev, test and uat. Either a choice, from which derive-vesting.py computes a window per scheduled environment using vesting/derivation-rules.yaml, or a window the client specifies. 'outside-developer-hours' is the form's recommended answer: it is the one a partner who is not a developer can answer correctly. A window outside a scheduled environment's HOOP means the environment must be woken for it (B-141, not built); derive-vesting.py reports that as a warning.",
+              "oneOf": [
+                {
+                  "enum": [
+                    "outside-developer-hours",
+                    "during-developer-hours"
+                  ]
+                },
+                {
+                  "$ref": "#/$defs/window"
+                }
+              ]
+            }
+          }
         }
       }
     },
@@ -644,9 +668,13 @@
         "end": {
           "type": "string",
           "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
+        "timezone": {
+          "$ref": "#/$defs/timezone",
+          "description": "Optional. Defaults to environments.timezone. Usually the developers' zone."
         }
       },
-      "description": "Hours of Planned Operation. always_on true ignores the rest; false requires days, start and end, enforced in derive-vesting.py because JSON Schema's if/then for this reads far worse than the check it replaces."
+      "description": "Hours of Planned Operation. always_on true ignores the rest; false requires days, start and end, enforced in derive-vesting.py because JSON Schema's if/then for this reads far worse than the check it replaces. A HOOP may NOT cross midnight — the scheduler cannot run one — but giving it in the developers' own timezone almost always removes the crossing."
     },
     "window": {
       "type": "object",
@@ -679,8 +707,28 @@
         "end": {
           "type": "string",
           "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
+        "timezone": {
+          "$ref": "#/$defs/timezone",
+          "description": "Optional. Defaults to environments.timezone."
         }
-      }
+      },
+      "description": "A maintenance window, written the way people say it. An end earlier than the start crosses midnight: 23:00-01:00 is two hours ending the next morning, and `days` are the days the window STARTS. An end equal to the start is rejected, since it could mean nothing or all day."
+    },
+    "timezone": {
+      "type": "string",
+      "pattern": "^(UTC|[A-Z][A-Za-z_]+(/[A-Za-z0-9_+-]+){1,2})$",
+      "description": "An IANA timezone name, e.g. America/Denver or Asia/Kolkata. Abbreviations are rejected by the pattern: IST is India, Ireland or Israel depending on who is asked, and MT does not say whether daylight saving applies (Denver observes it, Phoenix does not). The pattern only checks shape; derive-vesting.py confirms the name resolves.",
+      "examples": [
+        "America/New_York",
+        "America/Chicago",
+        "America/Denver",
+        "America/Phoenix",
+        "America/Los_Angeles",
+        "Asia/Kolkata",
+        "Europe/London",
+        "UTC"
+      ]
     }
   }
 }

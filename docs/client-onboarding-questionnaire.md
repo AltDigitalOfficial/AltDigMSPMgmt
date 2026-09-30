@@ -265,9 +265,39 @@ an environment that looks compliant and is not.
 | # | Question | How to answer | When | Change later? |
 |---|---|---|---|---|
 | 5.1 | Do you need a UAT environment? | Yes / No | Vest | **Locked** |
-| 5.2 | Primary timezone for scheduling | Free text — e.g. `America/Chicago` | Vest | Reversible |
+| 5.2 | Default timezone for your schedules | **Pick one** from the list below | Vest | Reversible |
 | 5.3 | Release cadence | **Pick one:** `continuous` / `monthly` / `quarterly` / `ad-hoc` | Dev | Reversible |
 | 5.4 | Usage pattern | **Pick one:** `year-round` / `seasonal` | Optional | Reversible |
+
+### Timezones
+
+Every time you give us in this section is a clock time **in a timezone you
+choose**. You never need to convert one into another, and nothing asks you to.
+5.2 is the timezone we assume when you leave a row's own timezone blank.
+
+Pick from this list. If yours is not here, give its full name from the
+[IANA list](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones),
+such as `Europe/Dublin`.
+
+| Choose | Means |
+|---|---|
+| `America/New_York` | US Eastern |
+| `America/Chicago` | US Central |
+| `America/Denver` | US Mountain |
+| `America/Phoenix` | US Mountain **without** daylight saving (Arizona) |
+| `America/Los_Angeles` | US Pacific |
+| `Asia/Kolkata` | India |
+| `Europe/London` | United Kingdom |
+| `UTC` | Coordinated Universal Time |
+
+**Please do not use abbreviations like IST, CST or MT.** They are ambiguous in
+ways that matter here. IST means India, Ireland or Israel depending on who is
+asked. MT does not say whether daylight saving applies: Denver changes its
+clocks and Phoenix does not, so the two are an hour apart for half the year.
+
+We handle daylight saving for you, including when your developers and your
+users are in countries that change their clocks on different dates, or not at
+all.
 
 ### 5a. Operating hours per environment
 
@@ -275,22 +305,56 @@ Non-production environments are switched off outside their operating hours.
 This is usually the largest single cost saving available, and it is yours, not
 ours — you are not billed for compute that is switched off.
 
-For each environment, either mark **always on** or give days and hours:
+For each environment, either mark **always on** or give days and hours. Give
+the hours **in the timezone of the people who use it** — usually your
+developers — even if that differs from 5.2.
 
-| Environment | Always on? | Days | Start | End |
-|---|---|---|---|---|
-| Development | ☐ | | | |
-| Test | ☐ | | | |
-| UAT (if used) | ☐ | | | |
+| Environment | Always on? | Days | Start | End | Timezone (blank = 5.2) |
+|---|---|---|---|---|---|
+| Development | ☐ | | | | |
+| Test | ☐ | | | | |
+| UAT (if used) | ☐ | | | | |
+
+Operating hours must start and end on the same day; a start of 22:00 and an
+end of 06:00 is not possible. Giving the hours in your developers' own
+timezone almost always avoids that.
 
 **Production is always on and is not schedulable.**
 
 **When:** Vest · **Change later?** Reversible
 
+### 5b. Freeze periods and maintenance windows
+
 | # | Question | How to answer | When | Change later? |
 |---|---|---|---|---|
 | 5.5 | Any freeze periods when changes must not happen? | Free text — e.g. retail peak, year-end close | Prod | Reversible |
-| 5.6 | Preferred maintenance window | Free text — day and time range | Prod | Reversible |
+| 5.6 | Production maintenance window | Days, start, end and timezone (blank = 5.2) | Prod | Reversible |
+| 5.7 | Non-production maintenance window — development, test and UAT | **Pick one:** `outside-developer-hours` (recommended) / `during-developer-hours` / `specify` — and if `specify`, days, start, end and timezone | Dev | Reversible |
+
+**On 5.6 and 5.7 — they are asked separately because they want opposite
+answers.** Production's window should avoid *your users'* busy hours.
+Non-production's should avoid *your developers'* working day. When those
+people are in different timezones, one window cannot do both.
+
+**Write windows the way you would say them.** `11pm to 1am` is fine: a
+window may run past midnight, and the days you list are the days it
+**starts**. "Saturday, 11pm to 1am" ends at 1am on Sunday morning.
+
+**For 5.7, most people should pick `outside-developer-hours`.** You do not
+need to work out a time. We place the window after the operating hours you
+gave in 5a, in the same timezone, on the same days, and show you exactly
+when before anything is built. Because your environment is switched off at
+that time, we switch it on for the window, carry out the maintenance, and
+switch it off again. Your developers do not see it.
+
+Pick `during-developer-hours` if you would rather the environment was never
+switched on outside its operating hours. We place the window at the end of
+your developers' day, so any interruption falls when they are finishing
+rather than starting.
+
+Pick `specify` only if a particular time matters to you. An always-on
+environment has no developer hours for us to work from, so if any
+environment in 5a is always on, 5.7 must be `specify`.
 
 ---
 
