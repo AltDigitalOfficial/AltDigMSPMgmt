@@ -56,6 +56,7 @@ Partners
 Clients
   put-client     --partner S --slug S [--state STATE] [--ip-owner WHO]
                  [--tech-contact EMAIL] [--dev-manager EMAIL]
+                 [--change-approver EMAIL] [--jira-project KEY]
                  Updates only the fields passed; never erases the rest.
   get-client     --partner S --slug S
   link-truveon   --partner S --slug S --name TRUVEON_TENANT_SLUG
@@ -65,6 +66,7 @@ Clients
 Accounts
   put-account    --account-id ID --partner S --client S --env ENV
                  [--app S] [--baseline-version N]
+                 [--service-model A|B|C] [--compliance hipaa+soc2]
   get-account    --account-id ID
   list-accounts
 
@@ -91,6 +93,7 @@ CMD="$1"; shift
 SLUG=""; PARTNER=""; STATE=""; NOTIFY_HOURS=""; ALTDIG_HOURS=""; OWNER=""
 BAA=""; IP_OWNER=""; ACCOUNT_ID=""; ENVIRONMENT=""; APP=""; VERSION=""
 NAME=""; REASON=""; REVIEW_BY=""; TECH_CONTACT=""; DEV_MANAGER=""
+CHANGE_APPROVER=""; JIRA_PROJECT=""; SERVICE_MODEL=""; COMPLIANCE=""; KIND=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -106,6 +109,8 @@ while [[ $# -gt 0 ]]; do
     --ip-owner)         IP_OWNER="$2"; shift 2 ;;
     --tech-contact)     TECH_CONTACT="$2"; shift 2 ;;
     --dev-manager)      DEV_MANAGER="$2"; shift 2 ;;
+    --change-approver)  CHANGE_APPROVER="$2"; shift 2 ;;
+    --jira-project)     JIRA_PROJECT="$2"; shift 2 ;;
     --account-id)       ACCOUNT_ID="$2"; shift 2 ;;
     --env)              ENVIRONMENT="$2"; shift 2 ;;
     --app)              APP="$2"; shift 2 ;;
@@ -340,6 +345,17 @@ cmd_put_client() {
   if [[ -n "${DEV_MANAGER}" ]]; then
     set+=", dev_manager = :dm";  vals+=",\":dm\":$(ddb_str "${DEV_MANAGER}")"
   fi
+  # Questionnaire 3.3 and 12.4. Change reconciliation routes an unapproved
+  # deployment to the change approver and looks for change records in the
+  # Jira project, both read from this record by sync-tenant-facts.sh. Until
+  # these flags existed nothing wrote either field, so reconciliation had a
+  # consumer and no supplier.
+  if [[ -n "${CHANGE_APPROVER}" ]]; then
+    set+=", change_approver = :ca"; vals+=",\":ca\":$(ddb_str "${CHANGE_APPROVER}")"
+  fi
+  if [[ -n "${JIRA_PROJECT}" ]]; then
+    set+=", jira_change_project = :jp"; vals+=",\":jp\":$(ddb_str "${JIRA_PROJECT}")"
+  fi
 
   if [[ "${DRY_RUN}" == "1" ]]; then
     printf '%s DRY%s  update-item CLIENT %s/%s SET %s\n' \
@@ -353,9 +369,10 @@ cmd_put_client() {
     --expression-attribute-names '{"#st":"state"}' \
     --expression-attribute-values "{${vals}}" >/dev/null
   ok "client ${PARTNER}/${SLUG} recorded: state=${STATE}${IP_OWNER:+ ip-owner=${IP_OWNER}}"
-  # Questionnaire 1.5 and 5.8. These are the ONLY personal data in the
-  # registry, and they are here because the instrumentation digest has nowhere
-  # else to find a recipient — design doc 06 makes that digest the documented
+  # Questionnaire 1.5, 5.8 and 3.3: the tech contact, dev manager and change
+  # approver. These are the ONLY personal data in the registry, and they are
+  # here because the digest and change reconciliation have nowhere else to
+  # find a recipient — design doc 06 makes that digest the documented
   # evidence that monitoring requirements were communicated, so a digest with
   # no addressee is a compliance gap rather than a missing nicety.
   #
@@ -451,13 +468,18 @@ check_kind() {
   esac
 }
 
-# design 10's service models. Unset is allowed and is visible as 'unset' rather
-# than blank, so an account nobody classified is findable instead of looking
-# like a deliberate choice.
+# design 10's service models, in the questionnaire's own letters (1.7): A
+# infrastructure, B managed platform, C fully managed. The same letters
+# Truveon uses and the partner page's dropdown will show, so a value never
+# needs translating on its way to an invoice. This used to accept managed,
+# co-managed and advisory, which nothing else in the platform used.
+#
+# Unset is allowed and is visible as 'unset' rather than blank, so an account
+# nobody classified is findable instead of looking like a deliberate choice.
 check_service_model() {
   case "${1}" in
-    unset|managed|co-managed|advisory) ;;
-    *) die "--service-model must be managed, co-managed or advisory." ;;
+    unset|A|B|C) ;;
+    *) die "--service-model must be A, B or C (questionnaire 1.7), got '${1}'." ;;
   esac
 }
 

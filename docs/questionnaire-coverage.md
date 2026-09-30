@@ -12,7 +12,8 @@ human": the irreversible steps still need an approver. See
 [What needs an approver](#what-needs-an-approver).
 
 **Built from** the form, `vesting/questionnaire.schema.json`, and a trace of
-which code actually reads each field, on 2026-09-30 at `4e4cd36`. Re-run the
+which code actually reads each field, on 2026-09-30 at `4e4cd36`; rows
+updated as gaps close. Re-run the
 trace when a consumer is added. A row saying *nothing reads it* was true at
 that commit.
 
@@ -41,16 +42,16 @@ answer, and nothing could act on it if something did.
 
 | | Count | |
 |---|---|---|
-| builds | 18 | Identity and naming, frameworks and retention, UAT, egress, both rosters, the Truveon questions, the acknowledgements |
+| builds | 22 | Identity and naming, service model, frameworks and retention, UAT, egress, the technical contact, change approver and Jira project, both rosters, the Truveon questions, the acknowledgements |
 | checks | 15 | Halts, derivations, warnings — the review screen |
-| stored | 32 | Captured and unread |
+| stored | 28 | Captured and unread |
 | form only | 49 | Most of sections 2, 7, 13 and 14 |
 
-Sixteen rows also ask for something **not built**, and eight have a consumer
+Sixteen rows also ask for something **not built**, and six have a consumer
 that makes someone **type the value again**.
 
-**Seven in ten of the things a partner is asked (81 of 114) have no effect
-on what gets built.**
+**Two in three of the things a partner is asked (77 of 114) have no effect
+on what gets built.** It was 81 when this inventory was first written.
 Some of it is legitimately conversation. But a self-service page cannot tell a
 partner which half, and a partner who spends an hour on section 11 and then
 finds nothing reads it will not trust the next form.
@@ -61,22 +62,18 @@ finds nothing reads it will not trust the next form.
 
 In order of how badly they would hurt a self-service onboarding.
 
-### 1. The contacts go nowhere
+### 1. The contacts went nowhere — partly fixed 2026-09-30
 
-Every named contact is captured and none is delivered:
+Every named contact was captured and none was delivered. Onboarding now
+writes the technical contact, development manager, change approver and Jira
+project onto the client record, so the digest and change reconciliation have
+recipients from the first run. Still open:
 
-- **Technical contact (3.1).** The daily digest is sent to the registry's
-  `tech_contact`, but onboarding never writes it. For a new tenant the digest
-  **is not sent**. `reporting/src/digest.py` records the skip, which is the
-  only reason it would be noticed.
 - **Development manager (3.6).** The form says this person receives the
-  digest. The code sends it to the technical contact. The registry has a
-  `dev_manager` slot that nothing writes and nothing reads.
-- **Change approver (3.3).** Change reconciliation routes unapproved
-  deployments to the registry's `change_approver`. `registry.sh` has no flag
-  for it, and nothing writes it.
-- **Security contact (3.5)** is not even in the schema. For a HIPAA tenant,
-  the person to notify of a breach is lost at transcription.
+  digest. The code sends it to the technical contact. `dev_manager` is now
+  written, and still nothing reads it.
+- **Security contact (3.5)** is not in the schema. For a HIPAA tenant, the
+  person to notify of a breach is lost at transcription.
 - Escalation (3.2), billing (3.4) and customer escalation for PagerDuty are
   stored and unread.
 
@@ -88,8 +85,6 @@ Every named contact is captured and none is delivered:
 | Response-time threshold (11.4) | `AcceptableResponseMs` at `publish-canary.sh` |
 | Endpoints and success condition (11.2, 11.3) | canary parameters |
 | CI/CD (12.1) | AppDeployer OIDC parameters |
-| Jira project (12.4) | nothing writes the registry field reconciliation reads |
-| Service model (1.7) | registry `--service-model`, in a different vocabulary |
 
 The page cannot remove Jamie until these read the manifest.
 
@@ -105,12 +100,14 @@ business-event alarms (11.10), and patching (5.6, 5.7, B-141).
 On a form with AltDigital in the room these become a conversation. On a page
 they become an order.
 
-### 4. The service model never reaches billing
+### 4. The service model never reached billing — fixed 2026-09-30
 
-1.7 is sent to Truveon and nowhere else. The registry calls service models
-`managed`, `co-managed` and `advisory`. The questionnaire calls them A, B and
-C. Neither onboarding script passes one. Every tenant's accounts are recorded
-`unset`, and the cost report bills them at the `default` rate.
+1.7 went to Truveon and nowhere else, and the registry used a vocabulary
+(`managed`, `co-managed`, `advisory`) nothing else did. Now A, B and C are
+canonical end to end: vesting records the model and compliance scope on every
+account, the ServiceModel Cost Category carries it, and the cost report bills
+each tenant at its own model. It previously took one model from the
+invocation event for the whole run. `scripts/test-cost-report.py`.
 
 ### 5. The breach notification window is asked of the wrong party
 
@@ -170,7 +167,7 @@ approves.
 | 1.4 | Application name | `identity.application_name` | Truveon only | P | builds |
 | 1.5 | Application short code | `identity.application_code` | account alias, root email | P→A | builds |
 | 1.6 | Partner owns the IP? | `identity.partner_is_application_owner` | registry `ip-owner` | P | builds |
-| 1.7 | Service model | `identity.service_model` | Truveon only. Not registry, not billing | P | stored · typed by hand |
+| 1.7 | Service model | `identity.service_model` | Truveon; registry account records → ServiceModel Cost Category → the rate each tenant is billed at | P | builds |
 
 ### 2. The application
 
@@ -195,12 +192,12 @@ the rows that are not are marked.
 
 | # | Question | Schema field | Read by | Answered by | Status |
 |---|---|---|---|---|---|
-| 3.1 | Technical contact | `identity.technical_contact` | nothing. Digest reads a registry field onboarding never writes | P | stored |
+| 3.1 | Technical contact | `identity.technical_contact` | registry `tech_contact` → daily digest recipient | P | builds |
 | 3.2 | Escalation contact | `identity.escalation_contact` | nothing | P | stored |
-| 3.3 | Change approver | `identity.change_approver` | nothing. Reconciliation reads a registry field nothing writes | P | stored |
+| 3.3 | Change approver | `identity.change_approver` | registry `change_approver` → tenant facts → change reconciliation routing | P | builds |
 | 3.4 | Billing contact | `identity.billing_contact` | nothing | P | stored |
 | 3.5 | Security contact | — | — | P | form only |
-| 3.6 | Development manager | `security.developer_manager` | nothing. The digest goes to 3.1 instead | P | stored |
+| 3.6 | Development manager | `security.developer_manager` | written to registry `dev_manager`; nothing reads it. The digest goes to 3.1 | P | stored |
 | 3b | Developer roster | roster sidecar | `derive-roster.py`, `grant-developer-access.sh` | P | builds |
 | 3.7 | Console access | `security.customer_staff_need_access`? | nothing; the roster decides in practice | P | stored |
 | 3.8 | Who may turn on outside hours | `environments.manual_turnup_authorised` | nothing. The manual turnup path does not check it | P | stored |
@@ -307,7 +304,7 @@ the rows that are not are marked.
 | 12.1 | CI/CD tooling | `change.cicd_tooling` | nothing. AppDeployer OIDC parameters are re-typed | P | stored · typed by hand |
 | 12.2 | Deployment frequency | `change.deployment_frequency` | nothing | P | stored |
 | 12.3 | Existing change process | — | — | P | form only |
-| 12.4 | Jira project | `change.jira_change_project` | nothing writes the registry field reconciliation reads. Project creation is manual (B-108) | P | stored · typed by hand |
+| 12.4 | Jira project | `change.jira_change_project` | registry → tenant facts → change reconciliation. Creating the project is still manual (B-108) | P | builds |
 | 12.5 | Production change approver | — | — (duplicates 3.3) | P | form only |
 | 12.6 | Business test plan | — | — | P | form only |
 

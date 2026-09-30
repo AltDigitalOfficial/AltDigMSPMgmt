@@ -66,6 +66,11 @@ RATES_PARAM = os.environ.get("COST_RATES_PARAM", "/platform/cost/rates")
 # than returning an empty grouping.
 TENANT_CATEGORY = os.environ.get("COST_TENANT_CATEGORY", "Tenant")
 KIND_CATEGORY = os.environ.get("COST_KIND_CATEGORY", "AccountKind")
+MODEL_CATEGORY = os.environ.get("COST_MODEL_CATEGORY", "ServiceModel")
+
+# Cost Category values that mean "the registry did not say". A tenant whose
+# accounts carry one of these is billed at the `default` rate, as designed.
+UNRECORDED_MODELS = {"", "unset", "unregistered"}
 
 
 class RatesNotSet(Exception):
@@ -250,17 +255,47 @@ def report(event=None, context=None):
             if tenant in tenants:
                 tenants[tenant]["accounts"].add(account_id)
 
+    # Each tenant's service model, from the ServiceModel Cost Category, which
+    # scripts/sync-cost-categories.sh builds from the registry's account
+    # records. Until 2026-09-30 the model came from the invocation EVENT, once
+    # for the whole run, so every tenant in a report was billed at the same
+    # model whatever its contract said.
+    by_model = _ce_month(
+        start, end,
+        [{"Type": "COST_CATEGORY", "Key": TENANT_CATEGORY},
+         {"Type": "COST_CATEGORY", "Key": MODEL_CATEGORY}],
+        ["UnblendedCost"])
+    for result in by_model.get("ResultsByTime", []):
+        for group in result.get("Groups", []):
+            tenant, model = (group["Keys"] + ["", ""])[:2]
+            tenant = tenant.split("$", 1)[-1] or "unregistered"
+            model = model.split("$", 1)[-1]
+            if tenant in tenants:
+                tenants[tenant].setdefault("models", set()).add(model)
+
     lines = []
     for tenant, entry in sorted(tenants.items()):
+        recorded = {m for m in entry.get("models", set()) if m not in UNRECORDED_MODELS}
+        if len(recorded) > 1:
+            # One tenant, accounts recorded under different models. Either a
+            # registry error or a contract nobody has modelled; guessing which
+            # model applies would put a number on an invoice nobody chose.
+            lines.append({"tenant": tenant, "billable": False,
+                          "problem": "accounts are recorded under different service "
+                                     f"models: {', '.join(sorted(recorded))}"})
+            continue
+
         # `default` covers a tenant whose service model is not recorded. It
         # does NOT cover a tenant whose model IS recorded and has no rate.
         #
-        # Falling back in that second case would bill an advisory tenant at the
-        # managed rate, or the reverse, and produce an invoice that looks
+        # Falling back in that second case would bill a Model A tenant at the
+        # Model B rate, or the reverse, and produce an invoice that looks
         # entirely correct. design 10: "Model A is materially less work than
         # Model B. The flat fee and percentage should differ accordingly."
         # A silent fallback is precisely the error that costs money and trust.
-        model = (event or {}).get("service_model") or "default"
+        #
+        # Lowercased because scripts/set-cost-rates.sh stores RATE_A_* as `a`.
+        model = recorded.pop().lower() if recorded else "default"
         rate = models.get(model)
         if not rate:
             # Named, not skipped. A tenant silently missing from a billing

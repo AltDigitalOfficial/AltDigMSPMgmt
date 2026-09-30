@@ -103,6 +103,17 @@ CLIENT="$(q_get "['identity']['client_slug']")"
 APP="$(q_get "['identity']['application_code']")"
 CLIENT_NAME="$(q_get "['identity']['client_name']")"
 APP_OWNER="$(q_get "['identity']['partner_is_application_owner']")"
+# Facts the registry must carry for something downstream to find them. Each
+# of these had a consumer and no supplier until 2026-09-30: the digest read a
+# tech contact nobody wrote, reconciliation read a change approver and Jira
+# project nobody wrote, and every account was billed as service model 'unset'.
+# See docs/questionnaire-coverage.md, findings 1 and 4.
+TECH_EMAIL="$(q_get "['identity']['technical_contact']['email']")"
+DEV_MGR_EMAIL="$(q_get "['security']['developer_manager']['email']")"
+APPROVER_EMAIL="$(q_get "['identity']['change_approver']['email']")"
+JIRA_PROJECT="$(q_get ".get('change',{}).get('jira_change_project') or ''")"
+SERVICE_MODEL="$(q_get "['identity']['service_model']")"
+COMPLIANCE="$("${PY}" -c "import sys,yaml;d=yaml.safe_load(open(sys.argv[1],encoding='utf-8'));print('+'.join(f for f in d['compliance']['frameworks'] if f!='none') or 'none')" "${QPATH}")"
 RETENTION="$(d_get "['retention_floor_days']")"
 EGRESS="$(d_get "['egress_profile']")"
 ENVS="$(printf '%s' "${DERIVED}" | "${PY}" -c "import sys,json;print(' '.join(json.load(sys.stdin)['environments']))")"
@@ -113,6 +124,7 @@ log "  partner     : ${PARTNER}"
 log "  client      : ${CLIENT} (${CLIENT_NAME})"
 log "  application : ${APP}"
 log "  environments: ${ENVS}"
+log "  model       : ${SERVICE_MODEL}   compliance: ${COMPLIANCE}"
 log "  retention   : ${RETENTION} days"
 log "  egress      : ${EGRESS}"
 log "  mode        : $([[ "${DRY_RUN}" == "1" ]] && echo DRY-RUN || echo EXECUTE)"
@@ -213,11 +225,15 @@ fi
 info "Registry: client record in 'provisioning'"
 IP_OWNER="$([[ "${APP_OWNER}" == "True" ]] && echo partner || echo client)"
 if [[ "${DRY_RUN}" == "1" ]]; then
-  printf '%s DRY%s  registry put-client %s/%s state=provisioning ip-owner=%s\n' \
-    "${C_YELLOW}" "${C_RESET}" "${PARTNER}" "${CLIENT}" "${IP_OWNER}"
+  # Contacts are counted, not printed: a dry run's output is the thing most
+  # likely to be pasted into a ticket or an assistant.
+  printf '%s DRY%s  registry put-client %s/%s state=provisioning ip-owner=%s contacts=3 jira=%s\n' \
+    "${C_YELLOW}" "${C_RESET}" "${PARTNER}" "${CLIENT}" "${IP_OWNER}" "${JIRA_PROJECT:-none}"
 else
   bash "${REPO_ROOT}/scripts/registry.sh" put-client \
-    --partner "${PARTNER}" --slug "${CLIENT}" --state provisioning --ip-owner "${IP_OWNER}"
+    --partner "${PARTNER}" --slug "${CLIENT}" --state provisioning --ip-owner "${IP_OWNER}" \
+    --tech-contact "${TECH_EMAIL}" --dev-manager "${DEV_MGR_EMAIL}" \
+    --change-approver "${APPROVER_EMAIL}" --jira-project "${JIRA_PROJECT}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -323,12 +339,14 @@ BASELINE_VERSION="$(bash "${REPO_ROOT}/scripts/registry.sh" get-baseline 2>/dev/
 for pair in ${CREATED_IDS}; do
   ENVNAME="${pair%%:*}"; ACCT="${pair##*:}"
   if [[ "${DRY_RUN}" == "1" ]]; then
-    printf '%s DRY%s  registry put-account %s %s/%s/%s %s\n' \
-      "${C_YELLOW}" "${C_RESET}" "${ACCT}" "${PARTNER}" "${CLIENT}" "${APP}" "${ENVNAME}"
+    printf '%s DRY%s  registry put-account %s %s/%s/%s %s model=%s compliance=%s\n' \
+      "${C_YELLOW}" "${C_RESET}" "${ACCT}" "${PARTNER}" "${CLIENT}" "${APP}" "${ENVNAME}" \
+      "${SERVICE_MODEL}" "${COMPLIANCE}"
   else
     bash "${REPO_ROOT}/scripts/registry.sh" put-account \
       --account-id "${ACCT}" --partner "${PARTNER}" --slug "${CLIENT}" \
       --app "${APP}" --env "${ENVNAME}" --state provisioning \
+      --service-model "${SERVICE_MODEL}" --compliance "${COMPLIANCE}" \
       --baseline-version "$((10#${BASELINE_VERSION:-0}))" >/dev/null
     ok "registered ${ACCT} (${ENVNAME})"
   fi

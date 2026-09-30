@@ -202,6 +202,13 @@ CLIENT="$(q_get "['identity']['client_slug']")"
 APP="$(q_get "['identity']['application_code']")"
 CLIENT_NAME="$(q_get "['identity']['client_name']")"
 APP_OWNER="$(q_get "['identity']['partner_is_application_owner']")"
+# Written onto the client record at step 1 so the digest and change
+# reconciliation have a recipient from the first run. Same fields, same
+# reason, as vest-client.sh step 4.
+TECH_EMAIL="$(q_get "['identity']['technical_contact']['email']")"
+DEV_MGR_EMAIL="$(q_get "['security']['developer_manager']['email']")"
+APPROVER_EMAIL="$(q_get "['identity']['change_approver']['email']")"
+JIRA_PROJECT="$(q_get ".get('change',{}).get('jira_change_project') or ''")"
 ENVS="$(printf '%s' "${DERIVED}" \
   | "${PY}" -c "import sys,json;print(' '.join(json.load(sys.stdin)['environments']))")"
 TENANT_ID="${PARTNER}-${CLIENT}-${APP}"
@@ -352,14 +359,16 @@ fi
 if should_run 1 registry-client-record; then
   IP_OWNER="$([[ "${APP_OWNER}" == "True" ]] && echo partner || echo client)"
   if [[ "${DRY_RUN}" == "1" ]]; then
-    printf '%s DRY%s  registry put-client %s/%s state=provisioning ip-owner=%s\n' \
-      "${C_YELLOW}" "${C_RESET}" "${PARTNER}" "${CLIENT}" "${IP_OWNER}"
+    printf '%s DRY%s  registry put-client %s/%s state=provisioning ip-owner=%s contacts=3 jira=%s\n' \
+      "${C_YELLOW}" "${C_RESET}" "${PARTNER}" "${CLIENT}" "${IP_OWNER}" "${JIRA_PROJECT:-none}"
     record 1 registry-client-record "dry" ""
   else
     attempt 1 registry-client-record \
       bash "${REPO_ROOT}/scripts/registry.sh" put-client \
         --partner "${PARTNER}" --slug "${CLIENT}" --state provisioning \
-        --ip-owner "${IP_OWNER}"
+        --ip-owner "${IP_OWNER}" \
+        --tech-contact "${TECH_EMAIL}" --dev-manager "${DEV_MGR_EMAIL}" \
+        --change-approver "${APPROVER_EMAIL}" --jira-project "${JIRA_PROJECT}"
   fi
 fi
 
