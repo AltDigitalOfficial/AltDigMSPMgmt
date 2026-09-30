@@ -5949,14 +5949,23 @@ can never be deleted, with vesting half done.
 active accounts plus the accounts this vesting would create, and refuses to
 start if they do not fit. A dry run warns instead of refusing.
 
-**Open** — the increase itself. It is a Service Quotas request to AWS, which
-approves Organizations account increases by hand, and it is the operator's
-to raise. Size it for more than Arc8:
-- Arc8's 3–4 accounts;
-- the FinOps account (15.9);
-- the next tenants.
+**Requested 2026-09-30** — Jamie approved 30, sized for Arc8's 3–4 accounts,
+the FinOps account (15.9), Avergent, and the tenants after it. Service Quotas
+request `f56961bfd3a04b9ea693ca52f0381f40wNyLviE5`, raised from the management
+account in us-east-1, status PENDING, no support case yet. Check with:
 
-**Blocks Arc8.**
+```
+aws service-quotas list-requested-service-quota-change-history-by-quota \
+  --service-code organizations --quota-code L-E619E033 --region us-east-1 \
+  --profile msp-mgmt
+```
+
+At the time of the request: 8 active accounts, and both Sandbox accounts in
+use (the canary smoke test and the guardrail harness), so none could be
+retired. Closing one would not have helped: a closed account stays SUSPENDED
+for 90 days and still counts, and the root SCP denies closing.
+
+**Blocks Arc8 until approved.**
 
 ---
 
