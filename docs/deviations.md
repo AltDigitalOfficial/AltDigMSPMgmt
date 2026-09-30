@@ -426,6 +426,26 @@ and service-linked roles keep working.
 That is strictly better than what design 11 asked for: it holds even if a trust
 policy is edited later, and it needs no organization id written down anywhere.
 
+**Corrected 2026-09-29: the RCP no longer covers SAML or web identity.** As
+first written it also denied `sts:AssumeRoleWithSAML` and
+`sts:AssumeRoleWithWebIdentity`. A federated caller carries no
+`aws:PrincipalOrgID`, and the call is unsigned, so `aws:PrincipalIsAWSService`
+is absent too. Both conditions are `IfExists`, so both evaluated true and the
+deny applied to every federated sign-in.
+
+Evidence: an Identity Center sign-in to Sandbox Exercise as SecurityReadOnly
+was refused ("Not authorized to perform sts:AssumeRoleWithSAML", CloudTrail,
+2026-09-30T03:04:45Z). It succeeded once the two actions were removed. Nobody
+had signed into a Sandbox account through Identity Center since the RCP was
+attached, which is how it went unnoticed.
+
+Attached to Members as written, it would have locked out every tenant
+developer and every tenant GitHub pipeline.
+
+What limits federation now is the trust policy naming a specific identity
+provider, plus which providers exist in the account. Neither is protected
+against a local administrator, so B-138 carries the control that closes that.
+
 **design 11 should be updated** to say the control is an RCP. As written it
 asks for something AWS cannot do, and the plausible-looking SCP is a trap —
 it passes review, attaches cleanly, and denies nothing.

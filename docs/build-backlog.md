@@ -5464,6 +5464,14 @@ decision this item can make.
 
 B-129 carries the provenance cross-check the tag cannot provide by itself.
 
+**Drift, found 2026-09-29.** The layer-tag statement
+(`PlatformLayerMustBePresentAndOneOfTwo`) is in the file but NOT in the live
+`PlatformRequireTags` on Sandbox (`deploy-policies.sh --drift`). It was committed
+in 2661274 and never deployed, so the text above describes a control that is
+not running. Deploying it will fail the harness's tagged-volume control, which
+carries no `platform-layer` tag, so the harness change and the deploy go
+together, in the exemption rewrite (B-135).
+
 ## B-128 · A daily report of resources missing the layer tag
 
 **Deferred with a trigger** — 2026-09-22. Jamie asked for it and deferred the
@@ -5781,3 +5789,30 @@ resource.
 creates another. That is the "permanent fixture" the harness header describes,
 replaced once. It is a Sandbox change and the operator's call. The harness
 warns while the fixture is not `Enabled`.
+
+---
+
+## B-138 · Nothing limits which identity providers an account may trust
+
+**Observed** — 2026-09-29, while fixing the RCP (D-003 correction). With
+`sts:AssumeRoleWithSAML` and `sts:AssumeRoleWithWebIdentity` out of the RCP,
+federation into a role is limited only by the role's trust policy and by which
+SAML and OIDC providers exist in the account. A local administrator can
+register a provider they control, such as their own OIDC issuer, create a role
+that trusts it, and assume that role from outside the Organization. That is
+the same exfiltration path design 11 names for cross-account trust. The RCP
+never really closed it, because it also denied every legitimate federated
+sign-in.
+
+**Fix** — an SCP, since SCPs see the request and this is a request-side
+control. Deny `iam:CreateOpenIDConnectProvider`,
+`iam:UpdateOpenIDConnectProviderThumbprint`,
+`iam:AddClientIDToOpenIDConnectProvider`, `iam:CreateSAMLProvider` and
+`iam:UpdateSAMLProvider` to every principal except the platform's deployment
+principals. Those create the GitHub provider the app deployer trusts and, via
+Identity Center, the SAML provider. The deny belongs with 07 (bypasses) and
+is written against the explicit exemption lists from B-135, not against
+`Platform*`. Harness case: the subject creates an OIDC provider and is denied.
+
+**Blocks Arc8** — with B-135. Arc8's accounts are the first where someone
+other than AltDigital holds IAM rights.
