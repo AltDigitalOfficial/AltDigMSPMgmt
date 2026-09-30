@@ -179,6 +179,35 @@ if [[ -n "${MISSING_BASELINE}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 3a. Account quota
+# ---------------------------------------------------------------------------
+# Organizations caps the number of accounts (L-E619E033; 10 by default). A
+# vesting that hits the cap part-way creates some accounts and then fails, and
+# the accounts it did create cannot be deleted. So the whole set must fit
+# before the first one is created. B-140.
+info "Checking the account quota"
+QUOTA="$(MSYS_NO_PATHCONV=1 aws service-quotas get-service-quota --region us-east-1 \
+  --service-code organizations --quota-code L-E619E033 \
+  --query 'Quota.Value' --output text 2>/dev/null | no_cr | cut -d. -f1 || true)"
+ACTIVE="$(MSYS_NO_PATHCONV=1 aws organizations list-accounts \
+  --query "length(Accounts[?Status!='SUSPENDED'])" --output text | no_cr)"
+NEEDED=0
+for ENVNAME in ${ENVS}; do
+  EMAIL="$(account_email "${PARTNER}" "${CLIENT}" "${APP}" "${ENVNAME}")"
+  EXISTS="$(MSYS_NO_PATHCONV=1 aws organizations list-accounts \
+    --query "length(Accounts[?Email=='${EMAIL}'])" --output text | no_cr)"
+  [[ "${EXISTS}" == "0" ]] && NEEDED=$((NEEDED+1))
+done
+[[ "${QUOTA}" =~ ^[0-9]+$ ]] || die "Could not read the account quota (L-E619E033). Refusing to guess."
+if (( ACTIVE + NEEDED > QUOTA )); then
+  warn "Account quota: ${ACTIVE} accounts exist, this vesting needs ${NEEDED} more, the quota is ${QUOTA}."
+  warn "Request an increase first (Service Quotas, AWS Organizations, 'Maximum number of accounts')."
+  [[ "${DRY_RUN}" == "1" ]] || die "Refusing to start a vesting that cannot finish. Nothing was created."
+else
+  ok "account quota: ${ACTIVE} + ${NEEDED} <= ${QUOTA}"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. Registry entry FIRST, in provisioning state
 # ---------------------------------------------------------------------------
 info "Registry: client record in 'provisioning'"

@@ -973,6 +973,12 @@ The exemption rewrite (B-135) does that, and the harness probe (still exempt
 afterwards, or every differential turns AMBIGUOUS) is what proves it changed
 nothing.
 
+**Quota, 2026-09-30:** Service Quotas reports `L-C48BCE79` "Service control
+policy document size" as **10,240** bytes, not 5,120. The pressure this item
+records is gone. `validate-policies.sh` still enforces 5,120, which is now a
+self-imposed margin rather than the AWS limit. It is kept deliberately until
+someone decides otherwise, because a policy near 10 KB is itself a review smell.
+
 ---
 
 ## B-002 · cfn-lint and cfn-guard — CLOSED
@@ -5865,3 +5871,30 @@ the gitignored `config/contacts.env`.
 **Also open** — nothing re-checks these after vesting. `--verify` is the
 check, and the verification sweep should run it per account. Security Hub
 reports the same drift in the meantime, via EC2.7, S3.1 and the rest.
+
+---
+
+## B-140 · The Organization's account quota is 10, and Arc8 needs 11
+
+**Observed** — 2026-09-30. Service Quotas, AWS Organizations,
+`L-E619E033` "Maximum number of accounts" = **10**. There are 8 active
+accounts: management plus seven platform accounts. The Arc8 example
+questionnaire vests dev, test and prod, which makes 11. No increase has ever
+been requested.
+
+**Why it matters** — `vest-client.sh` creates accounts one at a time. At the
+cap it would have created two, failed on the third, and left two accounts that
+can never be deleted, with vesting half done.
+
+**Guarded 2026-09-30** — `vest-client.sh` step 3a reads the quota, counts
+active accounts plus the accounts this vesting would create, and refuses to
+start if they do not fit. A dry run warns instead of refusing.
+
+**Open** — the increase itself. It is a Service Quotas request to AWS, which
+approves Organizations account increases by hand, and it is the operator's
+to raise. Size it for more than Arc8:
+- Arc8's 3–4 accounts;
+- the FinOps account (15.9);
+- the next tenants.
+
+**Blocks Arc8.**
