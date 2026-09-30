@@ -212,12 +212,12 @@ need to know whose request counts as authorisation.
 
 ## 4. Compliance and data
 
-**Read this section before answering it.** Two of these answers are effectively
-permanent.
+**Read this section before answering it.** These answers decide which
+controls apply to you and how long your compliance evidence is kept.
 
 | # | Question | How to answer | When | Change later? |
 |---|---|---|---|---|
-| 4.1 | Which compliance frameworks apply? | **Pick any:** `hipaa` / `pci-dss` / `soc2` / `other` / `none` | Vest | **Locked** |
+| 4.1 | Which compliance frameworks apply? | **Pick any:** `hipaa` / `hitrust` / `pci-dss` / `soc2` / `other` / `none` | Vest | **Locked** |
 | 4.2 | If `other`, which? | Free text | Vest | Locked |
 | 4.3 | Highest data classification the application handles | **Pick one:** `public` / `internal` / `confidential` / `regulated` | Vest | **Locked** |
 | 4.4 | Does it handle protected health information (PHI)? | Yes / No | Vest | **Locked** |
@@ -227,31 +227,42 @@ permanent.
 | 4.8 | What personal data does the application hold, and about whom? | Free text | Dev | Reversible |
 | 4.9 | Who is your auditor, and when is your next audit? | Free text | Optional | Reversible |
 
-### Why 4.1 and 4.3 cannot be changed later
+### What 4.1 commits you to
 
-Your compliance frameworks determine how long we must retain evidence — logs,
-configuration history, access records. That retention is enforced using AWS
-Object Lock in **compliance mode**, which means:
+**Your infrastructure logs are kept for six years whatever you answer here.**
+Everything our platform records about your AWS accounts — logs, configuration
+history, access records — goes to an archive protected by AWS Object Lock in
+**compliance mode** for six years:
 
 > For the full retention period, **nobody can delete those records**. Not you,
 > not AltDigital, not AWS Support, not the account root user. There is no
 > override, no appeal and no early release.
 
-Current retention floors:
+That is the same for every client.
 
-| Framework | Retention | Why |
+**What 4.1 decides is your compliance workspace.** Your frameworks set how long
+evidence is kept in your Truveon workspace, which controls we check your
+accounts against, and which frameworks your workspace is organised around:
+
+| Framework | Evidence retention | Why |
 |---|---|---|
 | `hipaa` | **2,190 days** (6 years) | 45 CFR 164.316(b)(2) |
+| `hitrust` | 365 days | HITRUST CSF assessments look back over their own period |
 | `pci-dss` | 365 days | Requirement 10.7 |
 | `soc2` | 365 days | Covers a typical audit period |
 
-The highest applicable floor wins. It is also a storage cost commitment for the
-same period, which you cannot reduce by deleting data.
+The highest applicable period wins, and it cannot be shortened later for
+evidence already kept.
 
-**So do not select a framework defensively.** "We might need HIPAA one day" is a
-six-year, irrevocable decision if it is answered yes today. If you are genuinely
-unsure, say so — it is better to delay vesting by a week than to be wrong about
-this.
+**Please ask yourselves about HITRUST.** Health plans and other large
+healthcare organisations often require it of their vendors, separately from
+HIPAA. If any of your contracts mention it, select `hitrust`. If you are not
+sure, say so; we would rather ask now than find out during your customer's
+vendor review.
+
+**Answer for what applies today, not what might one day.** Adding a framework
+later is straightforward. Removing one is not, because evidence already kept
+under it stays for its full period.
 
 **4.4 and 4.5 must agree with 4.1.** If you handle PHI, `hipaa` must be in your
 framework list; if you handle cardholder data, `pci-dss` must be. The platform

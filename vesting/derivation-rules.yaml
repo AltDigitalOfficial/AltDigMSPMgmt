@@ -45,6 +45,13 @@ conformance_packs:
     - Operational-Best-Practices-for-PCI-DSS-3.2.1
   soc2:
     - Operational-Best-Practices-for-SOC-2
+  # HITRUST CSF. No pack is mapped: this file does not know of an AWS sample
+  # pack for it, and naming one that may not resolve would fail the deploy.
+  # HITRUST is largely a superset of HIPAA controls, so a tenant naming it
+  # alongside `hipaa` still gets the HIPAA pack. derive-vesting.py warns that
+  # nothing HITRUST-specific is applied. Listed as its own framework so the
+  # question is asked every time (added 2026-09-30).
+  hitrust: []
   # "other" deliberately maps to nothing. A framework nobody has named cannot
   # have a pack derived for it, and silently applying a default would be worse
   # than applying none — it would look like coverage.
@@ -56,10 +63,20 @@ conformance_packs:
 # The questionnaire says "union of applicable frameworks". Union of retention
 # periods means the LONGEST, not the sum and not the most common.
 #
-# These are floors in DAYS and they set an Object Lock COMPLIANCE retention,
-# which cannot be shortened by anyone including account root. Raising a number
-# here is cheap; lowering it does nothing for data already written under the
-# old value. Treat every increase as permanent for six years of billing.
+# These are floors in DAYS. What they set is narrower than it looks
+# (corrected 2026-09-30):
+#
+#   - The AWS log archive does NOT vary by tenant. It is one shared bucket
+#     with a COMPLIANCE default of 2190 days for every object from every
+#     account (D-024), so every tenant's logs are kept six years whatever
+#     these say. vest-client.sh reads back the lock actually applied and warns
+#     if it is ever SHORTER than the tenant's floor.
+#   - The floor IS the tenant's Truveon evidence retention floor
+#     (truveon_handoff.py), and that is the commitment a framework answer
+#     makes. How Truveon enforces it is a Truveon question.
+#
+# Raising a number here is cheap. A floor above the archive's 2190 would mean
+# the platform cannot meet it, and vesting says so.
 #
 #   hipaa    2190  six years. HIPAA §164.316(b)(2)(i) requires documentation
 #                  retention for six years from creation or last effective
@@ -70,12 +87,17 @@ conformance_packs:
 #   soc2      365  no statutory period exists. SOC 2 requires evidence
 #                  covering the audit period, typically twelve months. This is
 #                  a house number, not a citation, and is marked as such.
+#   hitrust   365  no single period is set by the CSF itself; assessments
+#                  look back over their own period. House number, like soc2.
+#                  A tenant naming hitrust handles PHI, so hipaa's 2190 will
+#                  normally dominate.
 #   other     365  the platform default, applied when a framework is named
 #                  that this file does not know.
 retention_floor_days:
   hipaa: 2190
   pci-dss: 365
   soc2: 365
+  hitrust: 365
   other: 365
 default: 365
 

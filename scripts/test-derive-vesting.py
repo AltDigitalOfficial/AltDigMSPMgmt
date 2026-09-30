@@ -130,6 +130,30 @@ WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"]
 EVERY_DAY = WEEKDAYS + ["sat", "sun"]
 
 
+class Frameworks(unittest.TestCase):
+    """4.1: hitrust is askable, and nothing applied for it is said out loud."""
+
+    def setUp(self):
+        self.base = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+
+    def test_hitrust_vests_and_keeps_hipaa_retention(self):
+        q = copy.deepcopy(self.base)
+        q["compliance"]["frameworks"] = ["hipaa", "hitrust", "soc2"]
+        rc, d = run_json(q)
+        self.assertEqual(rc, 0, d)
+        self.assertEqual(d["retention_floor_days"], 2190)
+        self.assertEqual(d["frameworks_without_pack"], ["hitrust"])
+
+    def test_hitrust_without_a_pack_is_warned(self):
+        # "hipaa, hitrust" derives the HIPAA pack, so a warning that fired
+        # only when no pack at all was derived would stay silent.
+        q = copy.deepcopy(self.base)
+        q["compliance"]["frameworks"] = ["hipaa", "hitrust"]
+        rc, out = run_report(q)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("No conformance pack is applied for: hitrust", out)
+
+
 class MaintenanceWindows(unittest.TestCase):
     """Form 5.6 / 5.7: two windows, each in its own timezone, compared in UTC."""
 

@@ -480,9 +480,41 @@ else
       --bucket "altdig-log-archive-${LOG_ARCHIVE_ACCT}" \
       --key "${EVIDENCE_KEY}" --body "$(win_path "${TMP}")" \
       --content-type application/json >/dev/null
-  rm -f "${TMP}"
   ok "evidence written to s3://altdig-log-archive-${LOG_ARCHIVE_ACCT}/${EVIDENCE_KEY}"
-  ok "immutable for ${RETENTION} days; replicated to the us-west-2 archive"
+
+  # Report the retention S3 ACTUALLY applied, read back from the object, not
+  # the tenant's derived floor. They differ: the archive's bucket default is
+  # COMPLIANCE for every object from every account (D-024), so a SOC 2-only
+  # tenant with a 365-day floor still gets the archive's full period. This line
+  # used to print the derived floor, which on that tenant would have understated
+  # the lock -- in the output of the step whose whole job is evidence.
+  #
+  # The direction that matters is the other one: an archive period SHORTER than
+  # the tenant's floor means the platform cannot meet a framework's retention.
+  # Nothing today can cause it, since the archive is at 2190 and no framework
+  # floor exceeds that, but a new framework or a changed bucket default could.
+  LOCK="$(AWS_PROFILE= AWS_ACCESS_KEY_ID="${EAK}" AWS_SECRET_ACCESS_KEY="${ESK}" AWS_SESSION_TOKEN="${EST}" \
+    MSYS_NO_PATHCONV=1 aws s3api get-object-retention \
+      --bucket "altdig-log-archive-${LOG_ARCHIVE_ACCT}" --key "${EVIDENCE_KEY}" \
+      --query 'Retention.[Mode,RetainUntilDate]' --output text 2>/dev/null | no_cr)" || true
+  rm -f "${TMP}"
+  if [[ -z "${LOCK}" || "${LOCK}" == "None"* ]]; then
+    warn "Could not read the evidence object's retention. The archive is meant to lock it
+      COMPLIANCE for its full period (D-024); confirm with s3api get-object-retention
+      before relying on this record."
+  else
+    read -r LOCK_MODE LOCK_UNTIL <<<"${LOCK}"
+    LOCK_DAYS="$("${PY}" -c "import datetime,sys;u=datetime.datetime.fromisoformat(sys.argv[1].replace('Z','+00:00'));print((u-datetime.datetime.now(datetime.timezone.utc)).days)" "${LOCK_UNTIL}")"
+    # +1: whole days remaining on an object locked seconds ago for exactly N
+    # days reads back as N-1, which would warn on every run.
+    if [[ "$((LOCK_DAYS + 1))" -lt "${RETENTION}" ]]; then
+      warn "Evidence is locked ${LOCK_MODE} for ${LOCK_DAYS} days, SHORTER than this tenant's
+      ${RETENTION}-day floor. The platform cannot meet the framework's retention for
+      this tenant. Raise the archive period before this tenant produces evidence."
+    else
+      ok "immutable (${LOCK_MODE}) until ${LOCK_UNTIL}, ${LOCK_DAYS} days; tenant floor ${RETENTION}; replicated to the us-west-2 archive"
+    fi
+  fi
 fi
 
 hr

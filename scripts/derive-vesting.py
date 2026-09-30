@@ -426,6 +426,10 @@ def derive(q, rules):
             if p not in packs:
                 packs.append(p)
     d["conformance_packs"] = packs
+    # Named, and nothing applied for it. `other` and `hitrust` today. Said per
+    # framework because "hipaa, hitrust" derives the HIPAA pack, and a warning
+    # that fired only when NO pack was derived would stay silent about HITRUST.
+    d["frameworks_without_pack"] = [f for f in fw if not rules["conformance_packs"].get(f)]
 
     # 2.8 — retention floor. "Union of applicable frameworks" means the
     # LONGEST, not the sum. Sum would be arithmetic on unrelated obligations.
@@ -548,6 +552,13 @@ def warnings_for(q, d):
             "    The environment must be woken for it: turn up, patch, turn down. That wake is\n"
             "    not built (B-141). Harmless today because nothing patches; not harmless the\n"
             "    day patching ships without it."
+        )
+    if d["frameworks_without_pack"] and d["conformance_packs"]:
+        w.append(
+            f"No conformance pack is applied for: {', '.join(d['frameworks_without_pack'])}.\n"
+            "    The framework is recorded and passed to Truveon, but no AWS Config rules\n"
+            "    specific to it are deployed. Confirm the client's assessor accepts that,\n"
+            "    and confirm Truveon recognises the framework name."
         )
     if not d["conformance_packs"]:
         w.append(

@@ -114,13 +114,14 @@
           "items": {
             "enum": [
               "hipaa",
+              "hitrust",
               "pci-dss",
               "soc2",
               "other",
               "none"
             ]
           },
-          "description": "2.1 — drives conformance packs, retention floor and pen test cadence. 'none' must be alone; enforced in derive-vesting.py, since JSON Schema cannot express 'this value excludes all others' without oneOf gymnastics that obscure the rule."
+          "description": "2.1 — drives conformance packs, retention floor and pen test cadence. 'none' must be alone; enforced in derive-vesting.py, since JSON Schema cannot express 'this value excludes all others' without oneOf gymnastics that obscure the rule. 'hitrust' (HITRUST CSF) added 2026-09-30 so it is asked every time: health plans commonly require it of vendors, and it was nearly missed on the first real questionnaire. No conformance pack is mapped to it; derive-vesting.py warns."
         },
         "non_us_data_subjects": {
           "type": "boolean",

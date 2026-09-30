@@ -136,7 +136,7 @@ vesting. Everything else can flow straight through.
 | # | Why |
 |---|---|
 | 1.3, 1.5 | Become permanent account names and root email addresses |
-| 4.1, 4.3, 4.4 | Set a six-year Object Lock retention nobody can shorten, including AWS |
+| 4.1, 4.3, 4.4 | Set the Truveon evidence retention floor, which cannot be shortened for evidence already kept, and which controls apply. The AWS archive is six years for every tenant regardless (D-024) |
 | 4.5, 4.6 | Halt vesting. The page should say so as they are answered, not after submission |
 | 4.7 | A contractual figure — AltDigital supplies it from the contract |
 | 5.1 | UAT is a fourth account; Locked |
@@ -207,7 +207,7 @@ the rows that are not are marked.
 
 | # | Question | Schema field | Read by | Answered by | Status |
 |---|---|---|---|---|---|
-| 4.1 | Frameworks | `compliance.frameworks` | conformance packs, Object Lock retention, Truveon | P→A | builds |
+| 4.1 | Frameworks | `compliance.frameworks` | conformance packs, Truveon retention floor and frameworks. Not the AWS archive, which is 2190 days for all | P→A | builds |
 | 4.2 | If other, which | — | — | P | form only |
 | 4.3 | Data classification | `compliance.data_classification` | egress default | P→A | checks |
 | 4.4 | PHI | `compliance.phi` | HIPAA consistency, Truveon | P→A | checks |
