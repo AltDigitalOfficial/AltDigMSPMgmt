@@ -5816,3 +5816,54 @@ is written against the explicit exemption lists from B-135, not against
 
 **Blocks Arc8** — with B-135. Arc8's accounts are the first where someone
 other than AltDigital holds IAM rights.
+
+---
+
+## B-139 · Account-level security settings were set nowhere
+
+**Observed** — 2026-09-29, from Security Hub in Sandbox Exercise (us-east-2),
+and confirmed in all three allowed regions of both Sandbox accounts by
+`scripts/apply-account-settings.sh --dry-run`. None of these was set, and
+nothing in the repository set them:
+
+| Setting | Finding |
+|---|---|
+| EBS encryption by default | EC2.7 |
+| EBS snapshot public sharing blocked | EC2.182 |
+| SSM document public sharing disabled | SSM.7 (critical) |
+| Default security groups empty (every VPC, default VPCs included) | EC2.2, CIS 4.3 (high) |
+| Account-level S3 Block Public Access | S3.1 |
+| IAM password policy | IAM.7, CIS 1.5–1.11 |
+| A role for AWS Support incidents | CIS 1.20 |
+
+Only three of these have CloudFormation resources, so the whole list lives in
+one script rather than being split between a template and a script.
+
+**Built 2026-09-29** — `scripts/apply-account-settings.sh`. It is idempotent,
+supports `--dry-run`, and has a read-only `--verify` that exits non-zero on
+any gap. It refuses, rather than breaking something:
+- S3 Block Public Access, if any bucket is public;
+- emptying a default security group, if any network interface uses it.
+
+Every rule it removes is printed first, so the change can be reversed.
+
+It is called from:
+- `vest-client.sh`, step 6a, which verifies and stops vesting on a gap;
+- `create-platform-account.sh`.
+
+Applied and verified on Sandbox Exercise and Sandbox Canary. There were no
+refusals: no interface used a default group, and no bucket was public.
+
+**Not yet applied** — the Security and Infrastructure OU accounts (Log
+Archive, Audit, Forensics, Backup, Infra Tooling). Same script, but each is a
+change outside Sandbox, so each needs explicit confirmation.
+
+**Open** — the security alternate contact (Account.1). For member accounts it
+is set from the management account with `aws account put-alternate-contact
+--account-id`, which needs Organizations trusted access for AWS Account
+Management. That is a management-account change. The contact values live in
+the gitignored `config/contacts.env`.
+
+**Also open** — nothing re-checks these after vesting. `--verify` is the
+check, and the verification sweep should run it per account. Security Hub
+reports the same drift in the meantime, via EC2.7, S3.1 and the rest.

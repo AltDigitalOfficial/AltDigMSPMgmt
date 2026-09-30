@@ -231,6 +231,17 @@ else
   warn "COVERAGE GAP — this account may not be monitored. Do not treat it as protected."
 fi
 
+# --- account settings (B-139) -----------------------------------------------
+# Same reasoning as the enrolment above: settings a new account lacks and that
+# nothing else applies. Verified rather than assumed.
+info "Applying account settings"
+if bash "${REPO_ROOT}/scripts/apply-account-settings.sh" --account "${ACCOUNT_ID}" >/dev/null 2>&1 \
+   && bash "${REPO_ROOT}/scripts/apply-account-settings.sh" --account "${ACCOUNT_ID}" --verify >/dev/null 2>&1; then
+  ok "account settings applied and verified"
+else
+  warn "Account settings incomplete. Run scripts/apply-account-settings.sh --account ${ACCOUNT_ID} --verify"
+fi
+
 hr
 ok "${CANONICAL_ALIAS} = ${ACCOUNT_ID}   (alias: ${ALIAS})"
 log ""

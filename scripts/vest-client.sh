@@ -260,6 +260,32 @@ for ENVNAME in ${ENVS}; do
 done
 
 # ---------------------------------------------------------------------------
+# 6a. Account settings
+# ---------------------------------------------------------------------------
+# The account-level settings the baseline StackSets cannot express: EBS
+# encryption by default, snapshot and SSM document public sharing blocked,
+# default security groups emptied, S3 Block Public Access, the password
+# policy and the Support role (B-139). A new account has none of them, and
+# nothing else sets them.
+#
+# Failure stops vesting, and a re-run resumes: account creation above is
+# idempotent on email and so is this.
+hr
+info "Account settings"
+for pair in ${CREATED_IDS}; do
+  ACCT="${pair##*:}"
+  [[ "${ACCT}" == "<new>" ]] && { skip "account settings for ${pair%%:*} (dry run; account not created)"; continue; }
+  SETTINGS_ARGS=(--account "${ACCT}")
+  [[ "${DRY_RUN}" == "1" ]] && SETTINGS_ARGS+=(--dry-run)
+  bash "${REPO_ROOT}/scripts/apply-account-settings.sh" "${SETTINGS_ARGS[@]}" \
+    || die "Account settings failed for ${ACCT}. Fix and re-run vesting; it resumes."
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    bash "${REPO_ROOT}/scripts/apply-account-settings.sh" --account "${ACCT}" --verify \
+      || die "Account settings did not verify for ${ACCT}. Do not treat it as vested."
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # 7. Registry: account records
 # ---------------------------------------------------------------------------
 hr
