@@ -1,0 +1,166 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyPlatformRoleNameSquatting",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:CreateUser",
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:CreateInstanceProfile"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/Platform*",
+        "arn:aws:iam::*:user/Platform*",
+        "arn:aws:iam::*:policy/Platform*",
+        "arn:aws:iam::*:instance-profile/Platform*",
+        "arn:aws:iam::*:role/stacksets-exec-*",
+        "arn:aws:iam::*:role/OrganizationAccountAccessRole*",
+        "arn:aws:iam::*:role/TenantAppDeployer-*"
+      ],
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyQuorumExecutorCreationEvenByOperators",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePermissionsBoundary"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/PlatformQuorumExecutor"
+      ],
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/stacksets-exec-*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyPlatformRoleModification",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeleteRole",
+        "iam:UpdateRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:SetDefaultPolicyVersion"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/Platform*",
+        "arn:aws:iam::*:policy/Platform*",
+        "arn:aws:iam::*:role/TenantAppDeployer-*",
+        "arn:aws:iam::*:role/stacksets-exec-*",
+        "arn:aws:iam::*:role/OrganizationAccountAccessRole"
+      ],
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyLeavingTheOrganization",
+      "Effect": "Deny",
+      "Action": [
+        "organizations:LeaveOrganization",
+        "account:CloseAccount",
+        "organizations:DeleteOrganization",
+        "organizations:DetachPolicy",
+        "organizations:DisablePolicyType",
+        "organizations:DeletePolicy",
+        "organizations:UpdatePolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyPlatformManagedTagTampering",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DeleteTags",
+        "ec2:CreateTags",
+        "rds:RemoveTagsFromResource",
+        "rds:AddTagsToResource",
+        "s3:PutBucketTagging",
+        "lambda:UntagResource",
+        "lambda:TagResource",
+        "logs:UntagLogGroup",
+        "logs:TagLogGroup",
+        "cloudwatch:UntagResource",
+        "cloudwatch:TagResource",
+        "backup:UntagResource",
+        "backup:TagResource",
+        "kms:UntagResource",
+        "kms:TagResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": [
+            "platform-managed",
+            "AlarmTier",
+            "BackupPolicy",
+            "PatchGroup",
+            "BaselineVersion",
+            "InstrumentedAt",
+            "BillingRollup",
+            "PartnerSlug",
+            "ClientSlug"
+          ]
+        },
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer",
+            "arn:aws:iam::*:role/PlatformSecurityResponder",
+            "arn:aws:iam::*:role/PlatformRestoreWorker",
+            "arn:aws:iam::*:role/PlatformInstrumentation",
+            "arn:aws:iam::*:role/PlatformExerciseHarness",
+            "arn:aws:iam::*:role/PlatformBackupService",
+            "arn:aws:iam::*:role/PlatformRestoreExecution"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyMemberAccountRootUser",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::*:root"
+        }
+      }
+    }
+  ]
+}

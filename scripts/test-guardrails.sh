@@ -315,7 +315,7 @@ log "Guardrail harness"
 log "  target account : ${TARGET_ACCOUNT}"
 log "  region         : ${TEST_REGION}"
 log "  subject        : ${TEST_ROLE}  (admin, matches no exclusion)"
-log "  probe          : ${PROBE_ROLE} (admin, matches Platform* exclusion)"
+log "  probe          : ${PROBE_ROLE} (admin, named in the exemption lists)"
 hr
 
 # --- 04: required tags (prompt 9.2, design 10's four-tag set) --------------
@@ -327,7 +327,9 @@ hr
 #
 # Volumes rather than buckets: cheapest to attempt, no global namespace to
 # collide in, and a denied CreateVolume leaves nothing behind.
-TAGGED='ResourceType=volume,Tags=[{Key=Owner,Value=harness},{Key=Application,Value=guardrail},{Key=DataClassification,Value=internal}]'
+# platform-layer since B-127's statement went live. Without it this control
+# fails, and the failure reads as 04 being over-broad when 04 is correct.
+TAGGED='ResourceType=volume,Tags=[{Key=Owner,Value=harness},{Key=Application,Value=guardrail},{Key=DataClassification,Value=internal},{Key=platform-layer,Value=infrastructure}]'
 PARTIAL='ResourceType=volume,Tags=[{Key=Owner,Value=harness}]'
 BADCLASS='ResourceType=volume,Tags=[{Key=Owner,Value=harness},{Key=Application,Value=guardrail},{Key=DataClassification,Value=top-secret}]'
 AZ="${TEST_REGION}a"
@@ -483,7 +485,13 @@ SQUAT_TRUST="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"
 
 # past_auth <output> — the call was authorized: it either ran, dry-ran, or
 # failed on a resource lookup that happens only after authorization.
-past_auth() { printf '%s' "$1" | grep -qiE 'DryRunOperation|ResourceNotFound|NotFoundException|ClusterNotFound|not found'; }
+#
+# Only responses a service gives AFTER authorizing. Never a bare "not found":
+# ECS answers "TaskDefinition not found" before it authorizes, so an untagged
+# CreateService read as "exempt" for a principal the SCP was denying. Proved
+# 2026-09-30 by the non-exempt subject getting the same answer. That is the
+# fourth time validation-before-authorization has faked a result here.
+past_auth() { printf '%s' "$1" | grep -qE 'DryRunOperation|ResourceNotFoundException|InvalidParameterValueException'; }
 boundary_denied() { printf '%s' "$1" | grep -qi 'permissions boundary'; }
 
 # exposure_check <ref> <label> <key> <secret> <token> -- <cmd...>
@@ -553,8 +561,19 @@ for entry in "${SQUATTERS[@]}"; do
     fi
     continue
   fi
-  emit FAIL "iam:CreateRole ${sq_path}${sq_name}" "03/squatting" \
-    "a non-platform principal created a role whose name matches an SCP exemption"
+  if [[ "${sq_path}" == "/" ]]; then
+    emit FAIL "iam:CreateRole ${sq_path}${sq_name}" "03/squatting" \
+      "a non-platform principal created a role whose name matches an SCP exemption"
+  else
+    # A pathed role is allowed to exist. Since the rewrite every exemption is
+    # an exact role/<Name> pattern, which a path cannot match (role/Platform*
+    # does not match role/xrole/PlatformX), so the name buys nothing. What
+    # proves that is the four checks below all holding, not the creation
+    # failing. No blanket pathed-role deny: design 11 does not need one, and
+    # AWS tooling creates /service-role/ roles legitimately.
+    emit PASS "iam:CreateRole ${sq_path}${sq_name}" "03/squatting" \
+      "permitted, and inert if its exemption checks below all hold"
+  fi
   # Allowed because the role carries the boundary: 05 only refuses policies on
   # unbounded roles. Effective permissions are AdministratorAccess ∩ boundary,
   # which is what a developer's role would have.
@@ -591,9 +610,10 @@ fi
 
 # --- The tenant app deployer's exemptions (B-136) --------------------------
 #
-# change/00-appdeployer.yaml names the tenant CI role PlatformAppDeployer-<app>.
-# Every SCP's Platform* exemption therefore covers a pipeline AltDigital does
-# not control. The real role trusts GitHub OIDC only, so the harness cannot
+# change/00-appdeployer.yaml named the tenant CI role PlatformAppDeployer-<app>,
+# which put a pipeline AltDigital does not control inside every SCP's Platform*
+# exemption. It is TenantAppDeployer-<app> now, and these checks prove the new
+# name is exempt from nothing. The real role trusts GitHub OIDC only, so the harness cannot
 # assume it. The exemption depends on the NAME alone, so a clone carrying the
 # real role's boundary and its Deploy policy is an exact test of it.
 #
@@ -601,14 +621,22 @@ fi
 #
 #   06  lambda:ListFunctions in ${DENIED_REGION}. Deploy grants lambda:* on *
 #       with no region condition, so the SCP is the only thing in the way.
-#   04  ecs:CreateService, untagged, against a cluster that does not exist.
-#       ClusterNotFound means authorization passed and the tags were never
-#       required. Nothing is created either way.
-APP_SRC="$(as_org aws iam list-roles --query "Roles[?starts_with(RoleName,'PlatformAppDeployer-')].RoleName | [0]" \
+#   04  lambda:CreateFunction, untagged, naming an execution role that does
+#       not exist. Lambda authorizes first: for the non-exempt subject an
+#       untagged call is AccessDenied by the SCP and a fully tagged one gets
+#       InvalidParameterValue ("role ... cannot be assumed"), 2026-09-30. So
+#       InvalidParameterValue here means the tag requirement never applied.
+#       Nothing is created either way. The role name matches the deployer's
+#       PassRole pattern (role/<app>-*), so a PassRole refusal cannot stand in
+#       for the SCP's.
+# Either name: TenantAppDeployer- since B-136, PlatformAppDeployer- in an
+# account not yet redeployed. The clone always takes the new name, because the
+# new name is what has to be exempt from nothing.
+APP_SRC="$(as_org aws iam list-roles --query "Roles[?(starts_with(RoleName,'TenantAppDeployer-') || starts_with(RoleName,'PlatformAppDeployer-')) && RoleName!='TenantAppDeployer-harness'].RoleName | [0]" \
              --output text 2>/dev/null | no_cr | sed 's/^None$//')"
-APP_CLONE="PlatformAppDeployer-harness"
+APP_CLONE="TenantAppDeployer-harness"
 if [[ -z "${APP_SRC}" || "${APP_SRC}" == "${APP_CLONE}" ]]; then
-  skip "No PlatformAppDeployer-* in ${TARGET_ACCOUNT}; the app deployer's exemptions are tested where one is deployed."
+  skip "No tenant app deployer in ${TARGET_ACCOUNT}; the app deployer's exemptions are tested where one is deployed."
 else
   as_org aws iam get-role --role-name "${APP_CLONE}" >/dev/null 2>&1 && remove_harness_role "${APP_CLONE}"
   app_boundary="$(as_org aws iam get-role --role-name "${APP_SRC}" \
@@ -630,10 +658,17 @@ else
       exposure_check 06/DenyOutsideApprovedRegions "app deployer: lambda:ListFunctions ${DENIED_REGION}" \
         "${A_KEY}" "${A_SECRET}" "${A_TOKEN}" -- \
         aws lambda list-functions --max-items 1 --region "${DENIED_REGION}"
-      exposure_check 04/RequireOwnerTag "app deployer: ecs:CreateService untagged" \
+      app_code="${APP_SRC#*-}"
+      fn_zip="$(mktemp -d)/fn.zip"
+      "$(command -v python || command -v python3)" -c 'import sys,zipfile
+z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.py", "def h(e, c): return 0\n"); z.close()' \
+        "$(win_path "${fn_zip}")"
+      exposure_check 04/RequireOwnerTag "app deployer: lambda:CreateFunction untagged" \
         "${A_KEY}" "${A_SECRET}" "${A_TOKEN}" -- \
-        aws ecs create-service --cluster "${NOPE}" --service-name "${NOPE}" \
-          --task-definition "${NOPE}" --desired-count 0 --region "${TEST_REGION}"
+        aws lambda create-function --function-name "${NOPE}" --runtime python3.12 \
+          --handler index.h --zip-file "fileb://$(win_path "${fn_zip}")" \
+          --role "arn:aws:iam::${TARGET_ACCOUNT}:role/${app_code}-${NOPE}" \
+          --region "${TEST_REGION}"
     else
       emit AMBIG "assume ${APP_CLONE}" "app-deployer" "clone created but could not be assumed"
     fi

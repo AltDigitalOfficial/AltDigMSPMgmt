@@ -264,8 +264,19 @@ resolve_target() {
 # at all — a half-applied attachment set is a confusing state to diagnose.
 NEEDS_CONFIRM=0
 while IFS=$'\t' read -r pfile ptargets; do
+  pfile="$(printf '%s' "${pfile}" | tr -d ' \r')"
+  ptargets="$(printf '%s' "${ptargets}" | tr -d ' \r')"
   [[ "${pfile}" =~ ^#.*$ || -z "${pfile}" ]] && continue
-  [[ ",${ptargets}," == *",members,"* || ",${ptargets}," == *",root,"* ]] && NEEDS_CONFIRM=1
+  # Only the files this run will actually attach. Under --only, a manifest
+  # line for some other policy must not demand --confirm-production: a
+  # Sandbox-only run that needs the production flag teaches people to pass it
+  # by reflex, which is the flag not working.
+  in_run=0
+  for f in "${FILES[@]}"; do [[ "$(basename "${f}")" == "${pfile}" ]] && in_run=1; done
+  [[ ${in_run} -eq 1 ]] || continue
+  if [[ ",${ptargets}," == *",members,"* || ",${ptargets}," == *",root,"* ]]; then
+    NEEDS_CONFIRM=1
+  fi
 done < "${MANIFEST}"
 [[ ${NEEDS_CONFIRM} -eq 0 ]] || confirm_production
 

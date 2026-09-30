@@ -24,9 +24,22 @@
 # Columns: <policy file>  <TAB>  <comma-separated targets>
 
 00-deny-leave-and-close-account.json	root
-01-protect-detective-controls.json	sandbox,members,security,infra
-02-protect-data-protection.json	sandbox,members,security,infra
-03-protect-platform-identity.json	sandbox,members,security,infra
+# 01-03 are mid-swap (B-135). The originals exempt role/Platform* by
+# pattern; the -v2 files exempt named principals only. Each is ONE policy
+# object attached to several OUs, so editing the original in place would
+# change Members, Security and Infrastructure in the same API call as
+# Sandbox. The v2s are separate objects: proven on Sandbox first, then
+# swapped onto each other OU in 15.4, attaching the v2 before detaching the
+# original, never the other way round. With 10 SCPs allowed per OU the swap
+# goes one policy at a time. deploy-policies.sh never detaches; the detach is
+# a deliberate step of its own. When every OU carries the v2s, the originals
+# are retired and these lines go.
+01-protect-detective-controls.json	members,security,infra
+02-protect-data-protection.json	members,security,infra
+03-protect-platform-identity.json	members,security,infra
+01-protect-detective-controls-v2.json	sandbox
+02-protect-data-protection-v2.json	sandbox
+03-protect-platform-identity-v2.json	sandbox
 
 # 04 is sandbox-only until a tenant exists to negotiate it with. It is the
 # only policy in this set that denies ordinary CREATION rather than

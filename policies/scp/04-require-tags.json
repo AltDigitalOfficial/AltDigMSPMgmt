@@ -22,9 +22,12 @@
         },
         "ArnNotLike": {
           "aws:PrincipalArn": [
-            "arn:aws:*:*:*:*role/Platform*",
-            "arn:aws:*:*:*:*role/OrganizationAccountAccessRole*",
-            "arn:aws:*:*:*:*role/stacksets-exec-*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer",
+            "arn:aws:iam::*:role/PlatformExerciseHarness",
+            "arn:aws:iam::*:role/PlatformRestoreExecution",
+            "arn:aws:iam::*:role/PlatformHarnessProbe",
             "arn:aws:iam::*:role/aws-service-role/*"
           ]
         }
@@ -51,9 +54,12 @@
         },
         "ArnNotLike": {
           "aws:PrincipalArn": [
-            "arn:aws:*:*:*:*role/Platform*",
-            "arn:aws:*:*:*:*role/OrganizationAccountAccessRole*",
-            "arn:aws:*:*:*:*role/stacksets-exec-*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer",
+            "arn:aws:iam::*:role/PlatformExerciseHarness",
+            "arn:aws:iam::*:role/PlatformRestoreExecution",
+            "arn:aws:iam::*:role/PlatformHarnessProbe",
             "arn:aws:iam::*:role/aws-service-role/*"
           ]
         }
@@ -80,9 +86,12 @@
         },
         "ArnNotLike": {
           "aws:PrincipalArn": [
-            "arn:aws:*:*:*:*role/Platform*",
-            "arn:aws:*:*:*:*role/OrganizationAccountAccessRole*",
-            "arn:aws:*:*:*:*role/stacksets-exec-*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer",
+            "arn:aws:iam::*:role/PlatformExerciseHarness",
+            "arn:aws:iam::*:role/PlatformRestoreExecution",
+            "arn:aws:iam::*:role/PlatformHarnessProbe",
             "arn:aws:iam::*:role/aws-service-role/*"
           ]
         }
@@ -114,9 +123,12 @@
         },
         "ArnNotLike": {
           "aws:PrincipalArn": [
-            "arn:aws:*:*:*:*role/Platform*",
-            "arn:aws:*:*:*:*role/OrganizationAccountAccessRole*",
-            "arn:aws:*:*:*:*role/stacksets-exec-*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer",
+            "arn:aws:iam::*:role/PlatformExerciseHarness",
+            "arn:aws:iam::*:role/PlatformRestoreExecution",
+            "arn:aws:iam::*:role/PlatformHarnessProbe",
             "arn:aws:iam::*:role/aws-service-role/*"
           ]
         }
@@ -146,9 +158,12 @@
         },
         "ArnNotLike": {
           "aws:PrincipalArn": [
-            "arn:aws:*:*:*:*role/Platform*",
-            "arn:aws:*:*:*:*role/OrganizationAccountAccessRole*",
-            "arn:aws:*:*:*:*role/stacksets-exec-*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer",
+            "arn:aws:iam::*:role/PlatformExerciseHarness",
+            "arn:aws:iam::*:role/PlatformRestoreExecution",
+            "arn:aws:iam::*:role/PlatformHarnessProbe",
             "arn:aws:iam::*:role/aws-service-role/*"
           ]
         }
@@ -186,9 +201,14 @@
         },
         "ArnNotLike": {
           "aws:PrincipalArn": [
-            "arn:aws:*:*:*:*role/Platform*",
-            "arn:aws:*:*:*:*role/OrganizationAccountAccessRole*",
-            "arn:aws:*:*:*:*role/stacksets-exec-*",
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer",
+            "arn:aws:iam::*:role/PlatformSecurityResponder",
+            "arn:aws:iam::*:role/PlatformRestoreWorker",
+            "arn:aws:iam::*:role/PlatformExerciseHarness",
+            "arn:aws:iam::*:role/PlatformBackupService",
+            "arn:aws:iam::*:role/PlatformRestoreExecution",
             "arn:aws:iam::*:role/aws-service-role/*"
           ]
         }

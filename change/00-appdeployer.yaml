@@ -53,6 +53,16 @@ Parameters:
       Used to scope every resource pattern below, so two applications in one
       account cannot deploy over each other.
 
+  AllowedRegions:
+    Type: CommaDelimitedList
+    Description: >-
+      Regions the application may deploy compute into. Pass
+      PLATFORM_ALLOWED_REGIONS from config/platform.env. No default, because a
+      default would be a second copy of the list that nothing keeps in step
+      with SCP 06. Scopes TheApplicationsOwnCompute, which until B-136 had no
+      region limit of its own and relied on an SCP exemption it should never
+      have had.
+
   OidcProviderUrl:
     Type: String
     Default: 'https://token.actions.githubusercontent.com'
@@ -241,7 +251,7 @@ Resources:
               - 'iam:SetDefaultPolicyVersion'
             Resource:
               - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/PlatformAppDeployerBoundary-*'
-              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/PlatformAppDeployer-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/TenantAppDeployer-*'
 
           - Sid: NeverDisarmTheDetectiveControl
             Effect: Deny
@@ -277,10 +287,18 @@ Resources:
   AppDeployerRole:
     Type: AWS::IAM::Role
     Properties:
-      # Platform-prefixed so the SCP that stops a member account editing
-      # platform roles also protects this one. A tenant that could rewrite its
-      # own deployer role's trust policy could point it at any repository.
-      RoleName: !Sub 'PlatformAppDeployer-${ApplicationCode}'
+      # NOT Platform-prefixed, deliberately (B-136, D-026). It was, so that
+      # SCP 03's protection of platform roles would stop a tenant rewriting its
+      # own deployer's trust policy and pointing it at any repository. But the
+      # same prefix put it inside every SCP's platform exemption, so a pipeline
+      # AltDigital does not control was exempt from region restriction,
+      # required tags and the bypass controls.
+      #
+      # SCP 03 now protects TenantAppDeployer-* by name. The protection stays
+      # and the exemption goes. Changing RoleName replaces the role and changes
+      # its ARN, and the tenant pipeline's configured role ARN must change at
+      # the same time.
+      RoleName: !Sub 'TenantAppDeployer-${ApplicationCode}'
       Description: >-
         The single control point for tenant deployments into this account.
         Assumable only by the tenant CI identity over OIDC. Every assumption is
@@ -333,6 +351,9 @@ Resources:
           IssuerHost: !Select [1, !Split ['https://', !Ref OidcProviderUrl]]
       Tags:
         - { Key: platform-managed, Value: 'true' }
+        # The platform builds it, even though the tenant's pipeline uses it.
+        # CLAUDE.md hard rule, B-127.
+        - { Key: platform-layer, Value: infrastructure }
         - { Key: platform-purpose, Value: tenant-deployment }
         - { Key: platform-application, Value: !Ref ApplicationCode }
 
@@ -372,6 +393,12 @@ Resources:
               - 'elasticloadbalancing:*'
               - 'application-autoscaling:*'
             Resource: '*'
+            # The role's own region limit, alongside SCP 06 and not instead of
+            # it. Same reasoning as the boundary: a policy on the role travels
+            # with the role, and an SCP stays with the OU.
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': !Ref AllowedRegions
           - Sid: ImagesAndArtifacts
             Effect: Allow
             Action: ['ecr:*']

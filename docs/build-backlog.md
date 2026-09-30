@@ -5734,6 +5734,43 @@ The pathed-role deny must also exempt `/aws-service-role/` and
 **Blocks Arc8** — these accounts would be the first developer-accessible
 accounts in Members. Close before vesting.
 
+**Built 2026-09-30, Sandbox only.** Exemptions are now named principals, each
+list derived by `scripts/derive-scp-exemptions.py` from the templates, and each
+entry justified against what the role actually does:
+- 01–03 are new policy objects (`*-v2.json`) swapped onto Sandbox
+  attach-then-detach. The originals are untouched on Members, Security and
+  Infrastructure until 15.4 does the same swap there.
+- 04–07 were edited in place. They are attached to Sandbox only.
+
+Other changes:
+- The patterns are exact `arn:aws:iam::*:role/<Name>`. The dead
+  `assumed-role` variants are gone (B-001 correction).
+- 03's squatting and modification denies now also cover `stacksets-exec-*`,
+  `OrganizationAccountAccessRole*` and `TenantAppDeployer-*`.
+- 01's log-group denies are scoped to platform log groups
+  (`/aws/platform/*`, `/aws/lambda/platform-*`,
+  `/aws/vendedlogs/states/platform-*`). A tenant's own application log groups
+  are the tenant's, and the unscoped version would have broken every tenant
+  stack that sets `RetentionInDays` once the app deployer lost its exemption.
+- `PlatformDeployer` (15.3) is reserved in every list except
+  `DenyQuorumExecutorCreationEvenByOperators`, which still exempts
+  `stacksets-exec-*` only (B-125).
+
+**No blanket pathed-role deny.** With exact patterns, a path cannot match any
+exemption: `role/Platform*` does not match `role/x/PlatformY`. A pathed-role
+deny would add nothing, and it would refuse the `/service-role/` roles that
+AWS tooling creates. The harness keeps the pathed case and asserts that it is
+exempt from nothing.
+
+**Harness, Sandbox Canary, 2026-09-30:**
+- all three squatting creations are refused, or permitted and inert in the
+  pathed case;
+- every exemption check on the pathed role holds;
+- nothing that passed before regressed.
+
+**Remaining** — 15.4 swaps 01–03 v2 onto the other OUs, then retires the
+originals.
+
 ---
 
 ## B-136 · The tenant app deployer is exempt from the guardrails meant for it
@@ -5760,6 +5797,28 @@ unaccounted-for credential. Changing `RoleName` replaces the role, which
 changes the ARN the tenant pipeline assumes.
 
 **Blocks Arc8** — Arc8's pipeline would be the first real user of the role.
+
+**Correction, 2026-09-30.** The ECS half of the evidence above is void. ECS
+answers "TaskDefinition not found" before it authorizes. The non-exempt
+harness subject, which SCP 04 certainly applies to, got the same answer. So
+the check could not distinguish an exemption from a denial. The 06 half
+(Lambda in eu-west-1) stands. The 04 exemption was real, but the proof for it
+is the policy text, not that run. The harness now tests 04 with an untagged
+`lambda:CreateFunction`, having first shown that Lambda authorizes before it
+validates.
+
+**Built 2026-09-30:**
+- `change/00-appdeployer.yaml` names the role `TenantAppDeployer-<app>` (D-026),
+  scopes its compute to the `AllowedRegions` parameter, and tags it
+  `platform-layer: infrastructure`.
+- SCP 03 v2 and the developer boundary protect `TenantAppDeployer-*` by name.
+- `change/src/reconcile.py` recognises both names, anchored at the role-name
+  boundary (`scripts/test-reconcile.py`).
+- The harness clone takes the new name and is refused by 04 and 06.
+
+**Not yet done** — redeploying `PlatformAppDeployer-demo` in Sandbox Canary as
+`TenantAppDeployer-demo`. That replaces the role, so it waits on the operator's
+confirmation, and the demo pipeline's role ARN changes with it.
 
 ---
 

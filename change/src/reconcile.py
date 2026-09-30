@@ -181,6 +181,21 @@ DEPLOYMENT_EVENTS = {
 PLATFORM_PRINCIPALS = ("OrganizationAccountAccessRole", "stacksets-exec-",
                        "AWSCloudFormationStackSetExecutionRole", "Platform")
 
+# The tenant CI role. Renamed from PlatformAppDeployer- to TenantAppDeployer-
+# so that no SCP exemption covers it (B-136). The old prefix stays recognised
+# until no reconciliation window can still contain its events, so a deploy made
+# just before the rename does not reclassify as an unknown credential.
+#
+# Matched with the leading '/', which is the role-name boundary in both
+# role/<name> and assumed-role/<name>/<session>. A bare substring would let a
+# role called EvilTenantAppDeployer-x pass as the tenant's deployer.
+TENANT_DEPLOYER_MARKERS = ("/TenantAppDeployer-", "/PlatformAppDeployer-")
+
+
+def is_tenant_deployer(arn):
+    s = str(arn or "")
+    return any(m in s for m in TENANT_DEPLOYER_MARKERS)
+
 
 def deployer_class(principal_arn):
     """tenant | platform | unknown.
@@ -192,7 +207,8 @@ def deployer_class(principal_arn):
     about the control point itself rather than about paperwork.
     """
     arn = str(principal_arn or "")
-    if "PlatformAppDeployer" in arn:
+    # Tenant first: the old PlatformAppDeployer- name also contains "Platform".
+    if is_tenant_deployer(arn):
         return "tenant"
     for marker in PLATFORM_PRINCIPALS:
         if marker in arn:
@@ -212,7 +228,7 @@ def classify_event(event):
     # Only AppDeployer assumptions count as the control point. A
     # AssumeRoleWithWebIdentity for some other role is somebody else's
     # federation and is not a deployment into this estate.
-    if kind == "appdeployer-assumption" and "PlatformAppDeployer" not in str(
+    if kind == "appdeployer-assumption" and not is_tenant_deployer(
             (detail.get("requestParameters") or {}).get("roleArn", "")):
         return None
 
@@ -232,7 +248,7 @@ def classify_event(event):
         "resource": _resource_of(detail),
         "error_code": detail.get("errorCode"),
         "event_id": detail.get("eventID"),
-        "via_appdeployer": "PlatformAppDeployer" in arn,
+        "via_appdeployer": is_tenant_deployer(arn),
         "deployer": deployer_class(arn),
     }
 

@@ -1432,3 +1432,44 @@ existing PCI derivation applies. A narrower partial close is possible if SAQ A
 tenants become common: a founder decision that processor-hosted card handling
 does not bring the platform into scope, with the processor integration recorded
 at vesting.
+
+---
+
+## D-026 · The tenant deploy role is `TenantAppDeployer-<app>`, not `AppDeployer`
+
+**Design position** — [08-change-and-release.md](../design/08-change-and-release.md)
+names the role `AppDeployer`, one per member account (08:19, 08:46). The same
+document requires it to be *"denied from touching platform-managed resources
+(SCP)"*.
+
+**Actual** — `TenantAppDeployer-<app>`, set in `change/00-appdeployer.yaml`.
+
+It was `PlatformAppDeployer-<app>` from phase 8.1 until 2026-09-30. That name
+was itself an unrecorded departure. The `Platform` prefix was chosen so that
+SCP 03 would protect the role from tampering. But every SCP exempted
+`role/Platform*`, so the prefix also exempted a pipeline AltDigital does not
+control from region restriction, required tags and the bypass controls. The
+harness proved it (B-136).
+
+**Reason** — the name has three jobs:
+- say whose it is, which is the tenant's pipeline;
+- carry the per-application suffix, so two applications in one account
+  cannot deploy over each other (08 assumes one application per account);
+- match no exemption pattern.
+
+`AppDeployer-<app>` would have served as well. `TenantAppDeployer-` was chosen
+so that reading the role name at alarm time answers "whose is this" without
+looking anything up. SCP 03 v2 and the developer boundary protect
+`TenantAppDeployer-*` by name. The protection the prefix used to buy stays,
+and the exemption goes.
+
+**Consequences** —
+- Renaming replaces the role, so the tenant pipeline's configured role ARN
+  must change at the same moment.
+- `change/src/reconcile.py` recognises both names, so events from before the
+  rename still classify as tenant deploys (`scripts/test-reconcile.py`).
+- The template now takes `AllowedRegions`, and scopes its compute statement
+  to those regions on the role itself.
+
+**Closing condition** — design 08 amended to name the role
+`TenantAppDeployer-<app>`, or the naming convention generally.

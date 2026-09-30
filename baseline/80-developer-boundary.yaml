@@ -129,10 +129,15 @@ Resources:
             Effect: Deny
             Action:
               - 'iam:*'
+            # OrganizationAccountAccessRole* with the trailing wildcard, and the
+            # tenant deployer, so this list matches what SCP 03 protects (B-135,
+            # B-136). A name the SCP protects and the boundary does not is the
+            # gap the two layers exist to avoid.
             Resource:
               - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Platform*'
-              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/OrganizationAccountAccessRole'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/OrganizationAccountAccessRole*'
               - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/stacksets-exec-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/TenantAppDeployer-*'
               - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/PlatformDeveloperBoundary'
 
           # THE recursion guard, and the reason the boundary is not merely a
