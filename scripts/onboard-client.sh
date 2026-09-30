@@ -74,7 +74,7 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 QUESTIONNAIRE=""; ROSTER=""; TRUVEON_ROSTER=""; CONFIRM=0; SKIP_TRUVEON=0
-DEFER_JIRA=0; FROM_STEP=0
+DEFER_JIRA=0; FROM_STEP=0; ONLY_ENVS=""
 
 usage() {
   cat <<'USAGE'
@@ -98,6 +98,9 @@ Usage: onboard-client.sh --questionnaire <path> [options]
                     here. Without this a real run stops at step 4.
   --from N          Resume at step N. Every step is idempotent, so this is a
                     convenience rather than a requirement.
+  --environments    Vest only these environments now (e.g. dev,test), when the
+                    account quota cannot hold the whole set. Re-run without it
+                    later; existing accounts are found, not recreated.
   --list            Print the steps and exit.
 
 Two kinds of stop, and the difference matters:
@@ -144,6 +147,7 @@ while [[ $# -gt 0 ]]; do
     --skip-truveon)    SKIP_TRUVEON=1; shift ;;
     --defer-jira)      DEFER_JIRA=1; shift ;;
     --from)            FROM_STEP="$2"; shift 2 ;;
+    --environments)    ONLY_ENVS="$2"; shift 2 ;;
     --list)
       printf '%-4s %-28s %s\n' "STEP" "NAME" "DESIGN 13"
       for s in "${STEP_NAMES[@]}"; do
@@ -540,6 +544,11 @@ if should_run 5 aws-accounts-and-baseline; then
   fi
   if [[ ${SKIP_TRUVEON} -eq 1 ]]; then
     VEST_ARGS+=(--defer-truveon)
+  fi
+  # Staged vesting. Everything after step 5 reads the accounts from the
+  # registry, so a later run without --environments picks up the rest.
+  if [[ -n "${ONLY_ENVS}" ]]; then
+    VEST_ARGS+=(--environments "${ONLY_ENVS}")
   fi
   attempt 5 aws-accounts-and-baseline \
     bash "${REPO_ROOT}/scripts/vest-client.sh" "${VEST_ARGS[@]}"

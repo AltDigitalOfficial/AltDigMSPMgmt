@@ -29,12 +29,12 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-QUESTIONNAIRE=""; CONFIRM=0; DEFER_TRUVEON=0
+QUESTIONNAIRE=""; CONFIRM=0; DEFER_TRUVEON=0; ONLY_ENVS=""
 
 usage() {
   cat <<'USAGE'
 Usage: vest-client.sh --questionnaire <path> [--dry-run] [--confirm-vest]
-                      [--defer-truveon]
+                      [--defer-truveon] [--environments dev,test]
 
   --questionnaire   Completed questionnaire, YAML. Validated and derived by
                     scripts/derive-vesting.py before anything is created.
@@ -45,6 +45,11 @@ Usage: vest-client.sh --questionnaire <path> [--dry-run] [--confirm-vest]
   --defer-truveon   Proceed without a linked Truveon tenant for the client.
                     Records a declared override on each account rather than
                     skipping silently. See the Truveon section below.
+  --environments    Vest only these environments, comma-separated, from the
+                    set the questionnaire derives. For vesting in stages when
+                    the account quota cannot hold the whole set yet. Re-run
+                    later without it: accounts that exist are found, not
+                    recreated, so the next run creates only what is missing.
 USAGE
 }
 
@@ -54,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)       DRY_RUN=1; shift ;;
     --confirm-vest)  CONFIRM=1; shift ;;
     --defer-truveon) DEFER_TRUVEON=1; shift ;;
+    --environments)  ONLY_ENVS="$2"; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
@@ -117,13 +123,28 @@ COMPLIANCE="$("${PY}" -c "import sys,yaml;d=yaml.safe_load(open(sys.argv[1],enco
 RETENTION="$(d_get "['retention_floor_days']")"
 EGRESS="$(d_get "['egress_profile']")"
 ENVS="$(printf '%s' "${DERIVED}" | "${PY}" -c "import sys,json;print(' '.join(json.load(sys.stdin)['environments']))")"
+ALL_ENVS="${ENVS}"
+
+# Staged vesting: a subset of the derived environments, in the derived order.
+# Anything not in the derived set is refused rather than ignored -- a typo of
+# `prod` must not become a run that quietly vests nothing and reports success.
+if [[ -n "${ONLY_ENVS}" ]]; then
+  SUBSET=""
+  for want in ${ONLY_ENVS//,/ }; do
+    [[ " ${ALL_ENVS} " == *" ${want} "* ]]       || die "--environments: '${want}' is not one of this tenant's environments (${ALL_ENVS})."
+  done
+  for env in ${ALL_ENVS}; do
+    if [[ ",${ONLY_ENVS}," == *",${env},"* ]]; then SUBSET+="${env} "; fi
+  done
+  ENVS="${SUBSET% }"
+fi
 
 hr
 log "Vesting"
 log "  partner     : ${PARTNER}"
 log "  client      : ${CLIENT} (${CLIENT_NAME})"
 log "  application : ${APP}"
-log "  environments: ${ENVS}"
+log "  environments: ${ENVS}$([[ "${ENVS}" != "${ALL_ENVS}" ]] && echo "   (STAGED — of ${ALL_ENVS})")"
 log "  model       : ${SERVICE_MODEL}   compliance: ${COMPLIANCE}"
 log "  retention   : ${RETENTION} days"
 log "  egress      : ${EGRESS}"
@@ -431,9 +452,9 @@ info "Vesting evidence record"
 LOG_ARCHIVE_ACCT="$(get_param /org/account/altdig-security-logarchive)"
 EVIDENCE_KEY="vesting-evidence/${PARTNER}/${CLIENT}/${APP}/$(date -u +%Y%m%dT%H%M%SZ).json"
 
-EVIDENCE="$("${PY}" - "${QPATH}" "${CREATED_IDS}" "${TRUVEON_LINKED}" <<'PYEOF'
+EVIDENCE="$("${PY}" - "${QPATH}" "${CREATED_IDS}" "${TRUVEON_LINKED}" "${ENVS}" "${ALL_ENVS}" <<'PYEOF'
 import hashlib, json, sys, datetime, pathlib
-qpath, ids, linked = sys.argv[1], sys.argv[2], sys.argv[3]
+qpath, ids, linked, envs, all_envs = sys.argv[1:6]
 raw = pathlib.Path(qpath).read_bytes()
 print(json.dumps({
     "record_type": "vesting-evidence",
@@ -445,6 +466,11 @@ print(json.dumps({
     "questionnaire_sha256": hashlib.sha256(raw).hexdigest(),
     "questionnaire_filename": pathlib.Path(qpath).name,
     "accounts": dict(p.split(":", 1) for p in ids.split() if ":" in p),
+    # Staged vesting (--environments). Recorded so a record covering two of
+    # three accounts is not read as the tenant's whole set.
+    "environments_this_run": envs.split(),
+    "environments_derived": all_envs.split(),
+    "staged": envs.split() != all_envs.split(),
     # Linked is what vesting checks. Receipt is never verified at vesting --
     # the accounts have emitted nothing yet -- and the record says so
     # rather than implying a check that did not happen. D-021.
@@ -526,5 +552,11 @@ else
   log "The client and accounts are in 'provisioning', NOT 'active'. Promoting"
   log "them is the verification sweep's job (phase 12.5), not this script's —"
   log "an account is vested when it is proven working, not when it is created."
+fi
+if [[ "${ENVS}" != "${ALL_ENVS}" ]]; then
+  log ""
+  warn "STAGED: vested ${ENVS} of ${ALL_ENVS}. The tenant is incomplete and cannot go"
+  warn "live. Re-run without --environments when the rest can be created; accounts"
+  warn "that exist are found, not recreated."
 fi
 hr
