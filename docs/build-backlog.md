@@ -2264,6 +2264,33 @@ around it.
 "an account is fully baselined" becomes a state somebody asserts rather than
 assumes.
 
+**Built 2026-10-01: the retry option.** The baseline StackSets now target
+Members, so Arc8's first vesting would have hit this.
+`scripts/settle-baseline.sh --account <id>` runs from Infra Tooling as
+delegated admin, in three phases:
+1. It waits until every StackSet targeting an OU on the account's path has an
+   instance there and none is still running.
+2. It retries each non-`CURRENT` instance once, in dependency order (config
+   before kms-secrets, log-data-protection before instrumentation). The retry
+   is `update-stack-instances` with no overrides, so nothing changes except
+   finishing what failed.
+3. It refuses with the list unless every instance is `CURRENT`.
+
+`INOPERABLE` instances are not retried, because a re-run cannot repair them.
+
+`vest-client.sh` step 6b runs it for each new account, and stops vesting on
+failure.
+
+Proved on real accounts:
+- Canary: 11 stack sets, all `CURRENT`, nothing retried, exit 0.
+- Exercise: retried `platform-canary-smoke` once, which failed again on its
+  real fault (B-062 correction above), and refused with exit 1, naming the
+  instance.
+
+The "tolerate the dependency being absent" option stays open. It is the more
+robust fix, and the trigger is a second dependency failure that one retry does
+not cure.
+
 ---
 
 ## B-063 · Isolation is verified at the control plane, not by reachability

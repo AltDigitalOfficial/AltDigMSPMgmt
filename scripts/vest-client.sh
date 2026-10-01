@@ -489,6 +489,26 @@ for pair in ${CREATED_IDS}; do
 done
 
 # ---------------------------------------------------------------------------
+# 6b. Baseline settles (B-062)
+# ---------------------------------------------------------------------------
+# Every baseline StackSet reaches a new account at once, in no order, and two
+# depend on others (kms-secrets on the Config recorder, instrumentation on the
+# logs key). The first attempt fails, nothing retries it, and the account
+# looks baselined while it has no instrumentation. settle-baseline.sh waits,
+# retries once in dependency order, and refuses unless every instance is
+# CURRENT. Failure stops vesting. A re-run resumes.
+hr
+info "Baseline settles"
+for pair in ${CREATED_IDS}; do
+  ACCT="${pair##*:}"
+  [[ "${ACCT}" == "<new>" ]] && { skip "baseline for ${pair%%:*} (dry run; account not created)"; continue; }
+  SETTLE_ARGS=(--account "${ACCT}")
+  [[ "${DRY_RUN}" == "1" ]] && SETTLE_ARGS+=(--dry-run)
+  bash "${REPO_ROOT}/scripts/settle-baseline.sh" "${SETTLE_ARGS[@]}" \
+    || die "The baseline did not settle for ${ACCT}. Do not treat it as vested. Fix and re-run vesting; it resumes."
+done
+
+# ---------------------------------------------------------------------------
 # 7. Registry: account records
 # ---------------------------------------------------------------------------
 hr
