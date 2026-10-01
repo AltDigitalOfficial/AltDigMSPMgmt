@@ -235,6 +235,16 @@ cmd_put_partner() {
       chain cannot be met. Equal windows fail identically to longer ones."
   fi
 
+  # downstream_sla_pct / altdig_sla_pct: design 15's back-to-back pair.
+  # Captured at partner onboarding precisely so AltDigital's number can be
+  # compared with the partner's BEFORE signing -- partners/src/backtoback.py
+  # does the comparison. Absent is a finding, not a default: an unrecorded
+  # downstream commitment cannot be checked against.
+  #
+  # This comment lives HERE, not inside the heredoc. It used to sit between the
+  # JSON fields, where a heredoc passes it through verbatim, so every
+  # put-partner sent invalid JSON and failed. Found 2026-09-30 recording the
+  # first partner; no partner had ever been written.
   ddb_init
   put_item "$(cat <<JSON
 {
@@ -247,10 +257,6 @@ cmd_put_partner() {
   "notify_hours":     {"N": "${NOTIFY_HOURS}"},
   "altdig_hours":     {"N": "${ALTDIG_HOURS}"},
   "baa_state":        {"S": "${BAA:-unknown}"},
-  # design 15's back-to-back pair. Captured at partner onboarding precisely so
-  # AltDigital's number can be compared with the partner's BEFORE signing --
-  # partners/src/backtoback.py does the comparison. Absent is a finding, not a
-  # default: an unrecorded downstream commitment cannot be checked against.
   "downstream_sla_pct": $(ddb_str "${DOWNSTREAM_SLA:-}"),
   "altdig_sla_pct":     $(ddb_str "${ALTDIG_SLA:-}"),
   "owner":            $(ddb_str "${OWNER:-unassigned}"),
