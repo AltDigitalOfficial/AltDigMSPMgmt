@@ -446,16 +446,36 @@ fi
 # No tier services and no routing keys — see the header.
 
 if should_run 3 pagerduty-pass-1; then
-  if [[ -z "${PAGERDUTY_TOKEN:-}" ]]; then
+  # The credential is proved here, before any account exists -- design 13's
+  # reason for putting PagerDuty first. It used to be proved by demanding
+  # PAGERDUTY_TOKEN in this shell, which contradicted the rest of the
+  # platform: the token lives in Secrets Manager (set-pagerduty-token.sh), and
+  # pagerduty-apply.sh reads it from there precisely so nobody exports it and
+  # leaves it in a scrollback. The renderer below does not use the token at
+  # all. So: an exported token still wins, as it does in pagerduty-apply.sh;
+  # otherwise pagerduty-check.sh confirms the STORED key authenticates, with a
+  # read-only call, and reports write access as unproven.
+  PD_CRED_OK=0
+  PD_CHECK_OUT="$(mktemp)"
+  if [[ -n "${PAGERDUTY_TOKEN:-}" ]]; then
+    PD_CRED_OK=1
+  elif bash "${REPO_ROOT}/scripts/pagerduty-check.sh" >"${PD_CHECK_OUT}" 2>&1; then
+    PD_CRED_OK=1
+    ok "stored PagerDuty API key authenticates (pagerduty-check.sh)"
+  fi
+  if [[ ${PD_CRED_OK} -eq 0 ]]; then
+    sed 's/^/    /' "${PD_CHECK_OUT}"
+    rm -f "${PD_CHECK_OUT}"
     blocked 3 pagerduty-pass-1 \
-"PAGERDUTY_TOKEN is not set in this shell.
+"No usable PagerDuty API key: none exported, and the stored key in Secrets
+Manager did not authenticate (see pagerduty-check.sh's output above).
 
 design 13 puts the external systems before the AWS accounts precisely so that a
 credential problem costs nothing. This is that check working.
 
-  scripts/set-pagerduty-token.sh        # stores it for the platform
-  export PAGERDUTY_TOKEN=...            # for terraform, this shell only"
+  scripts/set-pagerduty-token.sh        # store or rotate it for the platform"
   else
+    rm -f "${PD_CHECK_OUT}"
     attempt 3 pagerduty-pass-1 \
       bash "${REPO_ROOT}/scripts/render-pagerduty-tenants.sh" "${DRY_FLAG[@]}"
     if [[ "${DRY_RUN}" != "1" && -z "${HALTED}" ]]; then
