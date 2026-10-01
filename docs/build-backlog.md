@@ -5830,9 +5830,19 @@ validates.
   boundary (`scripts/test-reconcile.py`).
 - The harness clone takes the new name and is refused by 04 and 06.
 
-**Not yet done** — redeploying `PlatformAppDeployer-demo` in Sandbox Canary as
-`TenantAppDeployer-demo`. That replaces the role, so it waits on the operator's
-confirmation, and the demo pipeline's role ARN changes with it.
+**Redeployed 2026-09-30** — `platform-appdeployer-demo` in Sandbox Canary now
+creates `TenantAppDeployer-demo`, with the operator's confirmation that nothing
+used the old role. CloudFormation replaced the role and modified its boundary
+and policy in place. The OIDC provider was untouched. Verified:
+- the boundary is `PlatformAppDeployerBoundary-demo`;
+- the compute statement carries the `aws:RequestedRegion` condition for the
+  three approved regions;
+- the role is tagged `platform-layer: infrastructure`.
+
+**Still to prove** — OIDC federation under the RCP (D-003 correction). It
+needs one GitHub Actions run from `altdigital/demo-service`, branch `release`,
+that assumes the role. That is the last step before the RCP goes to Members,
+so that Arc8's first deploy is not the first OIDC assumption under the RCP.
 
 ---
 
