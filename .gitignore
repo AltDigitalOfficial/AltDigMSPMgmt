@@ -22,6 +22,11 @@ config/identity.env*
 config/quorum.env*
 !config/quorum.env.example
 
+# Infrastructure change approvers: Atlassian accountIds, same class of data as
+# quorum.env. Published by scripts/sync-change-approvers.sh.
+config/change-approvers.env*
+!config/change-approvers.env.example
+
 # Support pricing. Commercial terms, not source: a rate does not belong in git
 # history, in a diff, or on a screenshare. Copy config/rates.env.example.
 #

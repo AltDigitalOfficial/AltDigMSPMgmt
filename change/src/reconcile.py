@@ -102,6 +102,86 @@ _FACTS = {}
 # change record.
 _APPROVAL_CACHE = {}
 
+# Who may approve an INFRASTRUCTURE change, and how many must. Published by
+# scripts/sync-change-approvers.sh from a gitignored file of accountIds.
+#
+# Jira's own rule is "any N members of the Approver group", which does not check
+# identities against a list and does not exclude the requester. Decided
+# 2026-10-01: two approvals from Wayne, Art and Tina, and the person who built
+# the change does not count. Applied only to changes in AltDigital's ops
+# project, which is where every PLATFORM deployment is reconciled. A tenant's
+# application changes follow the tenant's own process.
+INFRA_APPROVERS_PARAM = os.environ.get("INFRA_APPROVERS_PARAM",
+                                       "/platform/change/infrastructure-approvers")
+_INFRA_APPROVERS = {}
+
+
+def infrastructure_approvers():
+    """(accountIds, minimum), or (None, reason) when the list cannot be read.
+
+    Unreadable is NOT "nobody is authorised". Treating it that way would turn a
+    missing parameter into every platform deployment reported as unapproved --
+    a configuration fault presenting as a compliance failure, the shape this
+    module refuses everywhere else. The caller records that identities were
+    not checked instead.
+    """
+    if "value" in _INFRA_APPROVERS:
+        return _INFRA_APPROVERS["value"]
+    try:
+        raw = ssm.get_parameter(Name=INFRA_APPROVERS_PARAM)["Parameter"]["Value"]
+        data = json.loads(raw)
+        approvers = {str(a) for a in data["approvers"] if str(a).strip()}
+        minimum = int(data.get("minimum", 2))
+        value = (approvers, minimum) if approvers else (
+            None, f"{INFRA_APPROVERS_PARAM} lists nobody")
+    except Exception as exc:                       # noqa: BLE001
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        value = (None, f"could not read {INFRA_APPROVERS_PARAM}: "
+                       f"{code or type(exc).__name__}; run "
+                       "scripts/sync-change-approvers.sh")
+    _INFRA_APPROVERS["value"] = value
+    return value
+
+
+def approving_accounts(approvals):
+    """accountIds of everyone who APPROVED, across every approval step.
+
+    The same reading as quorum/src/verify.py's decided_approvals, confirmed
+    there against a live record: one approval object per workflow step, each
+    holding a list of approvers with their own decision. Two approvals means
+    two distinct people, not two steps. Duplicated rather than imported
+    because the two Lambdas are packaged separately.
+    """
+    seen = set()
+    for approval in approvals or []:
+        for entry in (approval.get("approvers") or []):
+            if (entry.get("approverDecision") or "").lower() != "approved":
+                continue
+            account = (entry.get("approver") or {}).get("accountId")
+            if account:
+                seen.add(account)
+    return seen
+
+
+def infrastructure_verdict(change, approvals):
+    """Apply the infrastructure rule to an otherwise-approved change.
+
+    Returns (approved, evidence).
+    """
+    authorised, minimum = infrastructure_approvers()
+    if authorised is None:
+        # `minimum` carries the reason here.
+        return True, ("JSM approval record; approver identities NOT checked "
+                      f"({minimum})")
+    counted = (approving_accounts(approvals) & authorised) \
+        - {change.get("reporter_account_id")}
+    if len(counted) >= minimum:
+        return True, (f"JSM approval record; {len(counted)} authorised "
+                      "infrastructure approver(s), requester excluded")
+    return False, (f"JSM approval record, but only {len(counted)} authorised "
+                   f"infrastructure approver(s) other than the requester; "
+                   f"{minimum} required")
+
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -406,6 +486,10 @@ def approved_changes(project):
                 "implementing", "awaiting implementation"),
             "created": f.get("created"),
             "updated": f.get("updated"),
+            # The requester, by accountId. Fetched all along and discarded;
+            # kept since 2026-10-01 because an infrastructure change's
+            # requester must not count towards its own approval.
+            "reporter_account_id": (f.get("reporter") or {}).get("accountId"),
             "labels": f.get("labels") or [],
             # Accounts a change claims to touch, by label. A convention rather
             # than a custom field, because a label needs no scheme change and
@@ -490,7 +574,11 @@ def is_approved(change):
     "not approved". Same rule as everywhere else in this module: a source that
     cannot be read has not returned a negative answer.
     """
-    cached = _APPROVAL_CACHE.get(change["key"])
+    # Keyed by layer as well as issue: with no ops project configured, a
+    # platform deployment falls back to the tenant's project, and the same
+    # record can then be judged under both rules in one run.
+    cache_key = (change["key"], change.get("layer"))
+    cached = _APPROVAL_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
@@ -508,6 +596,8 @@ def is_approved(change):
         decided = [(a.get("finalDecision") or "").lower() for a in approvals]
         if all(d == "approved" for d in decided):
             result = (True, "JSM approval record")
+            if change.get("layer") == "infrastructure":
+                result = infrastructure_verdict(change, approvals)
         else:
             result = (False, f"JSM approval record says {sorted(set(decided))}")
     elif approvals is not None:
@@ -517,6 +607,11 @@ def is_approved(change):
     else:
         result = (change["approved_by_status"],
                   "no approval record readable, fell back to the status name")
+        if change.get("layer") == "infrastructure" and result[0]:
+            # A status name carries no approver identities, so the
+            # infrastructure rule cannot be applied. Said, not implied.
+            result = (True, result[1] + "; infrastructure approver identities "
+                                        "NOT checked")
 
     # Cached OUTSIDE the change record. It used to be stashed on the dict
     # itself, which put `"_approved": [true, "fell back to ..."]` into every
@@ -526,7 +621,7 @@ def is_approved(change):
     # means something. Which source answered is exactly what somebody
     # assessing the finding needs: a status-name guess and a recorded approval
     # are not equally good grounds for accusing a tenant.
-    _APPROVAL_CACHE[change["key"]] = result
+    _APPROVAL_CACHE[cache_key] = result
     change["approval_evidence"] = result[1]
     return result
 
@@ -610,6 +705,14 @@ def reconcile(event, context=None):
             results.append(_unavailable(account_id, account_deployments,
                                         str(exc)))
             continue
+        # Records in AltDigital's ops project are infrastructure changes, and
+        # is_approved() holds them to the infrastructure approver rule. Only
+        # when the ops project is genuinely configured: the fallback to the
+        # tenant's project is already flagged as wrong for a platform
+        # deployment, and judging a tenant's records by AltDigital's approver
+        # list would compound it.
+        if deployer == "platform" and OPS_CHANGE_PROJECT:
+            changes = [dict(c, layer="infrastructure") for c in changes]
 
         matched_keys = set()
         for deployment in account_deployments:

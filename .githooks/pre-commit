@@ -27,13 +27,18 @@ source "${REPO_ROOT}/scripts/lib/common.sh"
 # PagerDuty routing keys in cleartext — neither existed when the line was
 # written, and neither would have been caught.
 #
-# .gitignore already covers all four. This is the second layer, for the case
+# quorum.env (accountIds and names), rates.env (pricing) and
+# change-approvers.env were covered by .gitignore alone until 2026-10-01, when
+# they were added here: the same gap this comment already describes, found in
+# the same way.
+#
+# .gitignore already covers all of these. This is the second layer, for the case
 # where someone used `git add -f` or edited the ignore rule. Both layers are
 # pattern-based now, for the same reason scripts/validate.sh stopped
 # enumerating directories by name: a list that has to be remembered eventually
 # will not be.
 BLOCKED="$(git diff --cached --name-only \
-  | grep -Ei '(^|/)(contacts|identity)\.env($|\.)|\.tfvars(\.json)?$|\.tfstate($|\.)|(^|/)\.env$|\.questionnaire\.(ya?ml|json)$|\.roster\.(ya?ml|json)$|^completed_qs/' \
+  | grep -Ei '(^|/)(contacts|identity|quorum|rates|change-approvers)\.env($|\.)|\.tfvars(\.json)?$|\.tfstate($|\.)|(^|/)\.env$|\.questionnaire\.(ya?ml|json)$|\.roster\.(ya?ml|json)$|^completed_qs/' \
   | grep -v '\.example$' | grep -v '^completed_qs/README\.md$' || true)"
 if [[ -n "${BLOCKED}" ]]; then
   echo "BLOCKED: these staged files carry personal data or credentials:" >&2

@@ -1514,3 +1514,42 @@ and the exemption goes.
 
 **Closing condition** — design 08 amended to name the role
 `TenantAppDeployer-<app>`, or the naming convention generally.
+
+---
+
+## D-027 · Arc8's application changes are reconciled nowhere the platform can see
+
+**Decided** — Jamie, 2026-10-01, for the OEight / Arc8 tenant.
+
+**Deviation** — design 08 reconciles every deployment against a change
+record. Arc8's *application* change records live in OEight's own Jira, which
+the platform's credential cannot read. Change reconciliation therefore reports
+every Arc8 application deployment as **UNAVAILABLE**: not approved, not
+unapproved, not checked.
+
+**The rule that applies instead**, enforced by how OEight's Jira is configured,
+not by the platform:
+- Two approvals per application change.
+- The development manager (Wayne) is the first approver. He runs the team and
+  owns the outcome; he does not make the changes himself.
+- The second approver is any of Tina, Jamie or Art.
+- The requester is a member of the development team, typically the senior
+  developer, and is never one of the approvers.
+
+**Infrastructure is unaffected.** Platform deployments into Arc8's accounts
+reconcile against AltDigital's ops project, and since 2026-10-01 count only
+approvals from the infrastructure approver list (Wayne, Art, Tina; two;
+requester excluded): `config/change-approvers.env`,
+`scripts/sync-change-approvers.sh`, `is_approved()` in `change/src/reconcile.py`.
+
+**Owner** — Wayne, as development manager: OEight's Jira approval
+configuration is his to keep matching the rule above.
+
+**Evidence consequence** — for SOC 2, Arc8's application change evidence comes
+from OEight's Jira, not from the platform's reconciliation. It has to be
+exported into Truveon by hand or by an integration that does not exist yet.
+
+**Closing condition** — Arc8's change project becomes readable by the
+platform (moved to AltDigital's Jira, or the platform credential granted read
+access to OEight's), and `change.jira_change_project` is set in its
+questionnaire.

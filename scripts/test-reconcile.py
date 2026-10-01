@@ -13,6 +13,7 @@ Needs no AWS account. The module creates boto3 clients at import, which
 needs a region and nothing else.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -109,6 +110,71 @@ class ClassifyEvent(unittest.TestCase):
         out = reconcile.classify_event(self.event(kinds[0], assumed("TenantAppDeployer-arc8app")))
         self.assertTrue(out["via_appdeployer"])
         self.assertEqual(out["deployer"], "tenant")
+
+
+class InfrastructureApprovers(unittest.TestCase):
+    """2026-10-01: two approvals from the infrastructure list, requester excluded.
+
+    Jira's rule is any two members of the Approver group. These pin what the
+    platform counts instead. Account ids are synthetic.
+    """
+
+    WAYNE, ART, TINA, JAMIE = "acc-w", "acc-a", "acc-t", "acc-j"
+
+    class StubSSM:
+        def __init__(self, value):
+            self.value = value
+
+        def get_parameter(self, Name):
+            if self.value is None:
+                raise RuntimeError("ParameterNotFound")
+            return {"Parameter": {"Value": json.dumps(self.value)}}
+
+    def setUp(self):
+        self._ssm, self._approvals = reconcile.ssm, reconcile.jira.approvals
+        reconcile._APPROVAL_CACHE.clear()
+        reconcile._INFRA_APPROVERS.clear()
+        reconcile.ssm = self.StubSSM(
+            {"approvers": [self.WAYNE, self.ART, self.TINA], "minimum": 2})
+
+    def tearDown(self):
+        reconcile.ssm, reconcile.jira.approvals = self._ssm, self._approvals
+        reconcile._APPROVAL_CACHE.clear()
+        reconcile._INFRA_APPROVERS.clear()
+
+    def verdict(self, approvers, reporter, layer="infrastructure", key="OPS-1"):
+        record = [{"finalDecision": "approved",
+                   "approvers": [{"approver": {"accountId": a},
+                                  "approverDecision": "approved"} for a in approvers]}]
+        reconcile.jira.approvals = lambda k: record
+        change = {"key": key, "status": "Awaiting implementation",
+                  "approved_by_status": True, "reporter_account_id": reporter}
+        if layer:
+            change["layer"] = layer
+        return reconcile.is_approved(change)
+
+    def test_two_authorised_approvers_pass(self):
+        ok, evidence = self.verdict([self.WAYNE, self.ART], reporter=self.JAMIE)
+        self.assertTrue(ok, evidence)
+
+    def test_requester_does_not_count_towards_their_own_approval(self):
+        ok, evidence = self.verdict([self.WAYNE, self.ART], reporter=self.WAYNE)
+        self.assertFalse(ok)
+        self.assertIn("other than the requester", evidence)
+
+    def test_approver_off_the_list_does_not_count(self):
+        ok, _ = self.verdict([self.WAYNE, self.JAMIE], reporter="acc-dev")
+        self.assertFalse(ok)
+
+    def test_tenant_changes_are_not_held_to_the_infrastructure_list(self):
+        ok, _ = self.verdict([self.JAMIE], reporter="acc-dev", layer=None, key="ARC8-1")
+        self.assertTrue(ok)
+
+    def test_unreadable_list_does_not_accuse_but_says_so(self):
+        reconcile.ssm = self.StubSSM(None)
+        ok, evidence = self.verdict([self.WAYNE, self.ART], reporter=self.JAMIE)
+        self.assertTrue(ok)
+        self.assertIn("NOT checked", evidence)
 
 
 if __name__ == "__main__":
