@@ -83,6 +83,12 @@ completed_qs/*
 *.roster.yml
 *.roster.json
 !roster.example.yaml
+
+# Application change approvers: Atlassian accountIds on a tenant's own site.
+# Same reasoning as rosters, same intended home (completed_qs/).
+*.approvers.yaml
+*.approvers.yml
+*.approvers.json
 !roster.schema.json
 
 # Terraform variable files hold responder email addresses — personal data by

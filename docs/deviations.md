@@ -1557,5 +1557,15 @@ the gap. The platform can now read a tenant's change records on the tenant's
 own Atlassian site (questionnaire `change.ticketing`, `jira.using()`,
 `scripts/set-jira-token.sh --tenant`). OEight's site is Jira Service
 Management, so approvals carry identities. Remaining: the project and its site
-URL (Jamie), the read-only service account (Wayne), and checking the
-application approval rule by identity, which is the next piece of work.
+URL (Jamie), the read-only service account (Wayne), and the approvers file.
+
+The approval rule is now checked by identity too: `completed_qs/<client>.approvers.yaml`
+(format in `vesting/approvers.example.yaml`), published by
+`scripts/sync-application-approvers.sh`, applied by `application_verdict()` in
+`change/src/reconcile.py`. Every required approver must approve, at least the
+minimum in total, and the requester never counts.
+
+**Closes when** — OEight's site URL and project key are in its questionnaire,
+the tenant credential is stored (`set-jira-token.sh --tenant oeight-oeight`),
+the approvers file is published, and the first reconciliation run after the
+Arc8 accounts exist reads its change records.

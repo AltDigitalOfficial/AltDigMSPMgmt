@@ -1,0 +1,35 @@
+# Example APPLICATION change approvers for one tenant. Placeholder ids only.
+#
+# A real one is completed_qs/<client>.approvers.yaml: it holds Atlassian
+# accountIds, which identify people, so it lives in the gitignored working
+# directory with the questionnaire and roster and is blocked by the
+# pre-commit hook. Publish it with:
+#
+#   scripts/sync-application-approvers.sh --approvers completed_qs/<client>.approvers.yaml
+#
+# What it decides. Change reconciliation reads an application change record on
+# the tenant's own Jira site (questionnaire change.ticketing) and counts it
+# approved only when:
+#   - every person under `required` approved it,
+#   - at least `minimum` distinct listed people approved it in total, and
+#   - none of those counted is the record's reporter (the requester).
+# Jira's own rule, "any N members of the approver group", checks none of this.
+#
+# accountIds are those IN THE TENANT'S SITE. Someone with an account on both
+# AltDigital's site and the tenant's has two different ids; use the tenant one.
+# Find it on the tenant's site at /rest/api/3/myself while signed in as them,
+# or from the person's profile URL.
+#
+# Shaped on Arc8 (decided 2026-10-01): the development manager owns outcomes
+# and approves first; any of the pool approves second; the developers who
+# raise the records are on neither list.
+
+partner: oeight
+client: oeight
+minimum: 2
+required:
+  - { name: "Development manager", account_id: "000000:aaaaaaaa-0000-0000-0000-000000000001" }
+pool:
+  - { name: "Pool approver 1", account_id: "000000:aaaaaaaa-0000-0000-0000-000000000002" }
+  - { name: "Pool approver 2", account_id: "000000:aaaaaaaa-0000-0000-0000-000000000003" }
+  - { name: "Pool approver 3", account_id: "000000:aaaaaaaa-0000-0000-0000-000000000004" }

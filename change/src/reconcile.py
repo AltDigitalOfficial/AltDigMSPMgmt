@@ -163,6 +163,55 @@ def approving_accounts(approvals):
     return seen
 
 
+APP_APPROVERS_PREFIX = os.environ.get("APP_APPROVERS_PREFIX",
+                                      "/platform/change/application-approvers/")
+_APP_APPROVERS = {}
+
+
+def application_approvers(tenant):
+    """{"required", "pool", "minimum"} for a tenant, or (None, reason).
+
+    Per tenant, published by scripts/sync-application-approvers.sh. The
+    accountIds are those on the tenant's own Jira site where its records live
+    there. Absent is common -- most tenants will not have published one yet --
+    and, like the infrastructure list, an absent list never accuses: the
+    evidence says identities were not checked.
+    """
+    if tenant in _APP_APPROVERS:
+        return _APP_APPROVERS[tenant]
+    name = f"{APP_APPROVERS_PREFIX}{tenant}"
+    try:
+        data = json.loads(ssm.get_parameter(Name=name)["Parameter"]["Value"])
+        value = ({"required": set(data.get("required") or []),
+                  "pool": set(data.get("pool") or []),
+                  "minimum": int(data.get("minimum", 2))}, None)
+    except Exception as exc:                       # noqa: BLE001
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        value = (None, ("no application approver list published for "
+                        f"{tenant}" if code == "ParameterNotFound" else
+                        f"could not read {name}: {code or type(exc).__name__}"))
+    _APP_APPROVERS[tenant] = value
+    return value
+
+
+def application_verdict(change, approvals):
+    """The tenant's rule: every required approver, `minimum` in total, requester excluded."""
+    rule, reason = application_approvers(change.get("tenant"))
+    if rule is None:
+        return True, f"JSM approval record; approver identities NOT checked ({reason})"
+    approved = approving_accounts(approvals) - {change.get("reporter_account_id")}
+    missing = rule["required"] - approved
+    counted = approved & (rule["required"] | rule["pool"])
+    if missing:
+        return False, (f"JSM approval record, but {len(missing)} required "
+                       "approver(s) did not approve (the requester cannot stand in)")
+    if len(counted) < rule["minimum"]:
+        return False, (f"JSM approval record, but only {len(counted)} listed "
+                       f"approver(s) other than the requester; {rule['minimum']} required")
+    return True, (f"JSM approval record; required approver(s) and {len(counted)} "
+                  "listed approver(s) in total, requester excluded")
+
+
 def infrastructure_verdict(change, approvals):
     """Apply the infrastructure rule to an otherwise-approved change.
 
@@ -429,7 +478,10 @@ def tenant_facts(account_id):
         return {"project": project, "source": "tenant record",
                 "change_approver": entry.get("change_approver"),
                 "jira_site": entry.get("jira_site"),
-                "jira_secret": entry.get("jira_secret")}
+                "jira_secret": entry.get("jira_secret"),
+                # <partner>-<client>: which application approver list applies.
+                "tenant": (f"{entry['partner']}-{entry['client']}"
+                           if entry.get("partner") and entry.get("client") else None)}
     if DEFAULT_CHANGE_PROJECT:
         return {"project": DEFAULT_CHANGE_PROJECT,
                 "source": ("platform default -- no per-tenant change project "
@@ -604,6 +656,8 @@ def is_approved(change):
             result = (True, "JSM approval record")
             if change.get("layer") == "infrastructure":
                 result = infrastructure_verdict(change, approvals)
+            elif change.get("layer") == "application":
+                result = application_verdict(change, approvals)
         else:
             result = (False, f"JSM approval record says {sorted(set(decided))}")
     elif approvals is not None:
@@ -613,11 +667,11 @@ def is_approved(change):
     else:
         result = (change["approved_by_status"],
                   "no approval record readable, fell back to the status name")
-        if change.get("layer") == "infrastructure" and result[0]:
-            # A status name carries no approver identities, so the
-            # infrastructure rule cannot be applied. Said, not implied.
-            result = (True, result[1] + "; infrastructure approver identities "
-                                        "NOT checked")
+        if change.get("layer") in ("infrastructure", "application") and result[0]:
+            # A status name carries no approver identities, so neither layer's
+            # rule can be applied. Said, not implied.
+            result = (True, result[1] + f"; {change['layer']} approver "
+                                        "identities NOT checked")
 
     # Cached OUTSIDE the change record. It used to be stashed on the dict
     # itself, which put `"_approved": [true, "fell back to ..."]` into every
@@ -701,6 +755,11 @@ def _reconcile_account(account_id, deployer, account_deployments):
     # list would compound it.
     if deployer == "platform" and OPS_CHANGE_PROJECT:
         changes = [dict(c, layer="infrastructure") for c in changes]
+    elif deployer == "tenant" and facts.get("tenant"):
+        # A tenant's application changes, held to that tenant's own approver
+        # list where one is published (scripts/sync-application-approvers.sh).
+        changes = [dict(c, layer="application", tenant=facts["tenant"])
+                   for c in changes]
 
     matched_keys = set()
     for deployment in account_deployments:
@@ -758,6 +817,10 @@ def reconcile(event, context=None):
     # as unapproved until the container happened to recycle. Same shape as the
     # cached auth header in jira.py that cost a diagnostic cycle on 2026-09-19.
     _APPROVAL_CACHE.clear()
+    # The approver lists likewise: someone added to or removed from a list
+    # between runs must count, or stop counting, on the next run.
+    _INFRA_APPROVERS.clear()
+    _APP_APPROVERS.clear()
     since = _now() - datetime.timedelta(hours=LOOKBACK_HOURS)
     deployments = recent_deployments(since)
 

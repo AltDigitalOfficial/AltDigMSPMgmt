@@ -177,6 +177,58 @@ class InfrastructureApprovers(unittest.TestCase):
         self.assertIn("NOT checked", evidence)
 
 
+class ApplicationApprovers(unittest.TestCase):
+    """Arc8's rule: the development manager, plus any one of the pool; never the requester."""
+
+    MANAGER, POOL_A, POOL_B, DEV = "t-mgr", "t-a", "t-b", "t-dev"
+
+    def setUp(self):
+        self._ssm, self._approvals = reconcile.ssm, reconcile.jira.approvals
+        reconcile._APPROVAL_CACHE.clear()
+        reconcile._APP_APPROVERS.clear()
+        rule = {"required": [self.MANAGER], "pool": [self.POOL_A, self.POOL_B], "minimum": 2}
+        reconcile.ssm = InfrastructureApprovers.StubSSM(rule)
+
+    def tearDown(self):
+        reconcile.ssm, reconcile.jira.approvals = self._ssm, self._approvals
+        reconcile._APPROVAL_CACHE.clear()
+        reconcile._APP_APPROVERS.clear()
+
+    def verdict(self, approvers, reporter):
+        record = [{"finalDecision": "approved",
+                   "approvers": [{"approver": {"accountId": a},
+                                  "approverDecision": "approved"} for a in approvers]}]
+        reconcile.jira.approvals = lambda k: record
+        return reconcile.is_approved({
+            "key": "ARC8-1", "status": "x", "approved_by_status": True,
+            "reporter_account_id": reporter, "layer": "application",
+            "tenant": "oeight-oeight"})
+
+    def test_manager_plus_one_of_the_pool_passes(self):
+        ok, evidence = self.verdict([self.MANAGER, self.POOL_B], reporter=self.DEV)
+        self.assertTrue(ok, evidence)
+
+    def test_two_from_the_pool_without_the_manager_fails(self):
+        ok, evidence = self.verdict([self.POOL_A, self.POOL_B], reporter=self.DEV)
+        self.assertFalse(ok)
+        self.assertIn("required approver", evidence)
+
+    def test_manager_alone_fails(self):
+        ok, _ = self.verdict([self.MANAGER], reporter=self.DEV)
+        self.assertFalse(ok)
+
+    def test_manager_who_raised_the_record_cannot_approve_it(self):
+        ok, evidence = self.verdict([self.MANAGER, self.POOL_A], reporter=self.MANAGER)
+        self.assertFalse(ok)
+        self.assertIn("requester cannot stand in", evidence)
+
+    def test_no_published_list_does_not_accuse_but_says_so(self):
+        reconcile.ssm = InfrastructureApprovers.StubSSM(None)
+        ok, evidence = self.verdict([self.DEV], reporter="t-other")
+        self.assertTrue(ok)
+        self.assertIn("NOT checked", evidence)
+
+
 class TenantJiraSite(unittest.TestCase):
     """A tenant's change records on its own Atlassian site (change.ticketing)."""
 
