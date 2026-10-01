@@ -6035,3 +6035,60 @@ EC2, or any tenant runs EC2 instances in a scheduled environment. On Fargate
 or Lambda there is no OS to patch, and only RDS would be affected. RDS has
 its own maintenance window, and AWS restarts a stopped database after seven
 days.
+
+---
+
+## B-142 · The deploy role's trusted OIDC subject must be the exact claim, and the questionnaire cannot produce it
+
+**Observed** — 2026-10-01, proving GitHub OIDC federation into
+`TenantAppDeployer-demo` (B-136). The role trusted
+`repo:AltDigitalOfficial/msp-demo-service:ref:refs/heads/release`. GitHub sent
+`repo:AltDigitalOfficial@188894052/msp-demo-service@1398892324:ref:refs/heads/release`.
+
+That is GitHub's subject format with the owner and repository IDs appended. It
+depends on the organisation or repository settings, not on anything the
+platform controls. The `StringLike` condition did not match, and STS refused:
+"Not authorized to perform sts:AssumeRoleWithWebIdentity". That message is
+identical to an RCP or SCP denial.
+
+CloudTrail's `userIdentity.userName` on the failed event carried the exact
+claim, which is how this was diagnosed in minutes rather than hours. Pinned to
+the exact claim, the run succeeded.
+
+The RCP was not involved. With this, the D-003 correction (federation removed
+from the RCP) is proven for OIDC as well as SAML.
+
+**Why it matters** — the subject condition is the whole control on the deploy
+role (`change/00-appdeployer.yaml` says so). It has two ways to go wrong:
+- too loose, and any repository on GitHub can deploy;
+- built from names when GitHub sends IDs, and the tenant's first deploy fails
+  with an error that points at the wrong layer.
+
+Questionnaire 8.1 collects only `cicd_tooling`. There is no field for the
+repository, the branch or environment that may deploy, or the subject format.
+
+**The ID form is the better one to trust.** A renamed repository, or a deleted
+one whose name someone else re-creates, cannot inherit the trust, because the
+IDs do not carry over. So where GitHub emits IDs, pin to them, and never widen
+the pattern to accept both forms.
+
+**Fix** — at onboarding, obtain the exact claim rather than composing it:
+1. Collect the repository (owner/name) and the deploying branch or environment
+   in the questionnaire.
+2. Read the subject format from GitHub:
+   `GET /repos/{owner}/{repo}/actions/oidc/customization/sub` returns whether
+   the repository uses a custom claim template. The owner and repository IDs
+   come from `GET /repos/{owner}/{repo}`.
+3. Or, more simply and as done here, have the tenant run the one-step
+   `oidc-proof` workflow once, and read the claim from the denied event in
+   CloudTrail before pinning it.
+4. Make one successful `AssumeRoleWithWebIdentity` a vesting completion check.
+   Until a tenant's pipeline has assumed its role once, the control point
+   design 08 depends on is unproven.
+
+**Related** — the Phase 15 prompts name the GitHub organisation `altdigital`.
+It is `AltDigitalOfficial`, and the subject match is case-sensitive. 15.3's
+pipeline trust must use the real name, and the ID form if the organisation
+emits it.
+
+**Blocks Arc8** — Arc8's first deploy would hit it.
