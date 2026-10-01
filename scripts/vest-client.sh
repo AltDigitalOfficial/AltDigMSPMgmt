@@ -658,11 +658,24 @@ else
   [[ -n "${CREDS}" ]] || die "Could not assume into the Log Archive account to write evidence."
   read -r EAK ESK EST <<<"${CREDS}"
   TMP="$(mktemp)"; printf '%s' "${DERIVED_MERGED}" > "${TMP}"
-  AWS_PROFILE= AWS_ACCESS_KEY_ID="${EAK}" AWS_SECRET_ACCESS_KEY="${ESK}" AWS_SESSION_TOKEN="${EST}" \
-    MSYS_NO_PATHCONV=1 aws s3api put-object \
+  # A SUBSHELL with `unset AWS_PROFILE`, not an inline `AWS_PROFILE=` prefix.
+  # An empty AWS_PROFILE is not an absent one: the CLI looks for a profile
+  # literally named "" and fails with "The config profile () could not be
+  # found". Inline prefixes can set a variable but never unset it. The same
+  # trap is documented in scripts/pagerduty-apply.sh; this step walked into it
+  # on the first real vesting (OEight / Arc8, 2026-10-01), after both accounts
+  # had been created, because common.sh exports AWS_PROFILE for every run.
+  as_log_archive() {
+    ( unset AWS_PROFILE
+      export AWS_ACCESS_KEY_ID="${EAK}" AWS_SECRET_ACCESS_KEY="${ESK}" \
+             AWS_SESSION_TOKEN="${EST}" MSYS_NO_PATHCONV=1
+      aws "$@" )
+  }
+  as_log_archive s3api put-object \
       --bucket "altdig-log-archive-${LOG_ARCHIVE_ACCT}" \
       --key "${EVIDENCE_KEY}" --body "$(win_path "${TMP}")" \
-      --content-type application/json >/dev/null
+      --content-type application/json >/dev/null \
+    || die "Could not write the vesting evidence record to the Log Archive."
   ok "evidence written to s3://altdig-log-archive-${LOG_ARCHIVE_ACCT}/${EVIDENCE_KEY}"
 
   # Report the retention S3 ACTUALLY applied, read back from the object, not
@@ -676,8 +689,7 @@ else
   # the tenant's floor means the platform cannot meet a framework's retention.
   # Nothing today can cause it, since the archive is at 2190 and no framework
   # floor exceeds that, but a new framework or a changed bucket default could.
-  LOCK="$(AWS_PROFILE= AWS_ACCESS_KEY_ID="${EAK}" AWS_SECRET_ACCESS_KEY="${ESK}" AWS_SESSION_TOKEN="${EST}" \
-    MSYS_NO_PATHCONV=1 aws s3api get-object-retention \
+  LOCK="$(as_log_archive s3api get-object-retention \
       --bucket "altdig-log-archive-${LOG_ARCHIVE_ACCT}" --key "${EVIDENCE_KEY}" \
       --query 'Retention.[Mode,RetainUntilDate]' --output text 2>/dev/null | no_cr)" || true
   rm -f "${TMP}"
