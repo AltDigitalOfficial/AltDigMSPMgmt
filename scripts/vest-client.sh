@@ -117,6 +117,8 @@ APP_OWNER="$(q_get "['identity']['partner_is_application_owner']")"
 TECH_EMAIL="$(q_get "['identity']['technical_contact']['email']")"
 DEV_MGR_EMAIL="$(q_get "['security']['developer_manager']['email']")"
 APPROVER_EMAIL="$(q_get "['identity']['change_approver']['email']")"
+BREACH_EMAIL="$(q_get "['identity']['breach_notification_contact']['email']")"
+SECOPS_EMAIL="$(q_get ".get('identity',{}).get('security_contact',{}).get('email') or ''")"
 JIRA_PROJECT="$(q_get ".get('change',{}).get('jira_change_project') or ''")"
 SERVICE_MODEL="$(q_get "['identity']['service_model']")"
 COMPLIANCE="$("${PY}" -c "import sys,yaml;d=yaml.safe_load(open(sys.argv[1],encoding='utf-8'));print('+'.join(f for f in d['compliance']['frameworks'] if f!='none') or 'none')" "${QPATH}")"
@@ -367,13 +369,14 @@ IP_OWNER="$([[ "${APP_OWNER}" == "True" ]] && echo partner || echo client)"
 if [[ "${DRY_RUN}" == "1" ]]; then
   # Contacts are counted, not printed: a dry run's output is the thing most
   # likely to be pasted into a ticket or an assistant.
-  printf '%s DRY%s  registry put-client %s/%s state=provisioning ip-owner=%s contacts=3 jira=%s\n' \
+  printf '%s DRY%s  registry put-client %s/%s state=provisioning ip-owner=%s contacts=5 jira=%s\n' \
     "${C_YELLOW}" "${C_RESET}" "${PARTNER}" "${CLIENT}" "${IP_OWNER}" "${JIRA_PROJECT:-none}"
 else
   bash "${REPO_ROOT}/scripts/registry.sh" put-client \
     --partner "${PARTNER}" --slug "${CLIENT}" --state provisioning --ip-owner "${IP_OWNER}" \
     --tech-contact "${TECH_EMAIL}" --dev-manager "${DEV_MGR_EMAIL}" \
-    --change-approver "${APPROVER_EMAIL}" --jira-project "${JIRA_PROJECT}"
+    --change-approver "${APPROVER_EMAIL}" --jira-project "${JIRA_PROJECT}" \
+    --breach-contact "${BREACH_EMAIL}" --security-contact "${SECOPS_EMAIL}"
 fi
 
 # ---------------------------------------------------------------------------

@@ -37,7 +37,8 @@
         "technical_contact",
         "escalation_contact",
         "change_approver",
-        "billing_contact"
+        "billing_contact",
+        "breach_notification_contact"
       ],
       "properties": {
         "partner": {
@@ -92,6 +93,14 @@
         "billing_contact": {
           "$ref": "#/$defs/contact",
           "description": "1.8"
+        },
+        "breach_notification_contact": {
+          "$ref": "#/$defs/contact",
+          "description": "Who AltDigital notifies of a breach affecting this application: the notification of record that starts the client's own clock. Design 07: AltDigital notifies the PARTNER, never the partner's client, so for a partner-mediated client this is the partner's contact; for a 'direct' client, or where the partner owns the application, it is the client's. Must be a person who can act for the organisation legally -- not a consultant holding that organisation's email address. Required since 2026-10-01: the first real questionnaire named a security contact who was an AltDigital partner acting for the client, which would have had AltDigital notifying itself."
+        },
+        "security_contact": {
+          "$ref": "#/$defs/contact",
+          "description": "Day-to-day security operations contact: findings, questions, 'is this activity yours?'. Distinct from breach_notification_contact, and may be a delegate. Optional; absent, security questions go to the technical contact."
         }
       }
     },

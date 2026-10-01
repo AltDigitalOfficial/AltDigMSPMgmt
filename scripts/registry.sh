@@ -57,6 +57,7 @@ Clients
   put-client     --partner S --slug S [--state STATE] [--ip-owner WHO]
                  [--tech-contact EMAIL] [--dev-manager EMAIL]
                  [--change-approver EMAIL] [--jira-project KEY]
+                 [--breach-contact EMAIL] [--security-contact EMAIL]
                  Updates only the fields passed; never erases the rest.
   get-client     --partner S --slug S
   link-truveon   --partner S --slug S --name TRUVEON_TENANT_SLUG
@@ -94,6 +95,7 @@ SLUG=""; PARTNER=""; STATE=""; NOTIFY_HOURS=""; ALTDIG_HOURS=""; OWNER=""
 BAA=""; IP_OWNER=""; ACCOUNT_ID=""; ENVIRONMENT=""; APP=""; VERSION=""
 NAME=""; REASON=""; REVIEW_BY=""; TECH_CONTACT=""; DEV_MANAGER=""
 CHANGE_APPROVER=""; JIRA_PROJECT=""; SERVICE_MODEL=""; COMPLIANCE=""; KIND=""
+BREACH_CONTACT=""; SECURITY_CONTACT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -111,6 +113,8 @@ while [[ $# -gt 0 ]]; do
     --dev-manager)      DEV_MANAGER="$2"; shift 2 ;;
     --change-approver)  CHANGE_APPROVER="$2"; shift 2 ;;
     --jira-project)     JIRA_PROJECT="$2"; shift 2 ;;
+    --breach-contact)   BREACH_CONTACT="$2"; shift 2 ;;
+    --security-contact) SECURITY_CONTACT="$2"; shift 2 ;;
     --account-id)       ACCOUNT_ID="$2"; shift 2 ;;
     --env)              ENVIRONMENT="$2"; shift 2 ;;
     --app)              APP="$2"; shift 2 ;;
@@ -361,6 +365,18 @@ cmd_put_client() {
   fi
   if [[ -n "${JIRA_PROJECT}" ]]; then
     set+=", jira_change_project = :jp"; vals+=",\":jp\":$(ddb_str "${JIRA_PROJECT}")"
+  fi
+  # Breach notification of record, and day-to-day security operations. Two
+  # fields because they are different people more often than not: the first
+  # must be able to act for the organisation legally, the second may be a
+  # delegate. Nothing reads them yet -- the incident clock records who was
+  # notified rather than sending -- but a recipient nobody wrote down cannot
+  # be notified by anything later. Questionnaire identity.*, 2026-10-01.
+  if [[ -n "${BREACH_CONTACT}" ]]; then
+    set+=", breach_contact = :bc"; vals+=",\":bc\":$(ddb_str "${BREACH_CONTACT}")"
+  fi
+  if [[ -n "${SECURITY_CONTACT}" ]]; then
+    set+=", security_contact = :sc"; vals+=",\":sc\":$(ddb_str "${SECURITY_CONTACT}")"
   fi
 
   if [[ "${DRY_RUN}" == "1" ]]; then

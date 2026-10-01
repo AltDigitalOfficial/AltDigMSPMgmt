@@ -22,6 +22,12 @@ identity:
   escalation_contact: { name: "Placeholder Esc",    email: "esc@example.com" }
   change_approver:    { name: "Placeholder Appr",   email: "appr@example.com" }
   billing_contact:    { name: "Placeholder Bill",   email: "bill@example.com" }
+  # Who AltDigital notifies of a breach: a person who can act for the
+  # organisation legally. The partner's, unless the client is direct or the
+  # partner owns the application (as here).
+  breach_notification_contact: { name: "Placeholder Owner", email: "owner@example.com" }
+  # Day-to-day security operations; may be a delegate.
+  security_contact:   { name: "Placeholder Sec",    email: "sec@example.com" }
 
 compliance:
   frameworks: [hipaa, soc2]

@@ -130,6 +130,26 @@ WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"]
 EVERY_DAY = WEEKDAYS + ["sat", "sun"]
 
 
+class Contacts(unittest.TestCase):
+    """3.5: a breach notification contact is required; security ops is not."""
+
+    def setUp(self):
+        self.base = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+
+    def test_breach_contact_is_required(self):
+        q = copy.deepcopy(self.base)
+        q["identity"].pop("breach_notification_contact")
+        rc, err = run(q)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("breach_notification_contact", err)
+
+    def test_security_contact_is_optional(self):
+        q = copy.deepcopy(self.base)
+        q["identity"].pop("security_contact")
+        rc, err = run(q)
+        self.assertEqual(rc, 0, err)
+
+
 class Frameworks(unittest.TestCase):
     """4.1: hitrust is askable, and nothing applied for it is said out loud."""
 

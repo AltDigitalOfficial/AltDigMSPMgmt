@@ -164,8 +164,20 @@ questionnaire.
 | 3.2 | Escalation contact — who we call out of hours | Name, email, phone | Prod | Reversible |
 | 3.3 | Change approver — who authorises changes on your side | Name, email | Dev | Reversible |
 | 3.4 | Billing contact | Name, email | Vest | Reversible |
-| 3.5 | Security contact — who we notify of a security incident | Name, email, phone | Prod | Reversible |
+| 3.5 | **Breach notification contact** — who we formally notify if your data is affected by a security incident | Name, email, phone | Vest | Reversible |
+| 3.5a | Security operations contact — day-to-day security questions and findings | Name, email, phone | Prod | Reversible |
 | 3.6 | **Development manager** — receives the daily activity digest | Name, email | Dev | Reversible |
+
+**On 3.5.** This is the person whose receipt of our notification starts your own
+legal clock, so it must be someone who can act for your organisation: an owner,
+an officer, or someone they have named in writing. It should **not** be a
+contractor or consultant, even one who uses your organisation's email address,
+because notifying them is not notifying you. If you came to us through a
+partner, we notify the partner and they notify you; tell us who at your
+organisation they should reach.
+
+3.5a can be anyone you trust with day-to-day security questions, including a
+delegate. If you leave it blank, those go to your technical contact.
 
 **On 3.6.** The development manager receives a daily summary of what happened in
 your environments: deployments, alarms, changes to infrastructure, anything that

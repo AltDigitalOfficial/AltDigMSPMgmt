@@ -72,8 +72,10 @@ recipients from the first run. Still open:
 - **Development manager (3.6).** The form says this person receives the
   digest. The code sends it to the technical contact. `dev_manager` is now
   written, and still nothing reads it.
-- **Security contact (3.5)** is not in the schema. For a HIPAA tenant, the
-  person to notify of a breach is lost at transcription.
+- **Security contact (3.5)** is now two fields, written to the registry: the
+  breach notification contact of record, which must be someone who can act for
+  the organisation, and a security operations contact, who may be a delegate.
+  Nothing sends to either yet.
 - Escalation (3.2), billing (3.4) and customer escalation for PagerDuty are
   stored and unread.
 
@@ -196,7 +198,8 @@ the rows that are not are marked.
 | 3.2 | Escalation contact | `identity.escalation_contact` | nothing | P | stored |
 | 3.3 | Change approver | `identity.change_approver` | registry `change_approver` → tenant facts → change reconciliation routing | P | builds |
 | 3.4 | Billing contact | `identity.billing_contact` | nothing | P | stored |
-| 3.5 | Security contact | — | — | P | form only |
+| 3.5 | Breach notification contact | `identity.breach_notification_contact` | registry `breach_contact`; nothing reads it yet (the incident clock records, it does not send) | P | stored |
+| 3.5a | Security operations contact | `identity.security_contact` | registry `security_contact`; nothing reads it yet | P | stored |
 | 3.6 | Development manager | `security.developer_manager` | written to registry `dev_manager`; nothing reads it. The digest goes to 3.1 | P | stored |
 | 3b | Developer roster | roster sidecar | `derive-roster.py`, `grant-developer-access.sh` | P | builds |
 | 3.7 | Console access | `security.customer_staff_need_access`? | nothing; the roster decides in practice | P | stored |
