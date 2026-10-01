@@ -56,7 +56,7 @@ Partners
 Clients
   put-client     --partner S --slug S [--state STATE] [--ip-owner WHO]
                  [--tech-contact EMAIL] [--dev-manager EMAIL]
-                 [--change-approver EMAIL] [--jira-project KEY]
+                 [--change-approver EMAIL] [--jira-project KEY] [--jira-site URL]
                  [--breach-contact EMAIL] [--security-contact EMAIL]
                  Updates only the fields passed; never erases the rest.
   get-client     --partner S --slug S
@@ -95,7 +95,7 @@ SLUG=""; PARTNER=""; STATE=""; NOTIFY_HOURS=""; ALTDIG_HOURS=""; OWNER=""
 BAA=""; IP_OWNER=""; ACCOUNT_ID=""; ENVIRONMENT=""; APP=""; VERSION=""
 NAME=""; REASON=""; REVIEW_BY=""; TECH_CONTACT=""; DEV_MANAGER=""
 CHANGE_APPROVER=""; JIRA_PROJECT=""; SERVICE_MODEL=""; COMPLIANCE=""; KIND=""
-BREACH_CONTACT=""; SECURITY_CONTACT=""
+BREACH_CONTACT=""; SECURITY_CONTACT=""; JIRA_SITE_URL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,6 +113,7 @@ while [[ $# -gt 0 ]]; do
     --dev-manager)      DEV_MANAGER="$2"; shift 2 ;;
     --change-approver)  CHANGE_APPROVER="$2"; shift 2 ;;
     --jira-project)     JIRA_PROJECT="$2"; shift 2 ;;
+    --jira-site)        JIRA_SITE_URL="$2"; shift 2 ;;
     --breach-contact)   BREACH_CONTACT="$2"; shift 2 ;;
     --security-contact) SECURITY_CONTACT="$2"; shift 2 ;;
     --account-id)       ACCOUNT_ID="$2"; shift 2 ;;
@@ -365,6 +366,13 @@ cmd_put_client() {
   fi
   if [[ -n "${JIRA_PROJECT}" ]]; then
     set+=", jira_change_project = :jp"; vals+=",\":jp\":$(ddb_str "${JIRA_PROJECT}")"
+  fi
+  # The tenant's own Atlassian site, when its change records live there rather
+  # than on AltDigital's. Absent means AltDigital's site. Its credential is
+  # platform/jira/tenant/<partner>-<client>, by convention, in the Audit account.
+  if [[ -n "${JIRA_SITE_URL}" ]]; then
+    [[ "${JIRA_SITE_URL}" =~ ^https://[a-z0-9-]+\.atlassian\.net/?$ ]]       || die "--jira-site must be an Atlassian Cloud site, https://<name>.atlassian.net"
+    set+=", jira_site = :js"; vals+=",\":js\":$(ddb_str "${JIRA_SITE_URL%/}")"
   fi
   # Breach notification of record, and day-to-day security operations. Two
   # fields because they are different people more often than not: the first

@@ -150,6 +150,46 @@ class Contacts(unittest.TestCase):
         self.assertEqual(rc, 0, err)
 
 
+class Ticketing(unittest.TestCase):
+    """Form 12.4: each ticketing system needs its own fields and no others."""
+
+    def setUp(self):
+        self.base = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+
+    def q(self, **ticketing):
+        q = copy.deepcopy(self.base)
+        q["change"]["ticketing"] = ticketing
+        return q
+
+    def test_client_jira_needs_a_site(self):
+        rc, err = run(self.q(system="client-jira", product="jira-service-management",
+                             project_key="ARC8"))
+        self.assertEqual(rc, 1, err)
+        self.assertIn("ticketing.site is required", err)
+
+    def test_altdigital_jira_refuses_a_site(self):
+        rc, err = run(self.q(system="altdigital-jira", product="jira-service-management",
+                             project_key="ARC8", site="https://x.atlassian.net"))
+        self.assertEqual(rc, 1, err)
+        self.assertIn("always AltDigital's own site", err)
+
+    def test_a_non_atlassian_site_fails_the_schema(self):
+        rc, err = run(self.q(system="client-jira", product="jira-service-management",
+                             project_key="ARC8", site="https://jira.example.com"))
+        self.assertEqual(rc, 1, err)
+
+    def test_none_is_allowed_and_warned(self):
+        rc, out = run_report(self.q(system="none"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("UNAVAILABLE", out)
+
+    def test_jira_software_is_warned(self):
+        rc, out = run_report(self.q(system="altdigital-jira", product="jira-software",
+                                    project_key="ARC8"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("cannot check WHO approved", out)
+
+
 class Frameworks(unittest.TestCase):
     """4.1: hitrust is askable, and nothing applied for it is said out loud."""
 

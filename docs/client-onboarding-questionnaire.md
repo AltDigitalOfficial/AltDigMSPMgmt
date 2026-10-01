@@ -508,9 +508,26 @@ about, and it is the thing we can only build if you tell us what to watch.
 | 12.1 | What CI/CD tooling do you use, or plan to? | Free text | Dev | Reversible |
 | 12.2 | Expected deployment frequency | **Pick one:** `multiple-daily` / `daily` / `weekly` / `monthly` / `rarely` | Dev | Reversible |
 | 12.3 | Do you have an existing change process we should align to? | Free text | Prod | Reversible |
-| 12.4 | Which Jira project should hold change records for this application? | Free text — or ask us to create one | Dev | Reversible |
+| 12.4 | Where will this application's change records live? | **Pick one:** `altdigital-jira` (we host the project) / `client-jira` (your own Atlassian site) / `none` | Dev | Reversible |
+| 12.4a | Which Jira product? | **Pick one:** `jira-service-management` / `jira-software` | Dev | Reversible |
+| 12.4b | If `client-jira`: your Atlassian site | `https://<name>.atlassian.net` | Dev | Reversible |
+| 12.4c | Project key | e.g. `ARC8` — or ask us to create one | Dev | Reversible |
 | 12.5 | Who on your side approves production changes? | Name, email | Prod | Reversible |
 | 12.6 | Do you require a business test plan before production changes? | Yes / No | Prod | Reversible |
+
+**On 12.4.** We check every deployment to your environments against a change
+record, and we look for that record wherever you keep it.
+
+- **`client-jira`** means your own Atlassian site. Create a **read-only service
+  account** there for us (an account that belongs to your organisation, not to
+  a person), with access to the project in 12.4c, and send us its API token
+  through the secure channel we give you. It never needs to change anything.
+- **`jira-service-management`** lets us check *who* approved each change, not
+  just that it was approved, because its approvals record the approvers. With
+  `jira-software` we can only see a status, and say so in our reports.
+- **`none`** is allowed. Your application deployments are then reported as
+  *not checked*, rather than as approved or unapproved. If you are audited,
+  your auditor will ask about that, so it is worth discussing with us first.
 
 **On 12.5.** Production change approval requires two different people — the
 person requesting and the person approving cannot be the same individual, even

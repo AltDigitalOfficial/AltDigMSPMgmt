@@ -119,7 +119,10 @@ DEV_MGR_EMAIL="$(q_get "['security']['developer_manager']['email']")"
 APPROVER_EMAIL="$(q_get "['identity']['change_approver']['email']")"
 BREACH_EMAIL="$(q_get "['identity']['breach_notification_contact']['email']")"
 SECOPS_EMAIL="$(q_get ".get('identity',{}).get('security_contact',{}).get('email') or ''")"
-JIRA_PROJECT="$(q_get ".get('change',{}).get('jira_change_project') or ''")"
+# Questionnaire change.ticketing (form 12.4). No project when the system is
+# 'none'; a site only when the records live on the client's own Atlassian site.
+JIRA_PROJECT="$(q_get "['change']['ticketing'].get('project_key') or ''")"
+JIRA_SITE_URL="$(q_get "['change']['ticketing'].get('site') or ''")"
 SERVICE_MODEL="$(q_get "['identity']['service_model']")"
 COMPLIANCE="$("${PY}" -c "import sys,yaml;d=yaml.safe_load(open(sys.argv[1],encoding='utf-8'));print('+'.join(f for f in d['compliance']['frameworks'] if f!='none') or 'none')" "${QPATH}")"
 RETENTION="$(d_get "['retention_floor_days']")"
@@ -376,7 +379,8 @@ else
     --partner "${PARTNER}" --slug "${CLIENT}" --state provisioning --ip-owner "${IP_OWNER}" \
     --tech-contact "${TECH_EMAIL}" --dev-manager "${DEV_MGR_EMAIL}" \
     --change-approver "${APPROVER_EMAIL}" --jira-project "${JIRA_PROJECT}" \
-    --breach-contact "${BREACH_EMAIL}" --security-contact "${SECOPS_EMAIL}"
+    --breach-contact "${BREACH_EMAIL}" --security-contact "${SECOPS_EMAIL}" \
+    --jira-site "${JIRA_SITE_URL}"
 fi
 
 # ---------------------------------------------------------------------------

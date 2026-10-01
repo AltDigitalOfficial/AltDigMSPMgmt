@@ -214,7 +214,10 @@ DEV_MGR_EMAIL="$(q_get "['security']['developer_manager']['email']")"
 APPROVER_EMAIL="$(q_get "['identity']['change_approver']['email']")"
 BREACH_EMAIL="$(q_get "['identity']['breach_notification_contact']['email']")"
 SECOPS_EMAIL="$(q_get ".get('identity',{}).get('security_contact',{}).get('email') or ''")"
-JIRA_PROJECT="$(q_get ".get('change',{}).get('jira_change_project') or ''")"
+# Questionnaire change.ticketing (form 12.4). No project when the system is
+# 'none'; a site only when the records live on the client's own Atlassian site.
+JIRA_PROJECT="$(q_get "['change']['ticketing'].get('project_key') or ''")"
+JIRA_SITE_URL="$(q_get "['change']['ticketing'].get('site') or ''")"
 ENVS="$(printf '%s' "${DERIVED}" \
   | "${PY}" -c "import sys,json;print(' '.join(json.load(sys.stdin)['environments']))")"
 TENANT_ID="${PARTNER}-${CLIENT}-${APP}"
@@ -375,7 +378,8 @@ if should_run 1 registry-client-record; then
         --ip-owner "${IP_OWNER}" \
         --tech-contact "${TECH_EMAIL}" --dev-manager "${DEV_MGR_EMAIL}" \
         --change-approver "${APPROVER_EMAIL}" --jira-project "${JIRA_PROJECT}" \
-        --breach-contact "${BREACH_EMAIL}" --security-contact "${SECOPS_EMAIL}"
+        --breach-contact "${BREACH_EMAIL}" --security-contact "${SECOPS_EMAIL}" \
+        --jira-site "${JIRA_SITE_URL}"
   fi
 fi
 
@@ -527,7 +531,7 @@ if should_run 4 jira-tenant-artefacts; then
 For now, by hand:
   - create the change project from the golden scheme, or agree that this
     tenant uses the shared ops project
-  - record the key in the questionnaire's change.jira_change_project
+  - record the key in the questionnaire's change.ticketing.project_key
   - scripts/jira-check.sh   # confirms the platform can read it"
 
   if [[ ${DEFER_JIRA} -eq 1 ]]; then

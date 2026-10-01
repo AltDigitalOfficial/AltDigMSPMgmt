@@ -423,8 +423,13 @@ def tenant_facts(account_id):
     entry = (_FACTS.get(account_id) or {}) if account_id else {}
     project = entry.get("jira_change_project")
     if project:
+        # jira_site / jira_secret: the tenant's own Atlassian site, when its
+        # change records are not on AltDigital's (questionnaire
+        # change.ticketing). None means AltDigital's site.
         return {"project": project, "source": "tenant record",
-                "change_approver": entry.get("change_approver")}
+                "change_approver": entry.get("change_approver"),
+                "jira_site": entry.get("jira_site"),
+                "jira_secret": entry.get("jira_secret")}
     if DEFAULT_CHANGE_PROJECT:
         return {"project": DEFAULT_CHANGE_PROJECT,
                 "source": ("platform default -- no per-tenant change project "
@@ -574,10 +579,11 @@ def is_approved(change):
     "not approved". Same rule as everywhere else in this module: a source that
     cannot be read has not returned a negative answer.
     """
-    # Keyed by layer as well as issue: with no ops project configured, a
-    # platform deployment falls back to the tenant's project, and the same
-    # record can then be judged under both rules in one run.
-    cache_key = (change["key"], change.get("layer"))
+    # Keyed by site and layer as well as issue. Site, because two Atlassian
+    # sites can both hold an ARC8-1. Layer, because with no ops project
+    # configured a platform deployment falls back to the tenant's project, and
+    # the same record can then be judged under both rules in one run.
+    cache_key = (jira.current_site(), change["key"], change.get("layer"))
     cached = _APPROVAL_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -656,6 +662,94 @@ def publish_credential_health():
     return days
 
 
+def _reconcile_account(account_id, deployer, account_deployments):
+    """Reconcile one account's deployments of one deployer class.
+
+    Extracted from reconcile() unchanged on 2026-10-01 so the caller can
+    run it inside jira.using() -- a tenant's change records may live on
+    its own Atlassian site. Returns the outcome records for the account.
+    """
+    results = []
+    facts = tenant_facts(account_id)
+    if deployer == "platform":
+        project = OPS_CHANGE_PROJECT or facts["project"]
+        facts = dict(facts, project=project, source=(
+            "AltDigital's own operations project — this was a PLATFORM "
+            "deployment, not a tenant one, and design 08 treats the "
+            "platform's pipeline as separate"
+            if OPS_CHANGE_PROJECT else
+            "no ops project configured; fell back to the tenant's, which "
+            "is wrong for a platform deployment"))
+    else:
+        project = facts["project"]
+
+    if not project:
+        results.append(_unavailable(account_id, account_deployments,
+                                    facts["source"]))
+        return results
+    try:
+        changes = approved_changes(project)
+    except jira.JiraUnavailable as exc:
+        results.append(_unavailable(account_id, account_deployments,
+                                    str(exc)))
+        return results
+    # Records in AltDigital's ops project are infrastructure changes, and
+    # is_approved() holds them to the infrastructure approver rule. Only
+    # when the ops project is genuinely configured: the fallback to the
+    # tenant's project is already flagged as wrong for a platform
+    # deployment, and judging a tenant's records by AltDigital's approver
+    # list would compound it.
+    if deployer == "platform" and OPS_CHANGE_PROJECT:
+        changes = [dict(c, layer="infrastructure") for c in changes]
+
+    matched_keys = set()
+    for deployment in account_deployments:
+        change, problem = match(deployment, changes)
+        if change is None:
+            outcome = "no_change_record"
+        elif problem:
+            outcome = "outside_approved_window"
+            matched_keys.add(change["key"])
+        else:
+            outcome = "matched"
+            matched_keys.add(change["key"])
+        results.append(_finding(account_id, outcome, deployment, change,
+                                problem, project, facts))
+
+    # design 08's fourth outcome: "Change record with no corresponding
+    # deployment -- Review: stale or abandoned."
+    for change in changes:
+        # Only an APPROVED record whose window has CLOSED is "stale or
+        # abandoned". Two ways to get this wrong, and the first version
+        # had both:
+        #
+        #   a record still awaiting approval is in flight, not abandoned
+        #   a record approved ten minutes ago has not been abandoned either
+        #
+        # The second one fired on AMI-4 the moment it was approved, while
+        # the work it authorises was actively being done. Left in, this
+        # outcome would raise a finding against every change record in the
+        # gap between approval and implementation -- which is every change
+        # record, for as long as the change takes. A finding that is always
+        # true is noise, and noise is what gets a control muted.
+        if change["key"] in matched_keys:
+            continue
+        if not is_approved(change)[0]:
+            continue
+        created = _parse(change.get("created"))
+        if created is None:
+            continue
+        closes = created + datetime.timedelta(hours=MATCH_WINDOW_HOURS)
+        if _now() < closes:
+            # Still in its window. Nothing to conclude yet.
+            continue
+        if change["accounts"] and account_id not in change["accounts"]:
+            continue
+        results.append(_finding(account_id, "change_without_deployment",
+                                None, change, None, project, facts))
+    return results
+
+
 def reconcile(event, context=None):
     """The scheduled run. Produces design 08's outcomes, plus the fifth."""
     # Cleared per run. A warm Lambda container lives for hours, and an approval
@@ -683,82 +777,16 @@ def reconcile(event, context=None):
 
     for (account_id, deployer), account_deployments in regrouped.items():
         facts = tenant_facts(account_id)
-        if deployer == "platform":
-            project = OPS_CHANGE_PROJECT or facts["project"]
-            facts = dict(facts, project=project, source=(
-                "AltDigital's own operations project — this was a PLATFORM "
-                "deployment, not a tenant one, and design 08 treats the "
-                "platform's pipeline as separate"
-                if OPS_CHANGE_PROJECT else
-                "no ops project configured; fell back to the tenant's, which "
-                "is wrong for a platform deployment"))
-        else:
-            project = facts["project"]
-
-        if not project:
-            results.append(_unavailable(account_id, account_deployments,
-                                        facts["source"]))
-            continue
+        # Tenant deployments are reconciled on the tenant's own Jira site
+        # when it has one. Platform deployments always use AltDigital's.
+        site = facts.get("jira_site") if deployer != "platform" else None
         try:
-            changes = approved_changes(project)
+            with jira.using(site, facts.get("jira_secret")):
+                results.extend(_reconcile_account(
+                    account_id, deployer, account_deployments))
         except jira.JiraUnavailable as exc:
             results.append(_unavailable(account_id, account_deployments,
                                         str(exc)))
-            continue
-        # Records in AltDigital's ops project are infrastructure changes, and
-        # is_approved() holds them to the infrastructure approver rule. Only
-        # when the ops project is genuinely configured: the fallback to the
-        # tenant's project is already flagged as wrong for a platform
-        # deployment, and judging a tenant's records by AltDigital's approver
-        # list would compound it.
-        if deployer == "platform" and OPS_CHANGE_PROJECT:
-            changes = [dict(c, layer="infrastructure") for c in changes]
-
-        matched_keys = set()
-        for deployment in account_deployments:
-            change, problem = match(deployment, changes)
-            if change is None:
-                outcome = "no_change_record"
-            elif problem:
-                outcome = "outside_approved_window"
-                matched_keys.add(change["key"])
-            else:
-                outcome = "matched"
-                matched_keys.add(change["key"])
-            results.append(_finding(account_id, outcome, deployment, change,
-                                    problem, project, facts))
-
-        # design 08's fourth outcome: "Change record with no corresponding
-        # deployment -- Review: stale or abandoned."
-        for change in changes:
-            # Only an APPROVED record whose window has CLOSED is "stale or
-            # abandoned". Two ways to get this wrong, and the first version
-            # had both:
-            #
-            #   a record still awaiting approval is in flight, not abandoned
-            #   a record approved ten minutes ago has not been abandoned either
-            #
-            # The second one fired on AMI-4 the moment it was approved, while
-            # the work it authorises was actively being done. Left in, this
-            # outcome would raise a finding against every change record in the
-            # gap between approval and implementation -- which is every change
-            # record, for as long as the change takes. A finding that is always
-            # true is noise, and noise is what gets a control muted.
-            if change["key"] in matched_keys:
-                continue
-            if not is_approved(change)[0]:
-                continue
-            created = _parse(change.get("created"))
-            if created is None:
-                continue
-            closes = created + datetime.timedelta(hours=MATCH_WINDOW_HOURS)
-            if _now() < closes:
-                # Still in its window. Nothing to conclude yet.
-                continue
-            if change["accounts"] and account_id not in change["accounts"]:
-                continue
-            results.append(_finding(account_id, "change_without_deployment",
-                                    None, change, None, project, facts))
 
     emitted = [r for r in results if emit_finding(r)]
     out = {

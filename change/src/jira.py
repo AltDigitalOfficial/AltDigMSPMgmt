@@ -45,7 +45,58 @@ JIRA_SECRET_NAME = os.environ.get("JIRA_SECRET_NAME",
 JIRA_SITE = os.environ.get("JIRA_SITE", "")
 TIMEOUT = int(os.environ.get("JIRA_TIMEOUT_SECONDS", "20"))
 
+# Credentials by secret name. One entry per Atlassian site this execution
+# environment has talked to: AltDigital's own, and any tenant site.
 _AUTH = {}
+
+# Which site the calls in progress are addressed to. None means AltDigital's
+# own (JIRA_SITE / JIRA_SECRET_NAME). Set only through using(), below.
+_CURRENT = {"site": None, "secret": None}
+
+
+class using:
+    """Address the calls inside a `with` block to a tenant's own Jira site.
+
+        with jira.using("https://tenant.atlassian.net",
+                        "platform/jira/tenant/partner-client"):
+            changes = approved_changes(project)
+
+    A tenant may keep its change records on its own Atlassian site (questionnaire
+    change.ticketing, 2026-10-01; first case OEight / Arc8). That site has its
+    own service account, so the site and the credential travel together: a
+    token issued by one Atlassian site is meaningless against another, and
+    pairing a tenant's site with AltDigital's credential would read as "every
+    request unauthorised" rather than as the configuration fault it is.
+
+    A context manager rather than a parameter on every function, so the twenty
+    existing callers -- the quorum verifier and the change filer, which only
+    ever talk to AltDigital's site -- stay exactly as they were. With site None
+    the block is a no-op, which lets a caller wrap unconditionally.
+    """
+
+    def __init__(self, site, secret_name):
+        self.site, self.secret = site, secret_name
+        self._saved = None
+
+    def __enter__(self):
+        self._saved = dict(_CURRENT)
+        if self.site:
+            if not self.secret:
+                raise JiraUnavailable(
+                    f"a tenant Jira site ({self.site}) was given with no "
+                    "credential to use against it")
+            _CURRENT.update(site=self.site, secret=self.secret)
+        return self
+
+    def __exit__(self, *exc):
+        _CURRENT.clear()
+        _CURRENT.update(self._saved)
+        return False
+
+
+def current_site():
+    """The site in use now, for keying caches and naming it in findings."""
+    return _site()
 
 
 class JiraUnavailable(Exception):
@@ -67,26 +118,33 @@ def _site():
     # difference is a double slash in every request path, which Atlassian
     # happens to accept and which would look like a client bug the first time
     # it did not.
-    return (JIRA_SITE or "").rstrip("/")
+    return (_CURRENT.get("site") or JIRA_SITE or "").rstrip("/")
+
+
+def _secret_name():
+    return _CURRENT.get("secret") or JIRA_SECRET_NAME
 
 
 def _auth_header():
-    """Basic auth from the stored service account.
+    """Basic auth from the stored service account for the site in use.
 
-    Cached for the life of the execution environment. Rotation takes effect on
-    the next cold start, which is the right trade for a credential read on
-    every reconciliation run.
+    Cached per secret for the life of the execution environment. Rotation
+    takes effect on the next cold start, or on the 401 retry in _get().
     """
-    if "header" not in _AUTH:
+    name = _secret_name()
+    if name not in _AUTH:
         try:
-            raw = secrets.get_secret_value(
-                SecretId=JIRA_SECRET_NAME)["SecretString"]
+            raw = secrets.get_secret_value(SecretId=name)["SecretString"]
         except Exception as exc:                   # noqa: BLE001
             code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            tenant = name != JIRA_SECRET_NAME
             raise JiraUnavailable(
-                f"could not read {JIRA_SECRET_NAME}: {code or type(exc).__name__}. "
-                "The Jira credential is missing from this account. Run "
-                "scripts/set-jira-token.sh.") from exc
+                f"could not read {name}: {code or type(exc).__name__}. "
+                + ("This tenant's Jira credential is missing from this account. "
+                   "Run scripts/set-jira-token.sh --tenant <partner>-<client>."
+                   if tenant else
+                   "The Jira credential is missing from this account. Run "
+                   "scripts/set-jira-token.sh.")) from exc
         try:
             creds = json.loads(raw)
             pair = f"{creds['email']}:{creds['api_token']}"
@@ -94,9 +152,8 @@ def _auth_header():
             raise JiraUnavailable(
                 "the Jira secret is not the expected JSON "
                 '{"email": ..., "api_token": ...}') from exc
-        _AUTH["header"] = "Basic " + base64.b64encode(
-            pair.encode()).decode()
-    return _AUTH["header"]
+        _AUTH[name] = "Basic " + base64.b64encode(pair.encode()).decode()
+    return _AUTH[name]
 
 
 def _get(path, params=None, _retried=False):
@@ -134,7 +191,8 @@ def _get(path, params=None, _retried=False):
         if exc.code == 401 and not _retried:
             # The cached header may predate a rotation. Drop it, read the
             # secret again, and try once more before concluding anything.
-            _AUTH.clear()
+            # Only this site's: another site's credential is not suspect.
+            _AUTH.pop(_secret_name(), None)
             return _get(path, params, _retried=True)
         body = ""
         try:

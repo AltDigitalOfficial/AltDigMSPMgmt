@@ -307,7 +307,7 @@ the rows that are not are marked.
 | 12.1 | CI/CD tooling | `change.cicd_tooling` | nothing. AppDeployer OIDC parameters are re-typed | P | stored · typed by hand |
 | 12.2 | Deployment frequency | `change.deployment_frequency` | nothing | P | stored |
 | 12.3 | Existing change process | — | — | P | form only |
-| 12.4 | Jira project | `change.jira_change_project` | registry → tenant facts → change reconciliation. Creating the project is still manual (B-108) | P | builds |
+| 12.4 | Ticketing: system, product, site, project | `change.ticketing` | registry → tenant facts → change reconciliation, on the client's own Atlassian site where given. Creating the project and the client's service account is still manual | P | builds |
 | 12.5 | Production change approver | — | — (duplicates 3.3) | P | form only |
 | 12.6 | Business test plan | — | — | P | form only |
 

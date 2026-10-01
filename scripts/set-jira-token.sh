@@ -87,6 +87,7 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 FROM_STDIN=0
+TENANT=""
 PROPAGATE=0
 SECRET_NAME="platform/jira/service-account"
 EMAIL=""
@@ -101,16 +102,30 @@ while [[ $# -gt 0 ]]; do
     --propagate) PROPAGATE=1; shift ;;
     --email)     EMAIL="$2"; shift 2 ;;
     --secret)    SECRET_NAME="$2"; shift 2 ;;
+    # A tenant's OWN Atlassian site (questionnaire change.ticketing): its
+    # read-only service account, stored under the conventional name that
+    # sync-tenant-facts.sh publishes, in Audit only -- change reconciliation is
+    # the one consumer. <partner>-<client>, e.g. oeight-oeight.
+    --tenant)    TENANT="$2"; shift 2 ;;
     # Overrides the whole list, not one entry. Comma or space separated.
     # Narrowing this is how a half-rotation gets done deliberately, so it is
     # deliberately awkward to do by accident.
     --account)   CONSUMER_KEYS="${2//,/ }"; shift 2 ;;
     -h|--help)
-      printf 'Usage: %s [--email <addr>] [--stdin] [--propagate] [--secret <name>] [--account <alias>[,<alias>]]\n' "$0"
+      printf 'Usage: %s [--email <addr>] [--stdin] [--propagate] [--secret <name>] [--account <alias>[,<alias>]] [--tenant <partner>-<client>]\n' "$0"
       exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
+
+SECRET_PURPOSE="Jira Cloud service account for change reconciliation (8.2), quorum verification (8.3) and tenant provisioning (12.3). Written by scripts/set-jira-token.sh."
+if [[ -n "${TENANT:-}" ]]; then
+  [[ "${TENANT}" =~ ^[a-z0-9][a-z0-9-]*-[a-z0-9][a-z0-9-]*$ ]] \
+    || die "--tenant must be <partner>-<client>, e.g. oeight-oeight."
+  SECRET_NAME="platform/jira/tenant/${TENANT}"
+  CONSUMER_KEYS="altdig-security-audit"
+  SECRET_PURPOSE="Read-only Jira service account on tenant ${TENANT}'s own Atlassian site, for change reconciliation (8.2). Written by scripts/set-jira-token.sh --tenant."
+fi
 
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
@@ -176,5 +191,5 @@ print(json.dumps({"email": os.environ["EMAIL"],
   unset TOKEN
 fi
 
-store_secret_everywhere   "${SECRET_NAME}"   "Jira Cloud service account for change reconciliation (8.2), quorum verification (8.3) and tenant provisioning (12.3). Written by scripts/set-jira-token.sh."   "${PAYLOAD}"   "${ACCOUNTS[@]}"
+store_secret_everywhere   "${SECRET_NAME}"   "${SECRET_PURPOSE}"   "${PAYLOAD}"   "${ACCOUNTS[@]}"
 unset PAYLOAD

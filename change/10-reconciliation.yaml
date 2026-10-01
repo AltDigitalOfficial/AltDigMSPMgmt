@@ -257,6 +257,15 @@ Resources:
                 Effect: Allow
                 Action: 'secretsmanager:GetSecretValue'
                 Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${JiraSecretName}-*'
+              - Sid: ReadTenantJiraCredentials
+                Effect: Allow
+                # A tenant whose change records live on its own Atlassian site
+                # has its own read-only service account there, stored by
+                # scripts/set-jira-token.sh --tenant under this prefix. The
+                # reconciliation role only; the filer and the quorum verifier
+                # talk to AltDigital's site and get no tenant credential.
+                Action: 'secretsmanager:GetSecretValue'
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:platform/jira/tenant/*'
               - Sid: ReadTenantFacts
                 Effect: Allow
                 # Which Jira project holds each account's change records.

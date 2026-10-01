@@ -491,7 +491,8 @@
       "additionalProperties": false,
       "required": [
         "cicd_tooling",
-        "deployment_frequency"
+        "deployment_frequency",
+        "ticketing"
       ],
       "properties": {
         "cicd_tooling": {
@@ -509,19 +510,47 @@
           ],
           "description": "8.2 — reconciliation tuning."
         },
-        "jira_change_project": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "8.2 — Jira project key holding THIS tenant's change records. Per tenant, not global: design 08 routes an unapproved deployment to the tenant's change approver (1.7), and tenants must not see each other's change records. Null means the tenant keeps change records outside AltDigital's Jira, which design 08 explicitly allows — reconciliation then reports the change source as UNAVAILABLE rather than reporting every deployment as unapproved."
-        },
         "customer_escalation_contacts": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/contact"
           },
           "description": "8.4 — customer-side PagerDuty escalation."
+        },
+        "ticketing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "system"
+          ],
+          "description": "Client form 12.4. Where this application's change records live, which is where change reconciliation (design 08) looks for the approval covering each deployment. Replaced change.jira_change_project on 2026-10-01, when the first tenant kept its records on its own Atlassian site. 'none' is allowed and means application deployments are reported UNAVAILABLE, never as approved or unapproved; derive-vesting.py says so.",
+          "properties": {
+            "system": {
+              "enum": [
+                "altdigital-jira",
+                "client-jira",
+                "none"
+              ],
+              "description": "altdigital-jira: a project on AltDigital's Jira. client-jira: the client's own Atlassian site, read by a read-only service account the client creates there, stored with scripts/set-jira-token.sh --tenant. none: change records are kept elsewhere or not at all."
+            },
+            "product": {
+              "enum": [
+                "jira-service-management",
+                "jira-software"
+              ],
+              "description": "Jira Service Management records carry approval decisions with the approvers' identities, which is what lets reconciliation check WHO approved. Jira Software has no approval records; reconciliation falls back to the status name. Required unless system is none."
+            },
+            "site": {
+              "type": "string",
+              "pattern": "^https://[a-z0-9-]+\\.atlassian\\.net/?$",
+              "description": "The client's Atlassian site. Required for client-jira, refused otherwise."
+            },
+            "project_key": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{1,9}$",
+              "description": "The Jira project holding this application's change records. Required unless system is none."
+            }
+          }
         }
       }
     },

@@ -100,6 +100,14 @@ change:
   cicd_tooling: "GitHub Actions"
   deployment_frequency: weekly
   customer_escalation_contacts: []
+  # Form 12.4. Where the application's change records live. client-jira is the
+  # client's own Atlassian site, read with a read-only service account they
+  # create there (scripts/set-jira-token.sh --tenant <partner>-<client>).
+  ticketing:
+    system: client-jira
+    product: jira-service-management
+    site: "https://example.atlassian.net"
+    project_key: ARC8
 
 exit:
   ip_boundary_ack: true

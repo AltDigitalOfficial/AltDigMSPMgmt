@@ -1550,6 +1550,12 @@ from OEight's Jira, not from the platform's reconciliation. It has to be
 exported into Truveon by hand or by an integration that does not exist yet.
 
 **Closing condition** — Arc8's change project becomes readable by the
-platform (moved to AltDigital's Jira, or the platform credential granted read
-access to OEight's), and `change.jira_change_project` is set in its
-questionnaire.
+platform, and its approvals are checked by identity.
+
+**Closing, 2026-10-01** — decided the same day to integrate rather than accept
+the gap. The platform can now read a tenant's change records on the tenant's
+own Atlassian site (questionnaire `change.ticketing`, `jira.using()`,
+`scripts/set-jira-token.sh --tenant`). OEight's site is Jira Service
+Management, so approvals carry identities. Remaining: the project and its site
+URL (Jamie), the read-only service account (Wayne), and checking the
+application approval rule by identity, which is the next piece of work.

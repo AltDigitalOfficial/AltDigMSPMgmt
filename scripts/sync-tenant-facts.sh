@@ -123,6 +123,13 @@ for item in accounts:
                                or val(client, "jira_change_project")
                                or default_project,
         "change_approver": val(client, "change_approver"),
+        # The tenant's own Atlassian site, when its change records are not on
+        # AltDigital's (questionnaire change.ticketing). The credential's name
+        # is a convention rather than a stored field, so it cannot drift from
+        # where scripts/set-jira-token.sh --tenant puts it.
+        "jira_site": val(client, "jira_site"),
+        "jira_secret": (f"platform/jira/tenant/{val(item, 'partner')}-{val(item, 'client')}"
+                        if val(client, "jira_site") else None),
         # B-127. Which PagerDuty service an APPLICATION-layer alarm reaches.
         # The tenant services are keyed (tier, object) and the object is this
         # app, so without it the router cannot name the tenant's own service

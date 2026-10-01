@@ -177,5 +177,51 @@ class InfrastructureApprovers(unittest.TestCase):
         self.assertIn("NOT checked", evidence)
 
 
+class TenantJiraSite(unittest.TestCase):
+    """A tenant's change records on its own Atlassian site (change.ticketing)."""
+
+    def setUp(self):
+        reconcile._APPROVAL_CACHE.clear()
+        self._approvals = reconcile.jira.approvals
+
+    def tearDown(self):
+        reconcile.jira.approvals = self._approvals
+        reconcile._APPROVAL_CACHE.clear()
+
+    def test_using_switches_site_and_credential_and_restores_them(self):
+        jira = reconcile.jira
+        before_site, before_secret = jira._site(), jira._secret_name()
+        with jira.using("https://tenant.atlassian.net", "platform/jira/tenant/p-c"):
+            self.assertEqual(jira._site(), "https://tenant.atlassian.net")
+            self.assertEqual(jira._secret_name(), "platform/jira/tenant/p-c")
+        self.assertEqual((jira._site(), jira._secret_name()), (before_site, before_secret))
+
+    def test_no_site_is_a_no_op(self):
+        jira = reconcile.jira
+        before = (jira._site(), jira._secret_name())
+        with jira.using(None, None):
+            self.assertEqual((jira._site(), jira._secret_name()), before)
+
+    def test_a_site_without_a_credential_is_refused(self):
+        with self.assertRaises(reconcile.jira.JiraUnavailable):
+            with reconcile.jira.using("https://tenant.atlassian.net", None):
+                pass
+
+    def test_same_issue_key_on_two_sites_is_judged_separately(self):
+        # Two Atlassian sites can both hold an ARC8-1. A cache keyed by issue
+        # alone would hand one site's verdict to the other.
+        verdicts = {"https://a.atlassian.net": "approved",
+                    "https://b.atlassian.net": "pending"}
+        reconcile.jira.approvals = lambda k: [{
+            "finalDecision": verdicts[reconcile.jira.current_site()], "approvers": []}]
+        change = {"key": "ARC8-1", "status": "x", "approved_by_status": False}
+        with reconcile.jira.using("https://a.atlassian.net", "s-a"):
+            a = reconcile.is_approved(dict(change))
+        with reconcile.jira.using("https://b.atlassian.net", "s-b"):
+            b = reconcile.is_approved(dict(change))
+        self.assertTrue(a[0])
+        self.assertFalse(b[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

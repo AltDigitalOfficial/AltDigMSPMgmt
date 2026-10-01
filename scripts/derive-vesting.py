@@ -356,6 +356,32 @@ def derive_maintenance_windows(q, rules, envs):
     return out
 
 
+def check_ticketing(q):
+    """Client form 12.4: the fields each ticketing system needs, and no others."""
+    t = q["change"]["ticketing"]
+    system = t["system"]
+    errs = []
+    if system == "none":
+        extra = [k for k in ("product", "site", "project_key") if t.get(k)]
+        if extra:
+            errs.append(f"change.ticketing: system is 'none' but {', '.join(extra)} "
+                        "given. Either name the system, or remove them.")
+        return errs
+    for field in ("product", "project_key"):
+        if not t.get(field):
+            errs.append(f"change.ticketing.{field} is required when system is '{system}'.")
+    if system == "client-jira" and not t.get("site"):
+        errs.append(
+            "change.ticketing.site is required when system is 'client-jira'.\n"
+            "    The client's Atlassian site, https://<name>.atlassian.net. Reconciliation\n"
+            "    reads change records there with a read-only service account the client\n"
+            "    creates (scripts/set-jira-token.sh --tenant <partner>-<client>).")
+    if system == "altdigital-jira" and t.get("site"):
+        errs.append("change.ticketing.site is given but system is 'altdigital-jira', "
+                    "which is always AltDigital's own site. Remove it, or use 'client-jira'.")
+    return errs
+
+
 def check_dedicated_infrastructure(q):
     s = q["security"]
     if s["dedicated_infrastructure_required"] and not s.get("dedicated_infrastructure_driver"):
@@ -401,6 +427,7 @@ CHECKS = [
     check_hoop,
     check_timezones,
     check_maintenance_windows,
+    check_ticketing,
     check_dedicated_infrastructure,
     # Halting checks last, so every form error is collected before a Halt ends
     # the run. main() prints both; the operator fixes the form once, not twice.
@@ -554,6 +581,18 @@ def warnings_for(q, d):
             "    not built (B-141). Harmless today because nothing patches; not harmless the\n"
             "    day patching ships without it."
         )
+    ticketing = q["change"]["ticketing"]
+    if ticketing["system"] == "none":
+        w.append(
+            "change.ticketing.system is 'none'. Change reconciliation will report every\n"
+            "    APPLICATION deployment as UNAVAILABLE -- neither approved nor unapproved,\n"
+            "    simply not checked. Infrastructure deployments are unaffected. For an\n"
+            "    audited tenant this needs a declared deviation and an owner.")
+    elif ticketing.get("product") == "jira-software":
+        w.append(
+            "change.ticketing.product is 'jira-software'. Jira Software has no approval\n"
+            "    records, so reconciliation can only infer approval from the status name and\n"
+            "    cannot check WHO approved. Jira Service Management is needed for that.")
     if d["frameworks_without_pack"] and d["conformance_packs"]:
         w.append(
             f"No conformance pack is applied for: {', '.join(d['frameworks_without_pack'])}.\n"
