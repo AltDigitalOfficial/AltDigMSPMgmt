@@ -76,6 +76,27 @@ class ClassifyEvent(unittest.TestCase):
                         role_arn=f"arn:aws:iam::{ACCT}:role/TenantAppDeployer-arc8app")
         self.assertIsNotNone(reconcile.classify_event(ev))
 
+    def test_web_identity_assumption_is_the_tenant_control_point(self):
+        # The shape CloudTrail actually records, 2026-10-01: a WebIdentityUser
+        # has userName (the OIDC subject) and NO arn. Classifying by the caller
+        # made this 'unknown', so a deploy through the control point would have
+        # been reported as unaccounted-for credentials.
+        name = next(k for k, v in reconcile.DEPLOYMENT_EVENTS.items() if v == "appdeployer-assumption")
+        ev = {"detail": {
+            "eventName": name,
+            "userIdentity": {
+                "type": "WebIdentityUser",
+                "userName": "repo:Org@1/app@2:ref:refs/heads/release",
+                "identityProvider": "token.actions.githubusercontent.com"},
+            "requestParameters": {
+                "roleArn": f"arn:aws:iam::{ACCT}:role/TenantAppDeployer-arc8app",
+                "roleSessionName": "GitHubActions"},
+            "recipientAccountId": ACCT, "awsRegion": "us-east-2",
+            "eventTime": "2026-10-01T01:26:57Z", "eventID": "e-2"}}
+        out = reconcile.classify_event(ev)
+        self.assertEqual(out["deployer"], "tenant")
+        self.assertTrue(out["via_appdeployer"])
+
     def test_other_federation_is_ignored(self):
         name = next(k for k, v in reconcile.DEPLOYMENT_EVENTS.items() if v == "appdeployer-assumption")
         ev = self.event(name, "arn:aws:sts::000000000000:assumed-role/x/y",

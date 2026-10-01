@@ -225,12 +225,23 @@ def classify_event(event):
 
     identity = detail.get("userIdentity") or {}
     arn = identity.get("arn") or ""
+    role_arn = (detail.get("requestParameters") or {}).get("roleArn", "")
     # Only AppDeployer assumptions count as the control point. A
     # AssumeRoleWithWebIdentity for some other role is somebody else's
     # federation and is not a deployment into this estate.
-    if kind == "appdeployer-assumption" and not is_tenant_deployer(
-            (detail.get("requestParameters") or {}).get("roleArn", "")):
+    if kind == "appdeployer-assumption" and not is_tenant_deployer(role_arn):
         return None
+
+    # For the assumption itself, the evidence is the ROLE ASSUMED, not the
+    # caller. A WebIdentityUser has no `arn` in CloudTrail (only userName, the
+    # OIDC subject), so classifying by the caller always answered "unknown".
+    # That turned the one event proving a deploy came THROUGH the control point
+    # into a finding that it had bypassed it: "credentials nobody has accounted
+    # for". Found on the first real OIDC assumption, 2026-10-01 (B-142).
+    if kind == "appdeployer-assumption":
+        via_appdeployer, deployer = True, "tenant"
+    else:
+        via_appdeployer, deployer = is_tenant_deployer(arn), deployer_class(arn)
 
     return {
         "event_name": name,
@@ -248,8 +259,8 @@ def classify_event(event):
         "resource": _resource_of(detail),
         "error_code": detail.get("errorCode"),
         "event_id": detail.get("eventID"),
-        "via_appdeployer": is_tenant_deployer(arn),
-        "deployer": deployer_class(arn),
+        "via_appdeployer": via_appdeployer,
+        "deployer": deployer,
     }
 
 

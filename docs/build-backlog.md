@@ -5839,10 +5839,26 @@ and policy in place. The OIDC provider was untouched. Verified:
   three approved regions;
 - the role is tagged `platform-layer: infrastructure`.
 
-**Still to prove** — OIDC federation under the RCP (D-003 correction). It
-needs one GitHub Actions run from `altdigital/demo-service`, branch `release`,
-that assumes the role. That is the last step before the RCP goes to Members,
-so that Arc8's first deploy is not the first OIDC assumption under the RCP.
+**OIDC proven 2026-10-01.** A GitHub Actions run from
+`AltDigitalOfficial/msp-demo-service`, branch `release`, assumed
+`TenantAppDeployer-demo` under the RCP. CloudTrail recorded
+`AssumeRoleWithWebIdentity` SUCCESS at 01:26:57Z, session `GitHubActions`.
+
+Two things surfaced on the way:
+- The trusted repository `altdigital/demo-service` never existed. The org is
+  `AltDigitalOfficial`.
+- GitHub sends the owner and repository IDs in the subject claim. B-142 covers
+  what that means for onboarding.
+
+Running the real event through the reconciler also found a bug that predates
+the rename. A web-identity caller has no `arn`, so the assumption classified
+as `deployer: unknown`. With no change record, it would have been reported as
+"credentials nobody has accounted for", the opposite of what it was. Fixed in
+`classify_event`: the assumption is classified by the role assumed. Tested
+with the real event's shape.
+
+The deployed reconciliation Lambda needs republishing (`publish-change.sh`)
+before Arc8's first deploy.
 
 ---
 
