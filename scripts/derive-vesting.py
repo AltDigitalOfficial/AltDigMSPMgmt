@@ -516,9 +516,10 @@ def warnings_for(q, d):
             f"retention_floor_days is {d['retention_floor_days']} ({d['retention_floor_days'] // 365}"
             " years), driven by "
             f"'{d['retention_floor_driver']}'.\n"
-            "    This becomes Object Lock COMPLIANCE retention: no principal can delete those\n"
-            "    objects for the full period, including account root and AWS Support. It is\n"
-            "    also an unbreakable commitment to storage cost for the same period."
+            "    This is the client's Truveon evidence retention floor, and cannot be\n"
+            "    shortened for evidence already kept. The AWS log archive is COMPLIANCE-locked\n"
+            "    for 2190 days for every tenant regardless (D-024), so this answer does not\n"
+            "    change what is kept in AWS."
         )
     if q["security"]["external_key_material"]:
         w.append(

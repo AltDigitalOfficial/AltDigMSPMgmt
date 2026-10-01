@@ -325,7 +325,15 @@ def handler(event, context):
 
     for account in member_accounts():
         who = contacts.get((account["partner"], account["client"]), {})
-        to_address = who.get("tech_contact")
+        # The development manager first, then the technical contact. The
+        # questionnaire has always said the digest goes to the development
+        # manager (client form 3.6): "the main way a manager sees platform
+        # activity without needing an AWS login". This read tech_contact only,
+        # so on a tenant where the two differ -- Arc8's manager runs the dev
+        # team, its technical contact is a developer -- the person the form
+        # promised it to never got it. Fixed 2026-10-01. The fallback keeps a
+        # tenant with no manager recorded from silently losing its digest.
+        to_address = who.get("dev_manager") or who.get("tech_contact")
         if not to_address:
             # Recorded, not silent. A client with no contact means the digest —
             # which design doc 06 calls the documented evidence that monitoring
@@ -334,8 +342,8 @@ def handler(event, context):
             # than inferred from a shorter `sent` list than expected.
             skipped.append({"account": account["account_id"],
                             "client": f"{account['partner']}/{account['client']}",
-                            "reason": "no tech_contact on the client registry record "
-                                      "(questionnaire 1.5)"})
+                            "reason": "no dev_manager or tech_contact on the client "
+                                      "registry record (questionnaire 3.6 / 3.1)"})
             continue
 
         try:

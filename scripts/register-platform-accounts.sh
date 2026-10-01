@@ -97,6 +97,13 @@ print((json.loads(sys.argv[1]) or {}).get(sys.argv[2], 'prod'))
   # SOC 2 — design 15 puts infrastructure operations, platform controls, the
   # evidence pipeline, incident response and change management in the
   # reference report. That is not a per-account judgement to make here.
+  #
+  # Service model `unset`, not a letter. A, B and C (questionnaire 1.7)
+  # describe what AltDigital does FOR a client, and these accounts are
+  # AltDigital's own; truveon_handoff.py takes the same position for
+  # AltDigital's own Truveon tenant. This passed `managed` until 2026-10-01,
+  # a vocabulary registry.sh no longer accepts, so the script would have died
+  # on its next run.
   if [[ "${DRY_RUN}" == "1" ]]; then
     printf '%s DRY%s  %-32s %s  kind=shared env=%s\n' \
       "${C_YELLOW}" "${C_RESET}" "${ALIAS}" "${ACCOUNT_ID}" "${ENV_VALUE}"
@@ -108,7 +115,7 @@ print((json.loads(sys.argv[1]) or {}).get(sys.argv[2], 'prod'))
       --slug platform \
       --app "${ALIAS#altdig-}" \
       --env "${ENV_VALUE}" \
-      --service-model managed \
+      --service-model unset \
       --compliance soc2 \
       --state active >/dev/null \
       || die "Could not record ${ALIAS} (${ACCOUNT_ID})."
@@ -120,7 +127,7 @@ done <<<"${ACCOUNTS}"
 hr
 log "Platform accounts recorded: ${COUNT}"
 log "  kind          : shared — cost absorbed into the uplift, not allocated"
-log "  service model : managed"
+log "  service model : unset (A/B/C apply to client accounts only)"
 log "  compliance    : soc2 (AltDigital's own reference report, design 15)"
 hr
 info "Re-run after creating a platform account. A tenant account is recorded"
