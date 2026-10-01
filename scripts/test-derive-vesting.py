@@ -161,11 +161,13 @@ class Ticketing(unittest.TestCase):
         q["change"]["ticketing"] = ticketing
         return q
 
-    def test_client_jira_needs_a_site(self):
-        rc, err = run(self.q(system="client-jira", product="jira-service-management",
-                             project_key="ARC8"))
-        self.assertEqual(rc, 1, err)
-        self.assertIn("ticketing.site is required", err)
+    def test_client_jira_without_site_or_key_warns_but_vests(self):
+        # Form 12.4 is Dev, not Vest: account creation must not wait on a
+        # ticketing project that does not exist yet (OEight, 2026-10-01).
+        rc, out = run_report(self.q(system="client-jira", product="jira-service-management"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("project_key, site not yet given", out)
+        self.assertIn("UNAVAILABLE", out)
 
     def test_altdigital_jira_refuses_a_site(self):
         rc, err = run(self.q(system="altdigital-jira", product="jira-service-management",

@@ -367,19 +367,23 @@ def check_ticketing(q):
             errs.append(f"change.ticketing: system is 'none' but {', '.join(extra)} "
                         "given. Either name the system, or remove them.")
         return errs
-    for field in ("product", "project_key"):
-        if not t.get(field):
-            errs.append(f"change.ticketing.{field} is required when system is '{system}'.")
-    if system == "client-jira" and not t.get("site"):
-        errs.append(
-            "change.ticketing.site is required when system is 'client-jira'.\n"
-            "    The client's Atlassian site, https://<name>.atlassian.net. Reconciliation\n"
-            "    reads change records there with a read-only service account the client\n"
-            "    creates (scripts/set-jira-token.sh --tenant <partner>-<client>).")
+    # Missing fields are NOT errors here: form 12.4 is marked Dev, not Vest, and
+    # account creation must not wait on a ticketing project that does not exist
+    # yet (decided 2026-10-01, OEight). They are reported by ticketing_pending()
+    # as warnings instead. Contradictions still refuse.
     if system == "altdigital-jira" and t.get("site"):
         errs.append("change.ticketing.site is given but system is 'altdigital-jira', "
                     "which is always AltDigital's own site. Remove it, or use 'client-jira'.")
     return errs
+
+
+def ticketing_pending(q):
+    """Fields form 12.4 still needs, for a warning. Empty when complete."""
+    t = q["change"]["ticketing"]
+    if t["system"] == "none":
+        return []
+    need = ["product", "project_key"] + (["site"] if t["system"] == "client-jira" else [])
+    return [f for f in need if not t.get(f)]
 
 
 def check_dedicated_infrastructure(q):
@@ -582,6 +586,16 @@ def warnings_for(q, d):
             "    day patching ships without it."
         )
     ticketing = q["change"]["ticketing"]
+    pending = ticketing_pending(q)
+    if pending:
+        w.append(
+            f"change.ticketing is '{ticketing['system']}' but {', '.join(pending)} not yet given.\n"
+            "    Accounts can be created; until these are filled in, change reconciliation\n"
+            "    reports this tenant's APPLICATION deployments as UNAVAILABLE. Fill them in\n"
+            "    and re-run onboarding from step 1 to write them to the registry."
+            + ("\n    The client's site also needs its read-only service account stored:\n"
+               "    scripts/set-jira-token.sh --tenant <partner>-<client>."
+               if ticketing["system"] == "client-jira" else ""))
     if ticketing["system"] == "none":
         w.append(
             "change.ticketing.system is 'none'. Change reconciliation will report every\n"
