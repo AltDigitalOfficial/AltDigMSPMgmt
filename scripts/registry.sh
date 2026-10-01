@@ -67,7 +67,7 @@ Clients
 Accounts
   put-account    --account-id ID --partner S --client S --env ENV
                  [--app S] [--baseline-version N]
-                 [--service-model A|B|C] [--compliance hipaa+soc2]
+                 [--service-model A|B|C] [--compliance hipaa_soc2]
   get-account    --account-id ID
   list-accounts
 
@@ -517,6 +517,12 @@ cmd_put_account() {
   [[ -n "${ACCOUNT_ID}" ]]  || die "--account-id is required."
   check_kind "${KIND:=tenant}"
   check_service_model "${SERVICE_MODEL:=unset}"
+  # Frameworks joined with '_', e.g. hipaa_soc2. The value becomes a Cost
+  # Category rule value, which AWS restricts to letters, numbers, spaces, '-'
+  # and '_'. The first real vesting wrote 'hipaa+soc2' and the Cost Category
+  # update refused it (2026-10-01); checked here so it fails where it is written.
+  [[ "${COMPLIANCE:-none}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+    || die "--compliance '${COMPLIANCE}' must be lowercase letters, digits, '-' and '_' (e.g. hipaa_soc2)."
   if [[ "${KIND}" == "shared" ]]; then
     # AltDigital's own accounts have no partner and no client. Requiring them
     # would mean inventing values, and an invented partner is one that shows

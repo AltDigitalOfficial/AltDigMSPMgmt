@@ -124,7 +124,7 @@ SECOPS_EMAIL="$(q_get ".get('identity',{}).get('security_contact',{}).get('email
 JIRA_PROJECT="$(q_get "['change']['ticketing'].get('project_key') or ''")"
 JIRA_SITE_URL="$(q_get "['change']['ticketing'].get('site') or ''")"
 SERVICE_MODEL="$(q_get "['identity']['service_model']")"
-COMPLIANCE="$("${PY}" -c "import sys,yaml;d=yaml.safe_load(open(sys.argv[1],encoding='utf-8'));print('+'.join(f for f in d['compliance']['frameworks'] if f!='none') or 'none')" "${QPATH}")"
+COMPLIANCE="$("${PY}" -c "import sys,yaml;d=yaml.safe_load(open(sys.argv[1],encoding='utf-8'));print('_'.join(f for f in d['compliance']['frameworks'] if f!='none') or 'none')" "${QPATH}")"
 RETENTION="$(d_get "['retention_floor_days']")"
 EGRESS="$(d_get "['egress_profile']")"
 ENVS="$(printf '%s' "${DERIVED}" | "${PY}" -c "import sys,json;print(' '.join(json.load(sys.stdin)['environments']))")"
