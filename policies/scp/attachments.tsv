@@ -33,36 +33,38 @@
 # original, never the other way round. With 10 SCPs allowed per OU the swap
 # goes one policy at a time. deploy-policies.sh never detaches; the detach is
 # a deliberate step of its own. Swapped: Sandbox 2026-09-30; Infrastructure and
-# Security 2026-10-01 (15.4a). Members is next (15.4b). When every OU carries the v2s, the originals
+# Security 2026-10-01 (15.4a); Members 2026-10-01 (15.4b). When every OU carries the v2s, the originals
 # are retired and these lines go.
-01-protect-detective-controls.json	members
-02-protect-data-protection.json	members
-03-protect-platform-identity.json	members
-01-protect-detective-controls-v2.json	sandbox,security,infra
-02-protect-data-protection-v2.json	sandbox,security,infra
-03-protect-platform-identity-v2.json	sandbox,security,infra
+# The originals are attached NOWHERE since 2026-10-01 (15.4b) and kept, detached,
+# as a one-call rollback until Arc8 is live. Then delete them and these lines.
+# 01-protect-detective-controls.json
+# 02-protect-data-protection.json
+# 03-protect-platform-identity.json
+01-protect-detective-controls-v2.json	sandbox,members,security,infra
+02-protect-data-protection-v2.json	sandbox,members,security,infra
+03-protect-platform-identity-v2.json	sandbox,members,security,infra
 
 # 04 is sandbox-only until a tenant exists to negotiate it with. It is the
 # only policy in this set that denies ordinary CREATION rather than
 # tampering with a control, so it is the only one that can stop a
 # developer working. Widening it to members is a conversation, not a
 # deployment.
-04-require-tags.json	sandbox
+04-require-tags.json	sandbox,members
 
 # 05 is sandbox-only for the same reason as 04: it denies an action
 # developers legitimately take. Widening it to members needs every
 # tenant pipeline that creates a role to be passing the boundary first,
 # which is a conversation and a migration rather than a deployment.
-05-require-boundary.json	sandbox
+05-require-boundary.json	sandbox,members
 
 # 06 and 07 are sandbox-only for now. 06 especially: attached to
 # members it denies every action in an unapproved region, including to
 # a tenant pipeline that deploys somewhere nobody checked. That is a
 # conversation before it is a deployment.
-06-region-restriction.json	sandbox
-07-deny-bypass.json	sandbox
+06-region-restriction.json	sandbox,members
+07-deny-bypass.json	sandbox,members
 
 # The first RCP. design 11 names cross-account trust as a bypass, and no
 # SCP condition key can see a trust policy's Principal -- an RCP
 # evaluates on the RESOURCE side and denies the assume itself. D-003.
-00-no-external-principals.json	sandbox
+00-no-external-principals.json	sandbox,members
