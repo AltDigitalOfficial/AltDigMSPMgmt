@@ -5920,6 +5920,31 @@ is written against the explicit exemption lists from B-135, not against
 **Blocks Arc8** — with B-135. Arc8's accounts are the first where someone
 other than AltDigital holds IAM rights.
 
+**Built 2026-10-01, Sandbox.** SCP 07 statement `NoUnapprovedIdentityProviders`
+denies these to everyone except the deployment principals
+(`OrganizationAccountAccessRole`, `stacksets-exec-*`, `PlatformDeployer`) and
+service-linked roles:
+- `iam:CreateOpenIDConnectProvider`
+- `iam:UpdateOpenIDConnectProviderThumbprint`
+- `iam:AddClientIDToOpenIDConnectProvider`
+- `iam:CreateSAMLProvider`
+- `iam:UpdateSAMLProvider`
+
+There are only two legitimate creators. `change/00-appdeployer.yaml` creates
+the GitHub provider, and is always deployed by a deployment principal.
+Identity Center creates `AWSSSO_…_DO_NOT_DELETE` through its service-linked
+role, which no SCP constrains.
+
+Deletes are deliberately not covered. Deleting a provider removes trust
+rather than adding it.
+
+Harness: the subject's `CreateOpenIDConnectProvider` was denied with the SCP
+named (31 passed, 0 failed). The case runs in `no` mode, because a
+differential call that succeeded would create a real provider. If the
+guardrail is ever absent, the case deletes what it created.
+
+**Remaining** — reaches Members with 07 in 15.4b.
+
 ---
 
 ## B-139 · Account-level security settings were set nowhere
@@ -6207,3 +6232,38 @@ because only a publish runs the check.
 **Next** — read design 11's scenario table against `SCENARIOS` in
 `telemetry/src/gap.py`. Then fix whichever is wrong. Do not loosen the check
 to make it pass.
+
+---
+
+## B-146 · The incident readout cannot assume the responder role it is written to use
+
+**Observed** — 2026-10-01T19:07Z, during the post-swap watch for 15.4a.
+`PlatformIncidentReadout` (Audit) was refused `sts:AssumeRole` on
+`PlatformSecurityResponder` in Sandbox Canary, 8 times. An incident had been
+opened by the guardrail harness run.
+
+**Cause** — the responder's trust policy names `PlatformContainment` only
+(`containment/00-responder-role.yaml`, `Principal: AWS: !Ref
+ContainmentRoleArn`). The readout's own policy grants
+`sts:AssumeRole` on the responder (`containment/10-containment.yaml`,
+`AssumeTheResponderRole`), but the target never trusted it. So the readout
+has never been able to read a member account.
+
+This is not the SCP swap:
+- the message carries no "explicit deny" clause, which means no policy
+  ALLOWED the call;
+- `PlatformContainment`, in the same Audit account under the same v2 SCPs,
+  assumed the same role 16 times in that hour without a failure.
+
+The 24-hour baseline missed it only because no incident had been opened in
+that window.
+
+**Why it matters** — design 07's readout is how an incident becomes something
+a human can act on. A readout that cannot reach the account produces a readout
+with nothing in it, and is quiet about why. The failure is only in CloudTrail.
+
+**Fix — a decision, not a one-liner.** Either the responder trusts the readout
+too, or the readout gets its own read-only role in members accounts. The
+second keeps the responder (which can isolate and revoke) trusted by exactly
+one principal. That is the reason to prefer it, and it is a containment design
+choice. Do not just widen the responder's trust to make this pass.

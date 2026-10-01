@@ -32,14 +32,15 @@
 # swapped onto each other OU in 15.4, attaching the v2 before detaching the
 # original, never the other way round. With 10 SCPs allowed per OU the swap
 # goes one policy at a time. deploy-policies.sh never detaches; the detach is
-# a deliberate step of its own. When every OU carries the v2s, the originals
+# a deliberate step of its own. Swapped: Sandbox 2026-09-30; Infrastructure and
+# Security 2026-10-01 (15.4a). Members is next (15.4b). When every OU carries the v2s, the originals
 # are retired and these lines go.
-01-protect-detective-controls.json	members,security,infra
-02-protect-data-protection.json	members,security,infra
-03-protect-platform-identity.json	members,security,infra
-01-protect-detective-controls-v2.json	sandbox
-02-protect-data-protection-v2.json	sandbox
-03-protect-platform-identity-v2.json	sandbox
+01-protect-detective-controls.json	members
+02-protect-data-protection.json	members
+03-protect-platform-identity.json	members
+01-protect-detective-controls-v2.json	sandbox,security,infra
+02-protect-data-protection-v2.json	sandbox,security,infra
+03-protect-platform-identity-v2.json	sandbox,security,infra
 
 # 04 is sandbox-only until a tenant exists to negotiate it with. It is the
 # only policy in this set that denies ordinary CREATION rather than

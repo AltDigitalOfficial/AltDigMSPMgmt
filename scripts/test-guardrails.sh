@@ -410,6 +410,29 @@ else
   emit AMBIG "ec2:ModifySnapshotAttribute" "07/NoSnapshotOrImageSharing"     "no real snapshot to test against; a synthetic id fails validation before authorization and would test nothing"
 fi
 
+# Registering an identity provider is how a local administrator would create
+# an external trust path the RCP no longer covers: their own OIDC issuer, plus
+# a role that trusts it (B-138). `no` mode, not the differential: the probe is
+# not exempt from this statement, and a differential call that SUCCEEDED would
+# create a real provider. The .invalid URL cannot resolve. If the guardrail is
+# ever absent, the provider is created, reported, and deleted at once.
+HARNESS_OIDC_URL="https://guardrail-harness.invalid"
+oidc_out="$(as_test aws iam create-open-id-connect-provider --url "${HARNESS_OIDC_URL}" \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 0000000000000000000000000000000000000000 2>&1)" && oidc_rc=0 || oidc_rc=$?
+if [[ ${oidc_rc} -eq 0 ]]; then
+  emit FAIL "iam:CreateOpenIDConnectProvider" "07/NoUnapprovedIdentityProviders" \
+    "a non-platform principal registered an identity provider — guardrail absent"
+  as_org aws iam delete-open-id-connect-provider --open-id-connect-provider-arn \
+    "arn:aws:iam::${TARGET_ACCOUNT}:oidc-provider/guardrail-harness.invalid" >/dev/null 2>&1 \
+    || warn "Could not delete the harness OIDC provider — remove it by hand."
+elif scp_denied "${oidc_out}"; then
+  emit PASS "iam:CreateOpenIDConnectProvider" "07/NoUnapprovedIdentityProviders" "denied, SCP named explicitly"
+else
+  emit AMBIG "iam:CreateOpenIDConnectProvider" "07/NoUnapprovedIdentityProviders" \
+    "refused, but not provably by the SCP — $(printf '%s' "${oidc_out}" | tr -d '\n' | grep -o 'An error occurred.*' | cut -c1-100)"
+fi
+
 # The harness volume has now served both the platform-tag check and the
 # snapshot check, so it can go. Deleted here rather than in the 04 block,
 # where removing it left check 07 with nothing to snapshot.
