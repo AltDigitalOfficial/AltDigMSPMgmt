@@ -6154,3 +6154,56 @@ it was hard:
 
 **Remaining** — the StackSet targets Sandbox only. It joins the other baseline
 StackSets when 15.4b widens them to Members.
+
+---
+
+## B-144 · A publish deployed another session's uncommitted code as a live control — guarded
+
+**Happened** — 2026-10-01. `publish-change.sh` packaged `change/src` from the
+working tree while another session had uncommitted, in-progress edits to
+`reconcile.py` and `jira.py`. The package was deployed to the Audit account's
+`platform-change` stack as the live change-reconciliation control. Its hash
+(`change-832dfb0e…`) matched neither the commit (`…29d35ec6…`) nor the later
+working tree (`…1bb6eb0c…`), so the deployed code was a state that never
+existed in history.
+
+**Contained** — about 20 minutes later the stack was redeployed on the
+previous package (`change-9a9c7e7bde555b37.zip`), the known-good state from
+before. The reconciler logged no errors in that window. The fix that prompted
+the publish (B-136, WebIdentity classification) is therefore NOT live yet. It
+goes out once the other session's reconciler work is committed.
+
+**Guarded** — `require_committed` in `lib/common.sh`. Every `publish-*.sh`
+calls it, naming the directories it packages:
+- each script's `*/src`;
+- `design/06a-alarm-specification.yaml` for instrumentation, response and
+  router;
+- `scripts/lib/extract_event_specs.py` for router.
+
+It refuses on any modified or untracked file there, and it fails loudly if git
+itself cannot run. There is no override flag: a package deployed as a platform
+control should be a commit someone can name. Proved both ways:
+- `change/src`, dirty, is refused and its files are named;
+- `telemetry/src`, clean, passes the guard.
+
+**Lesson** — parallel sessions share one working tree. Anything that ships
+files from disk, not from a commit, ships whatever another session is halfway
+through. Staging explicitly protects commits; it does nothing for publishes.
+
+---
+
+## B-145 · publish-telemetry.sh has refused to publish since 2026-09-21
+
+**Observed** — 2026-10-01, testing B-144's guard. `publish-telemetry.sh`'s own
+self-check fails on committed code: "gap.py has lost a control: 3 scenario(s)
+alarm; design 11's table has exactly two." The last change to `telemetry/src`
+was a8d6dbf, 2026-09-21. Either that commit added a third scenario without
+updating the check, or the third scenario contradicts design 11.
+
+**Why it matters** — the telemetry-gap package cannot be republished. Whatever
+is deployed is frozen at its last successful publish, and nothing reports it,
+because only a publish runs the check.
+
+**Next** — read design 11's scenario table against `SCENARIOS` in
+`telemetry/src/gap.py`. Then fix whichever is wrong. Do not loosen the check
+to make it pass.

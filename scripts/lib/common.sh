@@ -254,6 +254,39 @@ get_param() {
 # zipped twice hashes differently and content-addressing degrades into "a new
 # key every run". Fixed date_time and sorted entries remove both.
 #
+# require_committed <dir...> — refuse to package sources that are not committed.
+#
+# Every publish-*.sh packages what is ON DISK. On 2026-10-01 a publish of
+# change/src picked up another session's uncommitted, in-progress edits to
+# reconcile.py and jira.py, and deployed them as the live change-reconciliation
+# control in Audit. The package hash matched neither the commit nor the later
+# working tree, so the deployed code was a state that never existed in
+# history. It was rolled back to the previous package. Parallel sessions on one
+# working tree make this the normal case, not an edge.
+#
+# A package deployed as a platform control should always be a commit someone
+# can name, so there is no override flag. Commit or stash first. Untracked
+# files count: a new module nobody has committed is just as unreviewed.
+require_committed() {
+  local dirty
+  # win_path: with MSYS_NO_PATHCONV set, a Windows git.exe receives /c/... as
+  # a path that does not exist and exits 128. Under set -e that killed the
+  # caller silently, before this check could say anything (trap 1 in
+  # CLAUDE.md). And a check that cannot run must stop the publish loudly,
+  # never wave it through.
+  if ! dirty="$(git -C "$(win_path "${REPO_ROOT}")" status --porcelain -- "$@" 2>&1)"; then
+    die "Could not check that the sources are committed:
+        ${dirty}
+      Refusing to package unchecked sources."
+  fi
+  dirty="$(printf '%s' "${dirty}" | no_cr)"
+  [[ -z "${dirty}" ]] || die "Uncommitted changes in sources this would package:
+$(printf '%s\n' "${dirty}" | sed 's/^/        /')
+      A publish deploys what is on disk. Commit (or stash) first, so the
+      package is a commit someone can name. If another session owns these
+      edits, wait for it to commit."
+}
+
 # Shared rather than copied. Two publish scripts existed with the same thirty
 # lines, which is the arrangement where one gets a fix and the other does not.
 zip_deterministic() {

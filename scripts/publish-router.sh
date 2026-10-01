@@ -17,6 +17,9 @@ done
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
 require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
+# Only committed sources are packaged: what runs must be a commit someone
+# can name. lib/common.sh, require_committed.
+require_committed alerting/src instrumentation/src design/06a-alarm-specification.yaml scripts/lib/extract_event_specs.py
 
 PY="$(command -v python || command -v python3)" || die "python not found."
 TOOLING="$(get_param /org/account/altdig-infra-tooling)"

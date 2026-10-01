@@ -23,6 +23,9 @@ done
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
 require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
+# Only committed sources are packaged: what runs must be a commit someone
+# can name. lib/common.sh, require_committed.
+require_committed reporting/src
 
 TOOLING="$(get_param /org/account/altdig-infra-tooling)"
 [[ -n "${TOOLING}" && "${TOOLING}" != "None" ]] \
