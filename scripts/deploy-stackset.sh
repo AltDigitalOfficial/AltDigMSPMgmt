@@ -8,6 +8,28 @@
 #     LogArchiveBucketName=... [--dry-run]
 #
 # ---------------------------------------------------------------------------
+# Operated from Infra Tooling, as delegated administrator
+# ---------------------------------------------------------------------------
+# Every StackSet call below runs with Infra Tooling credentials and
+# --call-as DELEGATED_ADMIN. The management account is used only to read the
+# /platform/ parameters this script needs, before it switches.
+#
+# A service-managed StackSet's record lives in the management account however
+# it was created, and the registered delegated administrator can operate every
+# one of them, including the ten created from the management account before
+# delegation existed. Proved 2026-09-30: a no-op update of
+# platform-canary-artifacts from Tooling succeeded, and both instances stayed
+# CURRENT. D-012 had assumed a StackSet could only be operated from the
+# account that created it, and F-2 planned a retire-and-replace migration on
+# that basis. Neither was needed. What D-012 actually objected to, the
+# management account running the pipelines, is closed by where this script
+# makes its calls, not by moving the StackSets.
+#
+# Tooling is reached through OrganizationAccountAccessRole for now, the same
+# break-glass path every operator script uses. 15.3 replaces it with
+# PlatformDeployer from the pipeline.
+#
+# ---------------------------------------------------------------------------
 # Service-managed, and why that matters
 # ---------------------------------------------------------------------------
 # A SERVICE-MANAGED StackSet targets organizational units rather than a list of
@@ -24,11 +46,8 @@
 #     AWSCloudFormationStackSetExecutionRole in every target account, which is
 #     another Platform-adjacent role to provision and defend.
 #
-# The execution principal is 'stacksets-exec-<hash>', which SCPs 01, 02 and 03
-# exclude. That exclusion was written from AWS documentation and has never been
-# exercised — this script is where it gets tested. If it is wrong, stack
-# instances fail with AccessDenied on role creation rather than anything
-# clearer.
+# The execution principal is 'stacksets-exec-<hash>', which every SCP exempts
+# by that pattern (B-135).
 #
 # ---------------------------------------------------------------------------
 # Staged rollout
@@ -55,6 +74,9 @@ Usage: deploy-stackset.sh --name <stackset> --template <path> --ou <target>
   --max-concurrent  Accounts updated in parallel. Default 1 — a bad baseline
                     reaching one account is recoverable; reaching forty at once
                     is an incident.
+
+Runs every StackSet call from Infra Tooling as delegated administrator. Start
+with management-account credentials; the script switches.
 USAGE
 }
 
@@ -81,6 +103,9 @@ export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
 require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
 
+# --- everything that needs the management account, first -------------------
+# The /platform/ parameters live in the management account's SSM. Read them all
+# before switching, because nothing after the switch can.
 case "${OU}" in
   sandbox)  TARGET_OU="$(get_param /org/ou/sandbox)" ;;
   members)  confirm_production; TARGET_OU="$(get_param /org/ou/members)" ;;
@@ -90,6 +115,29 @@ case "${OU}" in
 esac
 [[ -n "${TARGET_OU}" && "${TARGET_OU}" != "None" ]] || die "Could not resolve the ${OU} OU."
 
+TOOLING_ACCOUNT="$(get_param /org/account/altdig-infra-tooling)"
+[[ "${TOOLING_ACCOUNT}" =~ ^[0-9]{12}$ ]] \
+  || die "Infra Tooling is not registered in SSM (/platform/org/account/altdig-infra-tooling)."
+
+# --- switch to Infra Tooling ------------------------------------------------
+read -r T_KEY T_SECRET T_TOKEN <<<"$(aws sts assume-role \
+  --role-arn "arn:aws:iam::${TOOLING_ACCOUNT}:role/OrganizationAccountAccessRole" \
+  --role-session-name platform-stackset-deploy \
+  --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+  --output text 2>/dev/null | no_cr)"
+[[ -n "${T_KEY:-}" ]] || die "Could not assume OrganizationAccountAccessRole in Infra Tooling."
+unset AWS_PROFILE
+export AWS_ACCESS_KEY_ID="${T_KEY}" AWS_SECRET_ACCESS_KEY="${T_SECRET}" AWS_SESSION_TOKEN="${T_TOKEN}"
+
+# Checked, not assumed. A run that silently stayed in the management account
+# would still work and would re-open D-012 without anyone noticing.
+NOW_IN="$(aws sts get-caller-identity --query Account --output text | no_cr)"
+[[ "${NOW_IN}" == "${TOOLING_ACCOUNT}" ]] \
+  || die "Expected to be operating from Infra Tooling (${TOOLING_ACCOUNT}), but credentials resolve to ${NOW_IN}."
+
+# Every StackSet call goes through this, so none can forget the flag.
+cfn_ss() { aws cloudformation "$@" --call-as DELEGATED_ADMIN; }
+
 hr
 log "StackSet deploy"
 log "  stackset : ${NAME}"
@@ -97,6 +145,7 @@ log "  template : ${TEMPLATE}"
 log "  target   : ${OU} OU (${TARGET_OU})"
 log "  regions  : ${REGIONS}"
 log "  parallel : ${MAX_CONCURRENT} account(s), tolerance ${FAILURE_TOLERANCE}"
+log "  operator : Infra Tooling ${TOOLING_ACCOUNT}, as delegated administrator"
 hr
 
 cfn_validate "${REPO_ROOT}/${TEMPLATE}"
@@ -114,8 +163,7 @@ cfn_validate "${REPO_ROOT}/${TEMPLATE}"
 # a quote or a space is safe too.
 PARAM_JSON=""
 if [[ ${#PARAMS[@]} -gt 0 ]]; then
-  PARAM_JSON="$(printf '%s
-' "${PARAMS[@]}" | "$(command -v python || command -v python3)" -c '
+  PARAM_JSON="$(printf '%s\n' "${PARAMS[@]}" | "$(command -v python || command -v python3)" -c '
 import json,sys
 out=[]
 for line in sys.stdin.read().splitlines():
@@ -127,11 +175,11 @@ print(json.dumps(out))
 ')"
 fi
 
-EXISTS="$(aws cloudformation describe-stack-set --stack-set-name "${NAME}" \
-  --call-as SELF --query 'StackSet.StackSetId' --output text 2>/dev/null | no_cr || true)"
+EXISTS="$(cfn_ss describe-stack-set --stack-set-name "${NAME}" \
+  --query 'StackSet.StackSetId' --output text 2>/dev/null | no_cr || true)"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
-  printf '%s DRY%s  %s stack set %s\n' "${C_YELLOW}" "${C_RESET}" \
+  printf '%s DRY%s  %s stack set %s (from Infra Tooling, DELEGATED_ADMIN)\n' "${C_YELLOW}" "${C_RESET}" \
     "$([[ -n "${EXISTS}" ]] && echo update || echo create)" "${NAME}"
   printf '%s DRY%s  create stack instances in OU %s across %s\n' \
     "${C_YELLOW}" "${C_RESET}" "${TARGET_OU}" "${REGIONS}"
@@ -140,7 +188,7 @@ fi
 
 if [[ -z "${EXISTS}" ]]; then
   info "Creating stack set ${NAME}"
-  aws cloudformation create-stack-set \
+  cfn_ss create-stack-set \
     --stack-set-name "${NAME}" \
     --template-body "file://$(win_path "${REPO_ROOT}/${TEMPLATE}")" \
     --permission-model SERVICE_MANAGED \
@@ -152,7 +200,7 @@ if [[ -z "${EXISTS}" ]]; then
   ok "stack set created"
 else
   info "Updating stack set ${NAME}"
-  aws cloudformation update-stack-set \
+  cfn_ss update-stack-set \
     --stack-set-name "${NAME}" \
     --template-body "file://$(win_path "${REPO_ROOT}/${TEMPLATE}")" \
     --permission-model SERVICE_MANAGED \
@@ -188,14 +236,15 @@ fi
 # list — a stack set already targeting sandbox and members would report members
 # as untargeted and try to create instances again, colliding with the update
 # that is still running.
-TARGETED_OUS="$(aws cloudformation describe-stack-set --stack-set-name "${NAME}"   --query 'StackSet.OrganizationalUnitIds' --output text 2>/dev/null   | no_cr | tr '	
-' '  ' || true)"
+TARGETED_OUS="$(cfn_ss describe-stack-set --stack-set-name "${NAME}" \
+  --query 'StackSet.OrganizationalUnitIds' --output text 2>/dev/null \
+  | no_cr | tr '\t\n' '  ' || true)"
 
 if [[ " ${TARGETED_OUS} " == *" ${TARGET_OU} "* && -n "${EXISTS}" ]]; then
   skip "${TARGET_OU} is already a target; the stack set update redeploys to it"
   info "Waiting for the update to complete"
   for _ in $(seq 1 80); do
-    STATUS="$(aws cloudformation list-stack-set-operations --stack-set-name "${NAME}" \
+    STATUS="$(cfn_ss list-stack-set-operations --stack-set-name "${NAME}" \
       --query 'Summaries[0].Status' --output text 2>/dev/null | no_cr)"
     case "${STATUS}" in
       SUCCEEDED)      ok "operation SUCCEEDED"; break ;;
@@ -205,7 +254,7 @@ if [[ " ${TARGETED_OUS} " == *" ${TARGET_OU} "* && -n "${EXISTS}" ]]; then
   done
   hr
   log "Stack instances:"
-  aws cloudformation list-stack-instances --stack-set-name "${NAME}" \
+  cfn_ss list-stack-instances --stack-set-name "${NAME}" \
     --query 'Summaries[].[Account,Region,Status,StatusReason]' --output text 2>/dev/null \
     | no_cr | cut -c1-140 | sed 's/^/  /'
   hr
@@ -213,7 +262,7 @@ if [[ " ${TARGETED_OUS} " == *" ${TARGET_OU} "* && -n "${EXISTS}" ]]; then
 fi
 
 info "Creating stack instances in ${OU}"
-OP_ID="$(aws cloudformation create-stack-instances \
+OP_ID="$(cfn_ss create-stack-instances \
   --stack-set-name "${NAME}" \
   --deployment-targets "OrganizationalUnitIds=${TARGET_OU}" \
   --regions "$(printf '%s' "${REGIONS}" | tr ',' ' ')" \
@@ -227,7 +276,7 @@ else
   log "  operation: ${OP_ID}"
   info "Waiting for the operation to complete"
   for _ in $(seq 1 60); do
-    STATUS="$(aws cloudformation describe-stack-set-operation \
+    STATUS="$(cfn_ss describe-stack-set-operation \
       --stack-set-name "${NAME}" --operation-id "${OP_ID}" \
       --query 'StackSetOperation.Status' --output text 2>/dev/null | no_cr)"
     case "${STATUS}" in
@@ -240,7 +289,7 @@ fi
 
 hr
 log "Stack instances:"
-aws cloudformation list-stack-instances --stack-set-name "${NAME}" \
+cfn_ss list-stack-instances --stack-set-name "${NAME}" \
   --query 'Summaries[].[Account,Region,Status,StatusReason]' --output text 2>/dev/null \
   | no_cr | cut -c1-140 | sed 's/^/  /'
 hr

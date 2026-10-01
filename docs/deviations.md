@@ -117,7 +117,7 @@ years, so masking at the source is the only control that actually works.
 
 ---
 
-## D-012 · Four StackSets remain in the management account
+## D-012 · Four StackSets remain in the management account — CLOSED
 
 **Design position** — [02-platform-architecture.md](../design/02-platform-architecture.md):
 *"The Organization management account holds nothing but the Organization
@@ -163,6 +163,47 @@ constrains it. The StackSets widen an exposure rather than creating a new one.
 
 The second is the cheaper path and should be taken at the next major baseline
 change, rather than as a migration in its own right.
+
+**Closed 2026-09-30 — the premise was wrong, and no migration was needed.**
+
+The record assumed a StackSet can only be operated from the account that
+created it. For service-managed StackSets that is not so. The StackSet record
+lives in the management account however it was created, and the registered
+delegated administrator can operate every one. Infra Tooling ran a no-op
+`update-stack-set --call-as DELEGATED_ADMIN` on `platform-canary-artifacts`,
+which was created from the management account. It succeeded, and both
+instances stayed `CURRENT`. Nobody had tested the premise. The Phase 15 plan
+repeated it, and founder decision F-2 (retire and replace all ten) was built
+on it. F-2 is withdrawn by founder decision, 2026-09-30.
+
+There were also ten such StackSets by then, not the four named above.
+
+**What the design position actually asks for** is that the management account
+does not run the pipelines. That is now true:
+- `scripts/deploy-stackset.sh` reads the `/platform/` parameters it needs
+  from the management account;
+- it then switches to Infra Tooling and checks that the switch happened;
+- it makes every StackSet call there with `--call-as DELEGATED_ADMIN`.
+
+Proved by redeploying `platform-canary-artifacts` through the script:
+`SUCCEEDED`, with "No updates are to be performed" on both instances.
+
+**What remains, and is not a deviation** — the StackSet *records* stay in the
+management account. That is where AWS keeps service-managed StackSets, and no
+choice of ours changes it.
+
+Two scripts still *read* StackSets from the management account:
+- `vest-client.sh`'s baseline check;
+- `sync-account-tiers.sh`.
+
+Reading is not operating, so they stay.
+
+Tooling is reached through `OrganizationAccountAccessRole`, the same
+break-glass path as every operator script. 15.3's `PlatformDeployer` replaces
+it.
+
+None of the retained-resource hazards above was ever incurred. Nothing was
+retired, imported or recreated.
 
 ---
 
