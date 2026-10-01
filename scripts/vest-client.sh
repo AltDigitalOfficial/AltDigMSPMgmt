@@ -183,7 +183,11 @@ info "Checking the baseline StackSets target the Members OU"
 MEMBERS_OU="$(get_param /org/ou/members)"
 [[ -n "${MEMBERS_OU}" && "${MEMBERS_OU}" != "None" ]] || die "Members OU not found in SSM."
 
-BASELINE_STACKSETS="platform-config platform-kms-secrets platform-log-data-protection platform-network"
+# platform-developer-boundary since 2026-10-01. Without it a vested account has
+# no PlatformDeveloperBoundary, and SCP 05 then refuses every role a developer
+# or the tenant pipeline tries to create, because 05 requires exactly that
+# boundary. That fails safe, but it is an outage on the tenant's first day.
+BASELINE_STACKSETS="platform-config platform-kms-secrets platform-log-data-protection platform-network platform-developer-boundary"
 MISSING_BASELINE=""
 for ss in ${BASELINE_STACKSETS}; do
   # describe-stack-set, not list-stack-instances. The latter reports OUs that

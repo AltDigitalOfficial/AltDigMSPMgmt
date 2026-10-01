@@ -643,6 +643,23 @@ else
                     --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text | no_cr)"
   app_deploy="$(as_org aws iam get-role-policy --role-name "${APP_SRC}" --policy-name Deploy \
                   --query PolicyDocument --output json 2>/dev/null)"
+  # Strip the role's OWN aws:RequestedRegion conditions from the clone. Since
+  # B-136 the deployer scopes its compute to the approved regions itself, so an
+  # out-of-region call is refused by the role's policy before the SCP is ever
+  # consulted, and the check could no longer say whether SCP 06 exempts the
+  # NAME. That is what it exists to prove. Both layers are wanted, and they are
+  # tested separately. The role's own condition is visible in its template.
+  app_deploy="$(printf '%s' "${app_deploy}" | "$(command -v python || command -v python3)" -c '
+import json, sys
+doc = json.load(sys.stdin)
+for st in doc.get("Statement", []):
+    for op in list(st.get("Condition", {})):
+        st["Condition"][op].pop("aws:RequestedRegion", None)
+        if not st["Condition"][op]:
+            del st["Condition"][op]
+    if "Condition" in st and not st["Condition"]:
+        del st["Condition"]
+print(json.dumps(doc))')"
   # OrganizationAccountAccessRole creates it: 03 lets that role create Platform*
   # names, which is how the real one gets created too.
   if as_org aws iam create-role --role-name "${APP_CLONE}" \

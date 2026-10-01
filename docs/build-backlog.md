@@ -6108,3 +6108,49 @@ pipeline trust must use the real name, and the ID form if the organisation
 emits it.
 
 **Blocks Arc8** — Arc8's first deploy would hit it.
+
+---
+
+## B-143 · The developer boundary was a hand-deployed stack in one account, and vesting did not check for it
+
+**Observed** — 2026-09-30. `PlatformDeveloperBoundary` existed only in Sandbox
+Canary, as a plain stack (`platform-developer-boundary`) deployed through
+`deploy-to-account.sh`. Sandbox Exercise had none, which is why the harness
+could not run there. No StackSet carried it, and `vest-client.sh`'s
+baseline-reachability check listed four StackSets without it.
+
+A vested Arc8 account would therefore have come up with no boundary:
+- Before SCP 05 reached Members, developers could create roles with no
+  boundary at all.
+- After it, SCP 05 would refuse every role a developer or the tenant pipeline
+  tried to create, because 05 requires exactly that boundary. That fails safe,
+  but it is an outage.
+
+**Built 2026-10-01** — `platform-developer-boundary` is a service-managed
+StackSet, operated from Infra Tooling as delegated admin, targeting Sandbox.
+Canary's existing stack was IMPORTED rather than recreated
+(`import-stacks-to-stack-set`), so the policy was never deleted and no role
+lost its boundary. Exercise got a fresh instance. Both accounts now carry the
+current boundary, including `TenantAppDeployer-*` and the
+`OrganizationAccountAccessRole*` variants (B-135, B-136).
+`vest-client.sh` lists the StackSet in its baseline check, and the management
+account can read it there with `--call-as SELF`.
+
+**Import, as proven here** — worth having written down, because D-012 assumed
+it was hard:
+1. Create the StackSet from the template the stack is RUNNING, not the repo's
+   newer one. An import that would change anything is refused.
+2. Match the stack's STACK-LEVEL TAGS on the StackSet. `cfn_deploy` adds
+   `platform-managed=true` to every stack it deploys, and those tags reach the
+   resources. The first import failed, safely, because the StackSet had no tags
+   and the import would have removed the policy's.
+3. If an import fails, the StackSet keeps an `INOPERABLE` record. Remove it
+   with `delete-stack-instances --retain-stacks`. Without `--retain-stacks`
+   that call deletes the real stack.
+4. Then update the StackSet to the repo template as normal.
+   `deploy-stackset.sh` skips creating instances when the OU is already a
+   target, so an account in that OU without an instance (Exercise here) needs
+   `create-stack-instances` with an account filter.
+
+**Remaining** — the StackSet targets Sandbox only. It joins the other baseline
+StackSets when 15.4b widens them to Members.
