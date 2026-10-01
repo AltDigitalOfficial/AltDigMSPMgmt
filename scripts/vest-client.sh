@@ -318,7 +318,15 @@ if [[ "${PHI}" == "True" ]]; then
     --output json 2>/dev/null | no_cr || true)"
   BAA_VERDICT="$(printf '%s' "${BAA_JSON}" | "${PY}" -c '
 import json, sys
-raw = sys.stdin.read().strip()
+# Bytes, then decoded explicitly. On Windows the CLI writes this response in
+# the console code page (the agreement text carries curly quotes), and how
+# Python decodes stdin depends on the locale of the machine. A UTF-8 decode error
+# here would read as "unreadable" and refuse a tenant whose BAA is fine.
+blob = sys.stdin.buffer.read()
+try:
+    raw = blob.decode("utf-8").strip()
+except UnicodeDecodeError:
+    raw = blob.decode("cp1252", errors="replace").strip()
 if not raw:
     print("unreadable"); sys.exit()
 try:
@@ -329,9 +337,12 @@ except ValueError:
 # is documented as the organization that "owns the resource", which may be set
 # on a single-account agreement accepted inside an organization -- so it
 # cannot tell the two apart. Artifact offers the organization BAA as its own
-# agreement, named for Organizations. Not verified against a live accepted
-# BAA (none existed on 2026-10-01): if the name differs, this fails CLOSED and
-# prints what it found, so the fix is one string.
+# agreement, named for Organizations. Verified 2026-10-01 against the real
+# acceptance: the organization BAA is "AWS Organizations Business Associate
+# Addendum" with organizationArn set; the account BAA is "AWS Business
+# Associate Addendum" with organizationArn empty and the id of the management
+# account. If AWS renames it, this fails CLOSED and prints what it found.
+# (No apostrophes in these comments: this Python is a single-quoted bash string.)
 active = [a for a in items if a.get("state") == "ACTIVE"
           and "business associate" in (a.get("name") or "").lower()]
 if any("organization" in (a.get("name") or "").lower() for a in active):
