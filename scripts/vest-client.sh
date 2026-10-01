@@ -245,6 +245,121 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3b. Guardrails: Members carries everything Sandbox carries
+# ---------------------------------------------------------------------------
+# A tenant account inherits its SCPs and RCPs from Members (and Root). Until
+# phase 15.4 promoted them, region restriction, required tags, the boundary
+# requirement, deny-bypass and the external-principals RCP were Sandbox-only:
+# an account vested then would have come up in Members without them, and
+# nothing here would have said so. The baseline StackSet check above looks at
+# StackSets, not at policies.
+#
+# Compared against Sandbox rather than a list of names. Sandbox is where every
+# guardrail is proven before promotion, so "Members has what Sandbox has" IS
+# the definition of promotion being finished -- and it survives renames (the
+# v1 -> v2 protect policies) without anyone remembering to edit a list here.
+# Root attachments count for both, since both inherit them. The AWS-managed
+# FullAWSAccess pair is ignored: it allows, it guards nothing.
+#
+# Consequence worth knowing: a policy being trialled in Sandbox blocks vesting
+# until it is promoted or detached. That is deliberate. A guardrail proven but
+# not promoted is exactly the gap this exists to catch.
+info "Checking Members carries the guardrails Sandbox does"
+policies_on() {
+  local target="$1" ptype
+  for ptype in SERVICE_CONTROL_POLICY RESOURCE_CONTROL_POLICY; do
+    MSYS_NO_PATHCONV=1 aws organizations list-policies-for-target \
+      --target-id "${target}" --filter "${ptype}" \
+      --query 'Policies[].Name' --output text 2>/dev/null | no_cr | tr '\t' '\n'
+  done | grep -v -E '^(FullAWSAccess|RCPFullAWSAccess|None)?$' | sort -u
+}
+ROOT_ID="$(org_root_id)"
+SANDBOX_OU="$(get_param /org/ou/sandbox)"
+[[ -n "${ROOT_ID}" && -n "${SANDBOX_OU}" && "${SANDBOX_OU}" != "None" \
+   && -n "${MEMBERS_OU}" && "${MEMBERS_OU}" != "None" ]] \
+  || die "Could not resolve Root, Sandbox or Members. Refusing to vest without checking guardrails."
+SANDBOX_SET="$( { policies_on "${ROOT_ID}"; policies_on "${SANDBOX_OU}"; } | sort -u)"
+MEMBERS_SET="$( { policies_on "${ROOT_ID}"; policies_on "${MEMBERS_OU}"; } | sort -u)"
+MISSING_GUARDRAILS="$(comm -23 <(printf '%s\n' "${SANDBOX_SET}") <(printf '%s\n' "${MEMBERS_SET}") | grep -v '^$' || true)"
+if [[ -n "${MISSING_GUARDRAILS}" ]]; then
+  warn "Members does not carry these guardrails, which Sandbox does:"
+  while IFS= read -r p; do warn "    ${p}"; done <<< "${MISSING_GUARDRAILS}"
+  warn ""
+  warn "An account vested now would inherit Members' policies and come up without"
+  warn "them. Promote them to Members first (phase 15.4; scripts/deploy-policies.sh)."
+  [[ "${DRY_RUN}" == "1" ]] || die "Refusing to vest beneath incomplete guardrails. Nothing was created."
+else
+  ok "Members carries every guardrail Sandbox does ($(printf '%s\n' "${MEMBERS_SET}" | grep -c . ) policies, Root included)"
+fi
+
+# ---------------------------------------------------------------------------
+# 3c. AWS BAA, for tenants that hold PHI
+# ---------------------------------------------------------------------------
+# HIPAA requires a business associate agreement with every business associate
+# that handles PHI, and AWS is one. It is accepted in AWS Artifact, and only an
+# ORGANIZATION-level BAA covers member accounts: one accepted by a single
+# account covers that account alone. Before this check nothing recorded or
+# verified it, so a PHI tenant could be vested onto infrastructure with no
+# BAA beneath it.
+#
+# Checked in the management account, which is where an organization BAA is
+# accepted. "Active" means AWS reports the agreement ACTIVE and it names the
+# Organization; anything else blocks, including an API that cannot be read --
+# not knowing whether a BAA exists is not the same as knowing it does.
+PHI="$(q_get "['compliance']['phi']")"
+if [[ "${PHI}" == "True" ]]; then
+  info "Checking an organization-wide AWS BAA is active (tenant holds PHI)"
+  BAA_JSON="$(MSYS_NO_PATHCONV=1 aws artifact list-customer-agreements --region us-east-1 \
+    --output json 2>/dev/null | no_cr || true)"
+  BAA_VERDICT="$(printf '%s' "${BAA_JSON}" | "${PY}" -c '
+import json, sys
+raw = sys.stdin.read().strip()
+if not raw:
+    print("unreadable"); sys.exit()
+try:
+    items = json.loads(raw).get("customerAgreements", [])
+except ValueError:
+    print("unreadable"); sys.exit()
+# Scope is read from the NAME. The API has no scope field, and organizationArn
+# is documented as the organization that "owns the resource", which may be set
+# on a single-account agreement accepted inside an organization -- so it
+# cannot tell the two apart. Artifact offers the organization BAA as its own
+# agreement, named for Organizations. Not verified against a live accepted
+# BAA (none existed on 2026-10-01): if the name differs, this fails CLOSED and
+# prints what it found, so the fix is one string.
+active = [a for a in items if a.get("state") == "ACTIVE"
+          and "business associate" in (a.get("name") or "").lower()]
+if any("organization" in (a.get("name") or "").lower() for a in active):
+    print("active-org")
+elif active:
+    print("active-account-only|" + "; ".join(sorted(a.get("name") or "?" for a in active)))
+else:
+    print("none")
+')"
+BAA_FOUND="${BAA_VERDICT#*|}"; BAA_VERDICT="${BAA_VERDICT%%|*}"
+  case "${BAA_VERDICT}" in
+    active-org)
+      ok "an organization-wide AWS BAA is active" ;;
+    active-account-only)
+      warn "An AWS BAA is active, but not one this recognises as organization-wide."
+      warn "  found: ${BAA_FOUND}"
+      warn "If that IS the organization BAA under a different name, the name test in"
+      warn "this step needs updating; a single-account BAA covers that account alone."
+      warn "It does not cover member accounts. Accept the organization BAA in AWS"
+      warn "Artifact from the management account."
+      [[ "${DRY_RUN}" == "1" ]] || die "Refusing to vest a PHI tenant without an organization BAA." ;;
+    none)
+      warn "No active AWS BAA. This tenant holds PHI (questionnaire 4.4)."
+      warn "Accept the organization BAA in AWS Artifact from the management account."
+      [[ "${DRY_RUN}" == "1" ]] || die "Refusing to vest a PHI tenant without an AWS BAA." ;;
+    *)
+      warn "Could not read AWS Artifact agreements (artifact:ListCustomerAgreements)."
+      warn "Not knowing whether a BAA exists is not knowing that one does."
+      [[ "${DRY_RUN}" == "1" ]] || die "Refusing to vest a PHI tenant without confirming the AWS BAA." ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
 # 4. Registry entry FIRST, in provisioning state
 # ---------------------------------------------------------------------------
 info "Registry: client record in 'provisioning'"
