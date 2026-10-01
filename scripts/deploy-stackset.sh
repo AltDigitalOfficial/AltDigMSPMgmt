@@ -61,19 +61,25 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 NAME=""; TEMPLATE=""; OU=""; REGIONS="${PLATFORM_HOME_REGION}"; PARAMS=()
-MAX_CONCURRENT=1; FAILURE_TOLERANCE=0
+MAX_CONCURRENT=1; FAILURE_TOLERANCE=0; ADD_OU=0; REGIONS_GIVEN=0
 
 usage() {
   cat <<'USAGE'
 Usage: deploy-stackset.sh --name <stackset> --template <path> --ou <target>
                           [--regions r1,r2] [Key=Value ...]
                           [--max-concurrent N] [--dry-run] [--confirm-production]
+       deploy-stackset.sh --name <stackset> --ou <target> --add-ou
+                          [--regions r1,r2] [--dry-run] [--confirm-production]
 
   --ou              sandbox | members | security | infra
-  --regions         Comma-separated. Defaults to the home region.
+  --regions         Comma-separated. Defaults to the home region; with
+                    --add-ou, defaults to the regions the existing instances use.
   --max-concurrent  Accounts updated in parallel. Default 1 — a bad baseline
                     reaching one account is recoverable; reaching forty at once
                     is an incident.
+  --add-ou          Add an OU to an EXISTING stack set and nothing else. No
+                    template, no parameters, no update-stack-set: instances
+                    for the new OU are created from the stack set as it stands.
 
 Runs every StackSet call from Infra Tooling as delegated administrator. Start
 with management-account credentials; the script switches.
@@ -85,7 +91,8 @@ while [[ $# -gt 0 ]]; do
     --name)               NAME="$2"; shift 2 ;;
     --template)           TEMPLATE="$2"; shift 2 ;;
     --ou)                 OU="$2"; shift 2 ;;
-    --regions)            REGIONS="$2"; shift 2 ;;
+    --regions)            REGIONS="$2"; REGIONS_GIVEN=1; shift 2 ;;
+    --add-ou)             ADD_OU=1; shift ;;
     --max-concurrent)     MAX_CONCURRENT="$2"; shift 2 ;;
     --dry-run)            DRY_RUN=1; shift ;;
     --confirm-production) CONFIRM_PRODUCTION=1; shift ;;
@@ -96,7 +103,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${NAME}" ]]     || { usage; die "--name is required."; }
-[[ -n "${TEMPLATE}" ]] || { usage; die "--template is required."; }
+if [[ ${ADD_OU} -eq 1 ]]; then
+  [[ -z "${TEMPLATE}" && ${#PARAMS[@]} -eq 0 ]] \
+    || die "--add-ou takes no --template and no parameters. It deploys the stack set as it stands."
+else
+  [[ -n "${TEMPLATE}" ]] || { usage; die "--template is required."; }
+fi
 [[ -n "${OU}" ]]       || { usage; die "--ou is required."; }
 
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
@@ -137,6 +149,71 @@ NOW_IN="$(aws sts get-caller-identity --query Account --output text | no_cr)"
 
 # Every StackSet call goes through this, so none can forget the flag.
 cfn_ss() { aws cloudformation "$@" --call-as DELEGATED_ADMIN; }
+
+# --- --add-ou: widen an existing stack set, and change nothing else --------
+#
+# The normal path below always runs update-stack-set first. That re-applies
+# the REPO template to every existing instance, and any parameter not passed
+# can fall back to its template default. Widening platform-network to Members
+# that way would have redeployed Sandbox's network from whatever the template
+# says today, possibly with a default where a real bucket name had been. That
+# was found before it happened, 2026-10-01.
+#
+# Widening needs none of it. create-stack-instances uses the stack set's
+# current template and parameters, and an OU with no accounts yet just becomes
+# a target, so its accounts receive the stack when they are created.
+if [[ ${ADD_OU} -eq 1 ]]; then
+  cfn_ss describe-stack-set --stack-set-name "${NAME}" --query 'StackSet.StackSetId' \
+    --output text >/dev/null 2>&1 || die "--add-ou: stack set ${NAME} does not exist. Create it without --add-ou."
+  TARGETED="$(cfn_ss describe-stack-set --stack-set-name "${NAME}" \
+    --query 'StackSet.OrganizationalUnitIds' --output text | no_cr | tr '\t\n' '  ')"
+  if [[ " ${TARGETED} " == *" ${TARGET_OU} "* ]]; then
+    skip "${NAME} already targets ${OU} (${TARGET_OU}). Nothing to add."
+    exit 0
+  fi
+  # Same regions as the instances that exist, unless told otherwise: a stack
+  # set deployed to three regions in Sandbox should reach Members in all three.
+  if [[ ${REGIONS_GIVEN} -eq 0 ]]; then
+    REGIONS="$(cfn_ss list-stack-instances --stack-set-name "${NAME}" \
+      --query 'Summaries[].Region' --output text | no_cr | tr '\t' '\n' | sort -u | paste -sd, -)"
+    [[ -n "${REGIONS}" ]] || REGIONS="${PLATFORM_HOME_REGION}"
+  fi
+  hr
+  log "StackSet widen (--add-ou)"
+  log "  stackset : ${NAME}  (template and parameters untouched)"
+  log "  add OU   : ${OU} (${TARGET_OU})"
+  log "  regions  : ${REGIONS}"
+  log "  operator : Infra Tooling ${TOOLING_ACCOUNT}, as delegated administrator"
+  hr
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    printf '%s DRY%s  create stack instances for %s in %s; no update-stack-set\n' \
+      "${C_YELLOW}" "${C_RESET}" "${TARGET_OU}" "${REGIONS}"
+    ok "Dry run complete."; exit 0
+  fi
+  OP_ID="$(cfn_ss create-stack-instances --stack-set-name "${NAME}" \
+    --deployment-targets "OrganizationalUnitIds=${TARGET_OU}" \
+    --regions $(printf '%s' "${REGIONS}" | tr ',' ' ') \
+    --operation-preferences "MaxConcurrentCount=${MAX_CONCURRENT},FailureToleranceCount=${FAILURE_TOLERANCE},RegionConcurrencyType=SEQUENTIAL" \
+    --query 'OperationId' --output text | no_cr)"
+  log "  operation: ${OP_ID}"
+  STATUS=""
+  for _ in $(seq 1 60); do
+    STATUS="$(cfn_ss describe-stack-set-operation --stack-set-name "${NAME}" \
+      --operation-id "${OP_ID}" --query 'StackSetOperation.Status' --output text | no_cr)"
+    case "${STATUS}" in
+      SUCCEEDED) ok "operation SUCCEEDED"; break ;;
+      FAILED|STOPPED) break ;;
+      *) sleep 15 ;;
+    esac
+  done
+  [[ "${STATUS}" == "SUCCEEDED" ]] || die "Widening ${NAME} to ${OU} ended ${STATUS:-unknown}."
+  NOW_TARGETED="$(cfn_ss describe-stack-set --stack-set-name "${NAME}" \
+    --query 'StackSet.OrganizationalUnitIds' --output text | no_cr | tr '\t\n' '  ')"
+  [[ " ${NOW_TARGETED} " == *" ${TARGET_OU} "* ]] \
+    || die "Operation SUCCEEDED but ${TARGET_OU} is not in the stack set's targets."
+  ok "${NAME} now targets ${OU}"
+  exit 0
+fi
 
 hr
 log "StackSet deploy"
