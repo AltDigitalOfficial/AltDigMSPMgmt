@@ -123,9 +123,14 @@ resource "pagerduty_service" "object" {
   # Everything else takes the per-tier override, falling back to the platform
   # policy. B-117 will replace that fallback for non-production once Jamie and
   # Wayne settle what should happen there.
+  #
+  # An application with its own support (application_support, below) takes
+  # precedence over the tier policy for that application's services.
   escalation_policy = (
     each.value.object == local.infra_object
     ? coalesce(var.infrastructure_escalation_policy_id, var.default_escalation_policy_id)
+    : contains(keys(local.app_support), each.value.object)
+    ? pagerduty_escalation_policy.app[each.value.object].id
     : lookup(var.tier_escalation_policy_ids, each.value.tier, var.default_escalation_policy_id)
   )
 
@@ -201,4 +206,103 @@ resource "pagerduty_business_service" "conversations" {
   name             = "tenant-${var.tenant_id}-conversations"
   description      = "Client-conversation event class for ${var.tenant_id} (design 12). Subscribed to, never paged from. ${local.provenance}"
   point_of_contact = var.commercial_point_of_contact
+}
+
+# ---------------------------------------------------------------------------
+# Per-application support: team, schedule, escalation policy
+# ---------------------------------------------------------------------------
+# Decided 2026-10-01 (Jamie): each application has its own support team and
+# escalation policy, named for the application, even with one person in it.
+# The same reasoning as the platform's own schedule in ../../main.tf: a
+# schedule with one person in it is not pointless indirection, because adding
+# the second responder later is then an edit rather than a restructure, made at
+# the moment someone is trying to hand over a pager.
+#
+# Only for objects that are actually in this tenant's tiers, so an entry in
+# terraform.tfvars for an application not yet vested creates nothing.
+
+locals {
+  app_objects = toset(distinct(flatten([for cfg in values(var.tiers) : cfg.objects])))
+  app_support = {
+    for obj, cfg in var.application_support : obj => cfg
+    if contains(local.app_objects, obj) && obj != local.infra_object
+  }
+  app_responders = merge([
+    for obj, cfg in local.app_support : {
+      for email in cfg.responder_emails : "${obj}/${email}" => { object = obj, email = email }
+    }
+  ]...)
+}
+
+# Looked up, never created: this configuration must not own people.
+data "pagerduty_user" "app_responder" {
+  for_each = local.app_responders
+  email    = each.value.email
+}
+
+resource "pagerduty_team" "app" {
+  for_each    = local.app_support
+  name        = "${each.value.display_name} Support"
+  description = "Support team for ${each.value.display_name}. ${local.provenance}"
+}
+
+resource "pagerduty_team_membership" "app" {
+  for_each = local.app_responders
+  team_id  = pagerduty_team.app[each.value.object].id
+  user_id  = data.pagerduty_user.app_responder[each.key].id
+  role     = "responder"
+}
+
+# Deprecated v1 resource, deliberately, for the reason given on the platform
+# schedule in ../../main.tf (B-018): a mis-specified v2 RRULE produces a gap,
+# not an error.
+resource "pagerduty_schedule" "app" {
+  for_each  = local.app_support
+  name      = "${each.value.display_name} Support On-Call"
+  time_zone = "America/Chicago"
+
+  layer {
+    name                         = "Primary"
+    start                        = "2026-10-02T00:00:00-05:00"
+    rotation_virtual_start       = "2026-10-02T00:00:00-05:00"
+    rotation_turn_length_seconds = 604800 # one week
+    users = [
+      for email in each.value.responder_emails :
+      data.pagerduty_user.app_responder["${each.key}/${email}"].id
+    ]
+  }
+
+  # Managed here, unlike the platform schedule before 2026-10-02, where a
+  # team attached in the web console was drift that any apply reverted.
+  teams = [pagerduty_team.app[each.key].id]
+}
+
+resource "pagerduty_escalation_policy" "app" {
+  for_each  = local.app_support
+  name      = "${each.value.display_name} Escalation"
+  num_loops = 2
+  teams     = [pagerduty_team.app[each.key].id]
+
+  rule {
+    escalation_delay_in_minutes = 30
+    target {
+      type = "schedule_reference"
+      id   = pagerduty_schedule.app[each.key].id
+    }
+  }
+
+  # Nobody on the application's own schedule acknowledged: AltDigital's
+  # platform on-call. An escalation path that ends without reaching someone
+  # who can act is invisible, and a new application team with one member is
+  # exactly where that would happen.
+  dynamic "rule" {
+    for_each = var.platform_schedule_id == null ? [] : [1]
+    content {
+      escalation_delay_in_minutes = 30
+      target {
+        type = "schedule_reference"
+        id   = var.platform_schedule_id
+      }
+    }
+  }
 }

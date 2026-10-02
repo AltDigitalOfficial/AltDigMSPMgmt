@@ -156,3 +156,22 @@ variable "commercial_point_of_contact" {
   type        = string
   default     = "Commercial lead"
 }
+
+variable "application_support" {
+  type = map(object({
+    display_name     = string
+    responder_emails = list(string)
+  }))
+  default = {}
+
+  description = <<-EOT
+    Per-application support teams, keyed "<client>/<app>", e.g. "oeight/arc8".
+    Each gets a team, schedule and escalation policy named from display_name,
+    and that application's (not its infrastructure's) services escalate to
+    it, falling back to the platform on-call. See modules/tenant.
+
+    Set in terraform.tfvars, which is gitignored: responder emails are
+    personal data. The users must already exist in PagerDuty; they are looked
+    up, never created.
+  EOT
+}

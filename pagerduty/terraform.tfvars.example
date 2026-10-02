@@ -10,6 +10,18 @@ responder_emails = [
   "you@example.com",
 ]
 
+# Per-application support teams, keyed "<client>/<app>". Each application gets
+# "<display_name> Support" (team), "... Support On-Call" (schedule) and
+# "... Escalation" (policy, falling back to the platform on-call). Its
+# application services escalate there; its infrastructure services stay with
+# AltDigital. Start with one responder if that is who there is.
+application_support = {
+  "oeight/arc8" = {
+    display_name     = "Arc8"
+    responder_emails = ["you@example.com"]
+  }
+}
+
 # Alert grouping is PLAN-TIER dependent and is the one setting likely to fail
 # an otherwise-clean apply:
 #   intelligent    Business / AIOps  (default)

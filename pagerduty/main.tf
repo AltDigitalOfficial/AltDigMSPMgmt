@@ -51,7 +51,21 @@ resource "pagerduty_schedule" "platform" {
     users = [for e in var.responder_emails : data.pagerduty_user.responder[e].id]
   }
 
-  teams = []
+  # Teams are NOT managed here. PagerDuty associates a schedule with the team of
+  # every escalation policy that uses it, and Truveon's escalation policy (team
+  # Truveon Support) falls back to this schedule. So PagerDuty reports this
+  # schedule as belonging to Truveon Support, and re-adds that within the hour
+  # if it is removed -- found 2026-10-02, after applying `teams = []` and seeing
+  # the same drift on the next plan. Left managed, it was permanent drift, and
+  # `pagerduty-apply.sh --tenant` (creations only) refused every tenant because
+  # the platform schedule always showed an update.
+  #
+  # What this does NOT give up: the rotation and the responders are still
+  # managed and drift-checked. The team list is PagerDuty's record of who
+  # escalates here, not a setting.
+  lifecycle {
+    ignore_changes = [teams]
+  }
 }
 
 # ---------------------------------------------------------------------------

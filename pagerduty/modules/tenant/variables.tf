@@ -130,3 +130,31 @@ variable "infrastructure_escalation_policy_id" {
     variable exists to prevent.
   EOT
 }
+
+variable "application_support" {
+  type = map(object({
+    display_name     = string
+    responder_emails = list(string)
+  }))
+  default = {}
+
+  description = <<-EOT
+    Per-application support, keyed by OBJECT (the app slug). Each entry gets
+    its own team, on-call schedule and escalation policy, and that
+    application's technical services escalate to it. Infrastructure services
+    never do: they belong to AltDigital whatever the application (B-127).
+
+    Decided 2026-10-01: an application has its own support team even with one
+    person in it, named for the application -- "Arc8 Support", not a
+    platform or product team. An object with no entry here falls back to the
+    tier policy and then the platform policy, as before.
+
+    Emails live in the gitignored terraform.tfvars; they are personal data.
+  EOT
+}
+
+variable "platform_schedule_id" {
+  type        = string
+  default     = null
+  description = "AltDigital's platform on-call schedule. An application's escalation policy falls back to it when nobody on the application's own schedule acknowledges."
+}

@@ -65,6 +65,14 @@ module "tenant" {
   # where it lands, as data.
   default_escalation_policy_id = pagerduty_escalation_policy.platform.id
 
+  # Per-application support teams (2026-10-01). Keys in terraform.tfvars are
+  # "<client>/<app>"; each tenant receives only its own, keyed by app.
+  application_support = {
+    for key, cfg in var.application_support : split("/", key)[1] => cfg
+    if split("/", key)[0] == each.key
+  }
+  platform_schedule_id = pagerduty_schedule.platform.id
+
   acknowledgement_timeout_minutes = var.acknowledgement_timeout_minutes
   auto_resolve_timeout_minutes    = var.auto_resolve_timeout_minutes
 }
