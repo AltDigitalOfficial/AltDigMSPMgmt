@@ -37,14 +37,14 @@ answer, and nothing could act on it if something did.
 
 ## Summary
 
-114 rows: the form's 112 numbered questions, plus the operating-hours table
+115 rows: the form's 113 numbered questions, plus the operating-hours table
 (5a) and the developer roster (3b). Counted by primary status:
 
 | | Count | |
 |---|---|---|
-| builds | 22 | Identity and naming, service model, frameworks and retention, UAT, egress, the technical contact, change approver and Jira project, both rosters, the Truveon questions, the acknowledgements |
+| builds | 24 | Identity and naming, service model, frameworks and retention, UAT, egress, the technical contact, the development manager and their role, change approver and Jira project, both rosters, the Truveon questions, the acknowledgements |
 | checks | 15 | Halts, derivations, warnings — the review screen |
-| stored | 28 | Captured and unread |
+| stored | 27 | Captured and unread |
 | form only | 49 | Most of sections 2, 7, 13 and 14 |
 
 Sixteen rows also ask for something **not built**, and six have a consumer
@@ -200,7 +200,8 @@ the rows that are not are marked.
 | 3.4 | Billing contact | `identity.billing_contact` | nothing | P | stored |
 | 3.5 | Breach notification contact | `identity.breach_notification_contact` | registry `breach_contact`; nothing reads it yet (the incident clock records, it does not send) | P | stored |
 | 3.5a | Security operations contact | `identity.security_contact` | registry `security_contact`; nothing reads it yet | P | stored |
-| 3.6 | Development manager | `security.developer_manager` | written to registry `dev_manager`; nothing reads it. The digest goes to 3.1 | P | stored |
+| 3.6 | Development manager | `security.developer_manager` | written to registry `dev_manager`; the digest still goes to 3.1. The manager must be on the roster's `readonly` list (`derive-roster.py`) and gets TenantReadOnly everywhere | P | builds |
+| 3.6a | Manager writes code, or oversees only | `security.developer_manager_role` | `derive-roster.py`: `oversight` forbids the manager on the developer roster, `contributor` requires it | P | builds |
 | 3b | Developer roster | roster sidecar | `derive-roster.py`, `grant-developer-access.sh` | P | builds |
 | 3.7 | Console access | `security.customer_staff_need_access`? | nothing; the roster decides in practice | P | stored |
 | 3.8 | Who may turn on outside hours | `environments.manual_turnup_authorised` | nothing. The manual turnup path does not check it | P | stored |

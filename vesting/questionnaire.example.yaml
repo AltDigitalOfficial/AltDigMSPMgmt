@@ -79,6 +79,7 @@ security:
   customer_staff_need_access: true
   no_regulated_data_in_lower_envs_ack: true
   developer_manager: { name: "Placeholder Mgr", email: "mgr@example.com" }
+  developer_manager_role: oversight   # 3.6a. Arc8's manager oversees and does not build.
   dedicated_infrastructure_required: false
   dedicated_infrastructure_driver: null
   dedicated_infrastructure_control_ref: null

@@ -28,6 +28,24 @@ tenant:
   client_slug: oeight
   application_code: arc8
 
+# Read-only in EVERY environment: TenantReadOnly, see and never change.
+#
+# The development manager (questionnaire 3.6) must be here, matched by email,
+# whatever 3.6a says -- the manager is always owed the view. 3.6a then decides
+# whether they ALSO appear under developers: `oversight` forbids it,
+# `contributor` requires it. derive-roster.py blocks on either mismatch.
+readonly:
+
+  - given_name:  Placeholder
+    family_name: Mgr
+    email:       mgr@example.com
+
+  # Anyone else needs a reason. This view reaches production logs.
+  - given_name:  Placeholder
+    family_name: Auditor
+    email:       auditor1@example.com
+    reason:      "Internal audit, SOC 2 readiness. Approved by Jamie Vernon, 2026-10-01."
+
 developers:
 
   # Broad in dev, narrower upward. This is the ordinary shape.

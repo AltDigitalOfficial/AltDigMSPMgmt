@@ -1,12 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
 Description: >-
-  AltDigital Managed Platform — developer permission sets (prompt 10.1).
-  design 11's Layer 3, three grants across the environment gradient. Deployed to
-  the Identity Center delegated administrator.
+  AltDigital Managed Platform — tenant permission sets (prompt 10.1). design
+  11's Layer 3: three developer grants across the environment gradient, and
+  one read-only oversight grant that spans it. Deployed to the Identity Center
+  delegated administrator.
 
 # ---------------------------------------------------------------------------
-# Three sets in one template, because the GRADIENT is the thing being reviewed
+# Four sets in one template, because the GRADIENT is the thing being reviewed
 # ---------------------------------------------------------------------------
 # design/11-developer-access.md's table is the specification:
 #
@@ -14,6 +15,12 @@ Description: >-
 #   console    full           read + ops     read       read + observe
 #   create     yes            pipeline       pipeline   pipeline
 #   IAM roles  yes, bounded   no             no         no
+#
+# TenantReadOnly is the fourth, and it is not a column -- it is a row across
+# all four: read and observe in every environment, write nowhere. It lives
+# here rather than in its own file so that a reviewer compares it with
+# DeveloperProd directly. The two should differ in BREADTH (every resource's
+# metadata against the ECS-shaped slice) and never in what they withhold.
 #
 # Split across three files, a reviewer checks each against the table. Together,
 # they check each against EACH OTHER, which is where the mistakes are — a grant
@@ -141,6 +148,39 @@ Resources:
               - 'access-analyzer:Get*'
               - 'access-analyzer:List*'
             Resource: '*'
+
+          # A developer builds the APPLICATION layer, by definition. The
+          # platform-layer tag is what the router pages on (B-127), so a
+          # developer resource tagged infrastructure pages AltDigital for the
+          # application team's fault, and stripping the tag from one of ours
+          # routes our alarm to them. Neither is malice-shaped -- copying a
+          # tag block from a baseline template does the first -- and both are
+          # silent until 3am.
+          #
+          # Here and not in an SCP, deliberately. An SCP would have to exempt
+          # every platform role that stamps the tag by name, and the first one
+          # missed breaks the hard rule that everything the platform builds
+          # carries it. Stated about the HUMAN, it needs no exemptions at all.
+          # B-127's reconciliation against the Jira project stays the check on
+          # whatever this does not reach -- a pipeline role, for one.
+          - Sid: NeverClaimTheInfrastructureLayer
+            Effect: Deny
+            Action: '*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/platform-layer': infrastructure
+
+          - Sid: NeverRelabelTheInfrastructureLayer
+            Effect: Deny
+            Action: '*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/platform-layer': infrastructure
+              'ForAnyValue:StringEquals':
+                'aws:TagKeys':
+                  - platform-layer
 
   # =========================================================================
   # test — read-only plus the operations a pipeline cannot do for you
@@ -378,6 +418,385 @@ Resources:
               - 'lambda:GetFunctionConfiguration'
             Resource: '*'
 
+  # =========================================================================
+  # read-only oversight — every environment, nothing changed
+  # =========================================================================
+  # For the person who answers for the application without necessarily
+  # building it: the tenant's development manager (questionnaire 3.6, always
+  # granted this whatever 3.6a says), and anyone else the tenant names for
+  # oversight in the roster. Assigned to EVERY account the tenant has, dev
+  # through prod, by identity/20-developer-assignments.yaml.
+  #
+  # Bound to the ROLE, never to the person holding it. For Arc8 the manager
+  # happens to be a partner who also holds SecurityReadOnly; the next
+  # tenant's manager will be the client's own staff with no other access at
+  # all, and this set is what they get.
+  #
+  # What it sees is DeveloperProd's view widened from the ECS-shaped slice to
+  # every resource's metadata: ViewOnlyAccess for the inventory, plus the
+  # logs, metrics, traces and findings design 11 grants production developers.
+  # Logs are included on the argument design 11 makes for them -- this role
+  # answers "is the application healthy and what changed", and withholding
+  # logs from the overseer while granting them to the people overseen would be
+  # backwards. Data protection masks them at write time.
+  #
+  # What it never sees is DeveloperProd's list: object contents, table rows,
+  # secret and parameter values, env var values (D-017), anything decrypted.
+  #
+  # ---------------------------------------------------------------------------
+  # Read-only by construction, not by trusting the managed policy
+  # ---------------------------------------------------------------------------
+  # identity/30-security-readonly.yaml records that the obvious construction --
+  # Deny NotAction ['*:Get*', '*:List*', ...] -- is not expressible, because
+  # IAM rejects a wildcard in the service portion. That template therefore
+  # relies on its managed policies granting no writes.
+  #
+  # This one does not need to. ViewOnlyAccess (v46, read 2026-10-01) is 695
+  # actions across 126 services, and every one is a Describe, List, Get,
+  # BatchGet, View, Search, Lookup or Select -- plus apigateway:GET (matched
+  # by apigateway:Get*, action names being case-insensitive) and
+  # lightsail:IsVpcPeered. Collapsed to service-QUALIFIED verb wildcards, which
+  # IAM accepts, that is 187 patterns. NeverWriteAnything denies everything
+  # outside them.
+  #
+  # So if AWS adds a write to ViewOnlyAccess, or somebody attaches a second
+  # policy to this set, the write is denied. Fail closed. The cost runs the
+  # other way: a read in a service ViewOnlyAccess v46 did not cover is denied
+  # too, and the console will show the occasional access-denied panel. That is
+  # the right direction for a role whose only promise is that it cannot change
+  # anything.
+  #
+  # The list is a snapshot. Regenerate it from the current policy version
+  # (iam get-policy-version on job-function/ViewOnlyAccess) when somebody
+  # reports a read that should work and does not. A stale snapshot narrows the
+  # role; it never widens it.
+  #
+  # Role assumption is denied by the same statement: sts is absent from the
+  # list except GetCallerIdentity. A reader who can see every trust policy and
+  # assume roles can find the weakest one and use it -- SecurityReadOnly's
+  # DenyRoleAssumption, reached here without a separate statement.
+
+  TenantReadOnlyPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: TenantReadOnly
+      Description: >-
+        Oversight of one tenant's accounts. Every resource's metadata, logs,
+        metrics, traces and findings. No write, no data plane, no secret or
+        parameter values, no decryption, no role assumption.
+      InstanceArn: !Ref InstanceArn
+      # Two hours, DeveloperProd's duration: this set reaches production logs.
+      SessionDuration: PT2H
+      ManagedPolicies:
+        - arn:aws:iam::aws:policy/job-function/ViewOnlyAccess
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+
+          # ViewOnlyAccess deliberately stops at metadata. These are the reads
+          # design 11 grants production developers on top of it.
+          - Sid: ObserveTheApplication
+            Effect: Allow
+            Action:
+              - 'logs:Get*'
+              - 'logs:FilterLogEvents'
+              - 'logs:StartQuery'
+              - 'logs:StopQuery'
+              - 'logs:StartLiveTail'
+              - 'logs:StopLiveTail'
+              - 'cloudwatch:Describe*'
+              - 'xray:Get*'
+              - 'xray:BatchGet*'
+              - 'xray:List*'
+              - 'application-signals:Get*'
+              - 'application-signals:List*'
+              - 'application-signals:BatchGet*'
+              - 'codepipeline:Get*'
+              - 'codepipeline:List*'
+              - 'tag:Get*'
+              - 'health:Describe*'
+            Resource: '*'
+
+          # design 11: "They should see what wakes us up on their behalf."
+          - Sid: SeeTheControlsOperatingOnThem
+            Effect: Allow
+            Action:
+              - 'config:Get*'
+              - 'config:Select*'
+              - 'securityhub:Get*'
+              - 'securityhub:List*'
+              - 'securityhub:Describe*'
+              - 'guardduty:Get*'
+              - 'guardduty:List*'
+              - 'inspector2:Get*'
+              - 'inspector2:List*'
+              - 'inspector2:BatchGet*'
+              - 'access-analyzer:Get*'
+              - 'access-analyzer:List*'
+            Resource: '*'
+
+          # Names, never values. Same split as DeveloperProd.
+          - Sid: NamesNotValues
+            Effect: Allow
+            Action:
+              - 'secretsmanager:ListSecrets'
+              - 'secretsmanager:DescribeSecret'
+            Resource: '*'
+
+          # See the header. Everything ViewOnlyAccess v46 grants, collapsed to
+          # service-qualified verbs, plus the Allows above. Anything not
+          # matching is denied whatever else is attached.
+          - Sid: NeverWriteAnything
+            Effect: Deny
+            NotAction:
+              - 'access-analyzer:Get*'
+              - 'access-analyzer:List*'
+              - 'acm:List*'
+              - 'aiops:Get*'
+              - 'aiops:List*'
+              - 'amplify:Get*'
+              - 'amplify:List*'
+              - 'apigateway:Get*'
+              - 'apigateway:List*'
+              - 'appconfig:Get*'
+              - 'appconfig:List*'
+              - 'application-signals:BatchGet*'
+              - 'application-signals:Get*'
+              - 'application-signals:List*'
+              - 'appsync:Get*'
+              - 'athena:List*'
+              - 'autoscaling:Describe*'
+              - 'aws-marketplace:View*'
+              - 'backup:Describe*'
+              - 'backup:Get*'
+              - 'backup:List*'
+              - 'batch:List*'
+              - 'bedrock-agentcore:Get*'
+              - 'bedrock-agentcore:List*'
+              - 'bedrock:Get*'
+              - 'bedrock:List*'
+              - 'clouddirectory:List*'
+              - 'cloudformation:Describe*'
+              - 'cloudformation:Get*'
+              - 'cloudformation:List*'
+              - 'cloudfront:List*'
+              - 'cloudsearch:Describe*'
+              - 'cloudsearch:List*'
+              - 'cloudtrail:Describe*'
+              - 'cloudtrail:List*'
+              - 'cloudtrail:Lookup*'
+              - 'cloudwatch:Describe*'
+              - 'cloudwatch:Get*'
+              - 'cloudwatch:List*'
+              - 'codeartifact:List*'
+              - 'codebuild:List*'
+              - 'codecommit:List*'
+              - 'codedeploy:BatchGet*'
+              - 'codedeploy:Get*'
+              - 'codedeploy:List*'
+              - 'codepipeline:Get*'
+              - 'codepipeline:List*'
+              - 'codestar:List*'
+              - 'cognito-identity:Get*'
+              - 'cognito-identity:List*'
+              - 'cognito-idp:List*'
+              - 'cognito-sync:List*'
+              - 'comprehend:Describe*'
+              - 'comprehend:List*'
+              - 'config:Describe*'
+              - 'config:Get*'
+              - 'config:List*'
+              - 'config:Select*'
+              - 'connect:List*'
+              - 'cost-optimization-hub:Get*'
+              - 'cost-optimization-hub:List*'
+              - 'databrew:List*'
+              - 'datapipeline:Describe*'
+              - 'datapipeline:Get*'
+              - 'datapipeline:List*'
+              - 'dax:Describe*'
+              - 'dax:List*'
+              - 'devicefarm:List*'
+              - 'directconnect:Describe*'
+              - 'discovery:List*'
+              - 'dlm:Get*'
+              - 'dlm:List*'
+              - 'dms:List*'
+              - 'ds:Describe*'
+              - 'dynamodb:Describe*'
+              - 'dynamodb:Get*'
+              - 'dynamodb:List*'
+              - 'ec2:Describe*'
+              - 'ec2:Get*'
+              - 'ec2:List*'
+              - 'ec2:Search*'
+              - 'ecr:Describe*'
+              - 'ecr:List*'
+              - 'ecs:Describe*'
+              - 'ecs:List*'
+              - 'eks:Describe*'
+              - 'eks:List*'
+              - 'elasticache:Describe*'
+              - 'elasticbeanstalk:Describe*'
+              - 'elasticbeanstalk:List*'
+              - 'elasticfilesystem:Describe*'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticmapreduce:List*'
+              - 'elastictranscoder:List*'
+              - 'emr-containers:List*'
+              - 'emr-serverless:List*'
+              - 'es:Describe*'
+              - 'es:List*'
+              - 'events:List*'
+              - 'firehose:Describe*'
+              - 'firehose:List*'
+              - 'fsx:Describe*'
+              - 'gamelift:List*'
+              - 'glacier:Describe*'
+              - 'glacier:Get*'
+              - 'glacier:List*'
+              - 'glue:Get*'
+              - 'glue:List*'
+              - 'greengrass:List*'
+              - 'guardduty:Get*'
+              - 'guardduty:List*'
+              - 'health:Describe*'
+              - 'iam:Get*'
+              - 'iam:List*'
+              - 'importexport:List*'
+              - 'inspector2:BatchGet*'
+              - 'inspector2:Get*'
+              - 'inspector2:List*'
+              - 'inspector:List*'
+              - 'iot:List*'
+              - 'kafka:List*'
+              - 'kendra:List*'
+              - 'kinesis:List*'
+              - 'kinesisanalytics:List*'
+              - 'kms:List*'
+              - 'lambda:Get*'
+              - 'lambda:List*'
+              - 'lex:Get*'
+              - 'lightsail:Get*'
+              - 'lightsail:IsVpcPeered'
+              - 'logs:Describe*'
+              - 'logs:FilterLogEvents'
+              - 'logs:Get*'
+              - 'logs:List*'
+              - 'logs:StartLiveTail'
+              - 'logs:StartQuery'
+              - 'logs:StopLiveTail'
+              - 'logs:StopQuery'
+              - 'lookoutvision:List*'
+              - 'm2:Get*'
+              - 'm2:List*'
+              - 'machinelearning:Describe*'
+              - 'mediaconnect:List*'
+              - 'mediastore:Describe*'
+              - 'mediastore:Get*'
+              - 'mediastore:List*'
+              - 'memorydb:Describe*'
+              - 'mobiletargeting:Get*'
+              - 'oam:List*'
+              - 'opsworks-cm:Describe*'
+              - 'opsworks:Describe*'
+              - 'organizations:List*'
+              - 'outposts:Get*'
+              - 'outposts:List*'
+              - 'polly:Describe*'
+              - 'polly:List*'
+              - 'profile:List*'
+              - 'qapps:Get*'
+              - 'qapps:List*'
+              - 'qbusiness:Get*'
+              - 'ram:Get*'
+              - 'rds:Describe*'
+              - 'redshift-serverless:Get*'
+              - 'redshift-serverless:List*'
+              - 'redshift:Describe*'
+              - 'redshift:View*'
+              - 'resource-explorer-2:Get*'
+              - 'resource-explorer-2:List*'
+              - 'rolesanywhere:List*'
+              - 'route53:Get*'
+              - 'route53:List*'
+              - 'route53domains:List*'
+              - 'route53profiles:Get*'
+              - 'route53profiles:List*'
+              - 'route53resolver:Get*'
+              - 'route53resolver:List*'
+              - 's3:List*'
+              - 'sagemaker:Describe*'
+              - 'sagemaker:List*'
+              - 'sdb:List*'
+              - 'secretsmanager:DescribeSecret'
+              - 'secretsmanager:ListSecrets'
+              - 'securityhub:Describe*'
+              - 'securityhub:Get*'
+              - 'securityhub:List*'
+              - 'servicecatalog:List*'
+              - 'ses:Describe*'
+              - 'ses:List*'
+              - 'shield:List*'
+              - 'sns:Get*'
+              - 'sns:List*'
+              - 'sqs:Get*'
+              - 'sqs:List*'
+              - 'ssm:List*'
+              - 'states:List*'
+              - 'storagegateway:Describe*'
+              - 'storagegateway:List*'
+              - 'sts:GetCallerIdentity'
+              - 'swf:List*'
+              - 'tag:Get*'
+              - 'tiros:Get*'
+              - 'trustedadvisor:Describe*'
+              - 'uxc:Get*'
+              - 'uxc:List*'
+              - 'waf-regional:List*'
+              - 'waf:List*'
+              - 'wafv2:List*'
+              - 'wisdom:List*'
+              - 'workdocs:Describe*'
+              - 'workmail:Describe*'
+              - 'workspaces:Describe*'
+              - 'xray:BatchGet*'
+              - 'xray:Get*'
+              - 'xray:List*'
+            Resource: '*'
+
+          # Reads by verb shape that return DATA rather than state. Most are
+          # not granted by anything above; denied so that stays true if a
+          # policy is attached later. The ECS and Lambda entries are D-017:
+          # they return environment variable values, and ecs:Describe* in
+          # ViewOnlyAccess would otherwise reach DescribeTaskDefinition.
+          - Sid: NeverTheDataPlane
+            Effect: Deny
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:BatchGetSecretValue'
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'ssm:GetParameterHistory'
+              - 'dynamodb:GetItem'
+              - 'dynamodb:BatchGetItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+              - 'rds-data:*'
+              - 'ecs:DescribeTaskDefinition'
+              - 'lambda:GetFunction'
+              - 'lambda:GetFunctionConfiguration'
+              - 'ec2:GetPasswordData'
+              - 'ec2:GetConsoleOutput'
+              - 'ec2:GetConsoleScreenshot'
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:ReEncryptFrom'
+            Resource: '*'
+
   # Published so provisioning (phase 12) can assign these without being told
   # the ARNs. identity/00-commercial-readonly.yaml does the same.
   DevArnParam:
@@ -401,6 +820,13 @@ Resources:
       Type: String
       Value: !GetAtt DeveloperProdPermissionSet.PermissionSetArn
 
+  ReadOnlyArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/tenant-readonly'
+      Type: String
+      Value: !GetAtt TenantReadOnlyPermissionSet.PermissionSetArn
+
 Outputs:
 
   DeveloperDevArn:
@@ -414,3 +840,7 @@ Outputs:
   DeveloperProdArn:
     Description: prod and uat grant. Read and observe.
     Value: !GetAtt DeveloperProdPermissionSet.PermissionSetArn
+
+  TenantReadOnlyArn:
+    Description: oversight grant, every environment. Read and observe.
+    Value: !GetAtt TenantReadOnlyPermissionSet.PermissionSetArn

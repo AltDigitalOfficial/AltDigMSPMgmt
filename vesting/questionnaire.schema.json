@@ -348,6 +348,7 @@
         "customer_staff_need_access",
         "no_regulated_data_in_lower_envs_ack",
         "developer_manager",
+        "developer_manager_role",
         "dedicated_infrastructure_required"
       ],
       "properties": {
@@ -378,6 +379,10 @@
         "developer_manager": {
           "$ref": "#/$defs/contact",
           "description": "5.8 — dev team digest recipient."
+        },
+        "developer_manager_role": {
+          "enum": ["oversight", "contributor"],
+          "description": "3.6a -- does the development manager also write and deploy code, or oversee only? Either way they receive TenantReadOnly in every environment. 'contributor' additionally requires them on the developer roster with the environments they build in; 'oversight' forbids it, so that an oversight-only answer cannot quietly acquire build access through the roster. Enforced by scripts/derive-roster.py. Required, with no default: the two answers grant different things, and a default would decide that for the client."
         },
         "dedicated_infrastructure_required": {
           "type": "boolean",

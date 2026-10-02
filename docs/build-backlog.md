@@ -6323,3 +6323,79 @@ opens at CRITICAL because of how the platform itself is built.
 
 **Build when** — phase 15.6, which is already changing the Config recorder and
 building Security Hub central configuration.
+
+---
+
+## B-148 · Developers could rewrite or switch off the platform's monitoring
+
+**Observed** — 2026-10-01, defining the Arc8 developer and read-only roles.
+design 11 Layer 1 lists "platform-managed alarms and SSM associations" among
+the things no principal in a member account may touch. Neither the SCPs nor
+the developer boundary carried them. `DeveloperDev` is PowerUserAccess, so in
+a dev account a developer could:
+
+- `lambda:UpdateFunctionCode` on `platform-response`, which then runs their
+  code as `PlatformResponseAutomation`. That is a control removed *and* a
+  privilege escalation.
+- disable `platform-alarm-drift-on-delete`, then delete `platform-auto-*`
+  alarms, and the drift sweep that would have recreated them never fires.
+- `ssm:PutParameter /platform/response/enabled false`, which is the response
+  kill switch.
+- delete the `platform-install-cloudwatch-agent` association, the
+  `platform-remediation-history` records, or a `StackSet-platform-*` stack.
+- change the baseline route tables, security groups and DNS firewall, which
+  is egress escaping its declared profile.
+
+None of this needs malice. A developer cleaning up "unused" Lambdas in their
+own dev account does the first one.
+
+**Built 2026-10-01:**
+- `policies/scp/08-protect-platform-monitoring.json` covers alarms, EventBridge
+  rules, Lambda functions, `/platform/*` parameters, `platform-*` tables and
+  `platform-*` stacks, all keyed on the `platform-` name prefix, which every
+  baseline monitoring resource carries. Each statement exempts the
+  deployment principals plus only the platform role that writes to that
+  resource (`PlatformInstrumentation`, `PlatformHoopScheduler`,
+  `PlatformResponseAutomation`).
+- `policies/scp/07-deny-bypass.json` adds `ProtectBaselineNetwork` and
+  `ProtectResolverTags`, keyed on `platform-managed=true`. 07 rather than 08,
+  for two reasons: design 11's bypass table is what 07 implements, and one
+  SCP holding all of it came to 5,841 bytes against a 5,120 limit.
+- `baseline/80-developer-boundary.yaml` mirrors 08, so a role a developer
+  creates cannot do what the developer cannot.
+- `DeveloperDev` denies claiming or stripping `platform-layer: infrastructure`
+  (B-127). This lives in the permission set rather than an SCP, so it needs no
+  list of platform-role exemptions.
+
+**Known costs, accepted:**
+- **State Manager associations.** Their ARNs carry an id, not a name, so the
+  platform's own cannot be singled out. `DeleteAssociation` and
+  `UpdateAssociation` are denied for every association. Developers can still
+  create associations but cannot change or remove them afterwards.
+  *Trigger:* the first tenant whose application uses State Manager. At that
+  point, test whether `aws:ResourceTag` evaluates on associations and narrow
+  the deny to tagged ones.
+- **The `platform-` prefix is reserved.** A developer stack or function named
+  `platform-*` is refused, just as SCP 03 reserves `Platform*` roles.
+- **`lambda:InvokeFunction` is not denied.** Invoking `platform-response`
+  with a crafted event could make it isolate a resource in the caller's own
+  account. Blocking that safely needs the full list of cross-account callers,
+  which this change did not establish. *Trigger:* the next change to
+  containment's invocation path.
+- **`ec2:ModifySecurityGroupRules`** authorises against the security group
+  rule as well as the group. Rules do not inherit the group's tags, so this
+  one action may not be caught. Authorize and Revoke are.
+
+**Not yet live.** 08 is attached to Sandbox only, and the 07 and boundary
+changes are not deployed. Arc8 dev and test are vested, so Members needs this
+before the Arc8 developers get access:
+1. `scripts/deploy-policies.sh`, Sandbox. Then `scripts/test-guardrails.sh`
+   with an assertion added that `GuardrailTestAdmin` cannot
+   `UpdateFunctionCode` on `platform-response` or `PutParameter`
+   `/platform/response/enabled`.
+2. Re-run the instrumentation, HOOP and response paths in Sandbox and watch for
+   AccessDenied from the exempted roles. Each exemption list was derived by
+   reading the templates, not by watching a live run.
+3. Add `members` to 08 in `attachments.tsv`, deploy 07 and 08 with
+   `--confirm-production`, and update the `platform-developer-boundary`
+   StackSet.

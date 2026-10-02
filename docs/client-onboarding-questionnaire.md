@@ -167,6 +167,7 @@ questionnaire.
 | 3.5 | **Breach notification contact** — who we formally notify if your data is affected by a security incident | Name, email, phone | Vest | Reversible |
 | 3.5a | Security operations contact — day-to-day security questions and findings | Name, email, phone | Prod | Reversible |
 | 3.6 | **Development manager** — receives the daily activity digest | Name, email | Dev | Reversible |
+| 3.6a | Will the development manager also write and deploy code, or oversee the work only? | **Pick one:** `oversight` / `contributor` | Dev | Reversible |
 
 **On 3.5.** This is the person whose receipt of our notification starts your own
 legal clock, so it must be someone who can act for your organisation: an owner,
@@ -187,6 +188,26 @@ rather it went to a person who will read it than to a shared mailbox nobody
 watches.
 
 Tell us if you want more than one recipient, or a different recipient per tier.
+
+**On 3.6a.** Whichever you choose, the development manager gets **read-only
+access to every environment**: the resources, logs, metrics, alarms and
+security findings, but not your data, secret values or anything they could
+change. That way the person accountable for the application can always see it,
+without needing a developer to show them.
+
+- **`oversight`.** Read-only access only. The manager does not appear on the
+  developer roster below. If they later start building, change this answer to
+  `contributor` and add them to the roster.
+- **`contributor`.** Read-only access, **plus** developer access. List the
+  manager on the developer roster below, with the environments they build in,
+  the same as any other developer.
+
+We check these against each other. A manager marked `oversight` who also
+appears on the developer roster is held for correction instead of being quietly
+granted developer access, and so is a `contributor` who is missing from it.
+
+Anyone else who needs the same read-only view, such as a product owner or an
+internal auditor, can be added under **Read-only access** in Section 3b.
 
 ### 3b. Developer roster
 
@@ -209,6 +230,15 @@ Access levels differ by environment. Development access is broad; production
 access is narrower and read-heavy by default, with changes going through the
 deployment pipeline rather than the console. If somebody needs an exception,
 tell us who and why rather than working around it.
+
+**Read-only access.** Put these people in a separate list: they see every
+environment and can change none of them. Always include the development manager
+from 3.6. Add anyone else who needs to see the application without building it.
+
+| Name | Email | Role |
+|---|---|---|
+| | | Development manager (3.6) |
+| | | |
 
 | # | Question | How to answer | When | Change later? |
 |---|---|---|---|---|

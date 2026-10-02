@@ -88,6 +88,10 @@ PERMISSION_SET = {
     "prod": "developer-prod",
 }
 
+# The oversight grant. Not in PERMISSION_SET because it is not a point on the
+# gradient: one group, every environment, the same read-only set in each.
+READONLY_PERMISSION_SET = "tenant-readonly"
+
 # Environments where the grant reaches real data and a person's presence is
 # worth a second look. Used for the `exception` requirement and the review
 # summary, not for the permission set -- that comes from PERMISSION_SET above.
@@ -304,8 +308,83 @@ def warnings_for(roster, envs):
     return w
 
 
+def _is_manager(person, manager_email):
+    return person["email"].strip().lower() == manager_email
+
+
+def check_readonly(roster, q):
+    """Questionnaire 3.6 and 3.6a, held against the roster.
+
+    The development manager is the one person always owed the read-only view,
+    whoever they are -- this time a partner, next time the client's own staff
+    with no other access at all. So the manager must be on the read-only list,
+    and 3.6a decides whether they may ALSO be on the developer list.
+
+    Both directions block. An `oversight` manager who turns up among the
+    developers would be granted build access the questionnaire says they do not
+    have, and a `contributor` who is missing would be refused access they were
+    promised. Either one is the roster and the questionnaire disagreeing, and
+    the fix is to make them agree, not to pick a winner here.
+    """
+    errs = []
+    readonly = roster.get("readonly") or []
+    mgr = q["security"]["developer_manager"]
+    mgr_email = mgr["email"].strip().lower()
+    role = q["security"]["developer_manager_role"]
+
+    if not any(_is_manager(p, mgr_email) for p in readonly):
+        errs.append(
+            f"The development manager ({mgr['name']}, questionnaire 3.6) is not "
+            "on the read-only list.\n"
+            "    Add them under `readonly`, matched by the same email as 3.6. The "
+            "manager always\n    receives read-only access to every environment, "
+            "whatever 3.6a says.")
+
+    on_dev = any(_is_manager(p, mgr_email) for p in roster["developers"])
+    if role == "oversight" and on_dev:
+        errs.append(
+            f"{mgr['name']} is the development manager, 3.6a says `oversight`, "
+            "and they are on\n    the developer roster. Either the answer is out "
+            "of date -- change 3.6a to\n    `contributor` -- or the roster entry "
+            "is a mistake. Not resolved here: one of\n    the two documents is "
+            "wrong and this cannot tell which.")
+    if role == "contributor" and not on_dev:
+        errs.append(
+            f"{mgr['name']} is the development manager and 3.6a says "
+            "`contributor`, but they are\n    not on the developer roster. Add "
+            "them under `developers` with the environments\n    they build in, "
+            "or change 3.6a to `oversight`.")
+
+    for p in readonly:
+        if not _is_manager(p, mgr_email) and not (p.get("reason") or "").strip():
+            errs.append(
+                f"readonly[{name_of(p)}] has no `reason`. Read-only access "
+                "reaches every environment,\n    production logs included -- "
+                "'why does this person see prod' should have an\n    answer in "
+                "the file.")
+
+    for label, extract in (
+            ("an email address", lambda p: p["email"].strip().lower()),
+            ("a sign-in name", lambda p: user_name_of(p).lower())):
+        seen = {}
+        for p in readonly:
+            value = extract(p)
+            if value in seen:
+                errs.append(
+                    f"Two read-only records share {label} ({value}): "
+                    f"{seen[value]} and {name_of(p)}. Merge them.")
+            seen[value] = name_of(p)
+
+    for p in readonly:
+        if not USERNAME_RE.match(user_name_of(p)):
+            errs.append(
+                f"readonly[{name_of(p)}]: sign-in name {user_name_of(p)!r} "
+                "contains a pipe, comma or whitespace.")
+    return errs
+
+
 CHECKS = (check_environments_exist, check_no_duplicates,
-          check_usernames_parseable, check_prod_has_exception)
+          check_usernames_parseable, check_prod_has_exception, check_readonly)
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +431,25 @@ def derive(roster, envs):
             ],
         }
 
+    # The oversight group. Named for the TENANT rather than an account,
+    # because it reaches all of them.
+    readonly = {
+        "group_name": f"ReadOnly-{stem}",
+        "permission_set": READONLY_PERMISSION_SET,
+        "permission_set_param": f"/identity/permission-set/{READONLY_PERMISSION_SET}",
+        "environments": envs,
+        "members": [
+            {
+                "given_name": p["given_name"].strip(),
+                "family_name": p["family_name"].strip(),
+                "email": p["email"].strip(),
+                "user_name": user_name_of(p),
+                "reason": (p.get("reason") or "").strip() or None,
+            }
+            for p in (roster.get("readonly") or [])
+        ],
+    }
+
     return {
         "tenant_stem": stem,
         "partner": t["partner"],
@@ -359,6 +457,7 @@ def derive(roster, envs):
         "application_code": t["application_code"],
         "environments": envs,
         "groups": groups,
+        "readonly": readonly,
         "people_total": len(roster["developers"]),
     }
 
@@ -394,6 +493,16 @@ def report(d, w):
                       f"  <{m['user_name']}>{flag}")
         print()
 
+    r = d["readonly"]
+    print("  read-only, every environment")
+    print(f"    group        : {r['group_name']}")
+    print(f"    accounts     : {', '.join(r['environments'])}")
+    print(f"    grant        : {r['permission_set']}")
+    for i, m in enumerate(r["members"]):
+        label = "    members      : " if i == 0 else "                   "
+        print(f"{label}{m['given_name']} {m['family_name']}  <{m['user_name']}>")
+    print()
+
     if w:
         print("-" * 70)
         print("  Review before applying:")
@@ -417,7 +526,8 @@ def main():
                     help="Emit that environment's members as "
                          "GivenName|FamilyName|email|userName records, one per "
                          "line -- the format config/identity.env uses and "
-                         "grant-developer-access.sh parses.")
+                         "grant-developer-access.sh parses. ENV may also be "
+                         "'readonly' for the oversight group.")
     args = ap.parse_args()
 
     roster = load(Path(args.roster), yaml.safe_load)
@@ -451,8 +561,12 @@ def main():
 
     problems = []
     for check in CHECKS:
-        problems.extend(check(roster, envs) if check is check_environments_exist
-                        else check(roster))
+        if check is check_environments_exist:
+            problems.extend(check(roster, envs))
+        elif check is check_readonly:
+            problems.extend(check(roster, q))
+        else:
+            problems.extend(check(roster))
     if problems:
         print("The roster is well-formed but cannot be applied:\n", file=sys.stderr)
         for p in problems:
@@ -460,6 +574,12 @@ def main():
         sys.exit(1)
 
     d = derive(roster, envs)
+
+    if args.members == "readonly":
+        for m in d["readonly"]["members"]:
+            print(f"{m['given_name']}|{m['family_name']}|{m['email']}|"
+                  f"{m['user_name']}")
+        return
 
     if args.members:
         if args.members not in d["groups"]:

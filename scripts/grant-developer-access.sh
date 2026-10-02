@@ -8,12 +8,14 @@
 # Questionnaire section 3b, applied. Four things happen, in order, and every
 # one of them is idempotent:
 #
-#   1. One Identity Center group per member account, created if absent.
+#   1. One Identity Center group per member account, plus one read-only
+#      group for the whole tenant, created if absent.
 #   2. Each person on the roster created in the identity store if absent.
 #   3. Membership reconciled — people added to the groups their roster row
 #      lists, and nobody removed. See below.
-#   4. identity/20-developer-assignments.yaml binds each group to the
-#      permission set design 11's gradient calls for.
+#   4. identity/20-developer-assignments.yaml binds each developer group to
+#      the permission set design 11's gradient calls for, and the read-only
+#      group to TenantReadOnly in every account.
 #
 # Steps 1-3 are not CloudFormation, for the reasons
 # scripts/deploy-commercial-access.sh gives for the same split: the groups must
@@ -197,14 +199,18 @@ fi
 
 trim() { printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
 
-declare -A GROUP_OF
-
-for ENVNAME in ${ENVS}; do
-  GROUP_NAME="$(d_get "['groups']['${ENVNAME}']['group_name']")"
-  GRANT="$(d_get "['groups']['${ENVNAME}']['permission_set']")"
-
-  hr
-  info "${ENVNAME} — group ${GROUP_NAME} (${GRANT})"
+# reconcile_group <group name> <description> <--members key> <label>
+#
+# Create the group if absent, create each member if absent, add each to the
+# group, and report anyone in the group who is not on the roster. Sets GID.
+#
+# One function for both kinds of group -- the per-account developer groups and
+# the tenant-wide read-only group -- because the leaver policy in the header
+# must be identical for both, and two copies of this loop would agree only
+# until one of them was edited.
+reconcile_group() {
+  local GROUP_NAME="$1" DESCRIPTION="$2" KEY="$3" LABEL="$4"
+  local MEMBERS record GIVEN FAMILY EMAIL UNAME UID_ CONFIGURED member_username
 
   GID="$(group_id_by_name "${GROUP_NAME}")"
   if [[ -n "${GID}" && "${GID}" != "None" ]]; then
@@ -217,21 +223,20 @@ for ENVNAME in ${ENVS}; do
     GID="$(aws identitystore create-group \
       --identity-store-id "${IDENTITY_STORE_ID}" \
       --display-name "${GROUP_NAME}" \
-      --description "Developer access to ${ENVNAME} for ${PARTNER}/${CLIENT}/${APP} (design 11)" \
+      --description "${DESCRIPTION}" \
       --query GroupId --output text | no_cr)"
     ok "group created (${GID})"
   fi
-  GROUP_OF["${ENVNAME}"]="${GID}"
 
   # Members. derive-roster.py emits the same pipe-delimited record format
   # config/identity.env uses, so there is one parser for both rather than two
   # that agree until one is edited.
   MEMBERS="$("${PY}" "${DERIVE_PY}" --roster "${RPATH}" \
-    --questionnaire "${QPATH}" --members "${ENVNAME}")"
+    --questionnaire "${QPATH}" --members "${KEY}")"
 
   if [[ -z "${MEMBERS}" ]]; then
-    skip "nobody on the roster reaches ${ENVNAME}"
-    continue
+    skip "nobody on the roster reaches ${LABEL}"
+    return 0
   fi
 
   while read -r record; do
@@ -247,7 +252,7 @@ for ENVNAME in ${ENVS}; do
     # against the RECORD FORMAT breaking — a name containing a pipe would shift
     # every field left and create a user with somebody else's email.
     [[ -n "${GIVEN}" && -n "${FAMILY}" && -n "${EMAIL}" && -n "${UNAME}" ]] \
-      || die "Malformed member record for ${ENVNAME}: ${record}
+      || die "Malformed member record for ${LABEL}: ${record}
       Expected GivenName|FamilyName|email|userName."
 
     # Looked up by userName, which is the identity store's unique attribute.
@@ -303,7 +308,32 @@ for ENVNAME in ${ENVS}; do
       fi
     done < <(group_member_usernames "${GID}")
   fi
+}
+
+declare -A GROUP_OF
+
+for ENVNAME in ${ENVS}; do
+  GROUP_NAME="$(d_get "['groups']['${ENVNAME}']['group_name']")"
+  GRANT="$(d_get "['groups']['${ENVNAME}']['permission_set']")"
+
+  hr
+  info "${ENVNAME} — group ${GROUP_NAME} (${GRANT})"
+  reconcile_group "${GROUP_NAME}" \
+    "Developer access to ${ENVNAME} for ${PARTNER}/${CLIENT}/${APP} (design 11)" \
+    "${ENVNAME}" "${ENVNAME}"
+  GROUP_OF["${ENVNAME}"]="${GID}"
 done
+
+# The read-only group: one for the tenant, assigned to every account. Always
+# reconciled, because derive-roster.py refuses a roster without the
+# development manager on it -- so this group is never legitimately empty.
+RO_GROUP_NAME="$(d_get "['readonly']['group_name']")"
+hr
+info "every environment — group ${RO_GROUP_NAME} (tenant-readonly)"
+reconcile_group "${RO_GROUP_NAME}" \
+  "Read-only oversight of every environment for ${PARTNER}/${CLIENT}/${APP} (design 11)" \
+  "readonly" "the read-only group"
+RO_GROUP="${GID}"
 
 # ---------------------------------------------------------------------------
 # 5. Assignments
@@ -332,6 +362,7 @@ for ENVNAME in ${ENVS}; do
   [[ -n "${GROUP_OF[${ENVNAME}]:-}" ]]   || MISSING_IDS="${MISSING_IDS} ${ENVNAME}(group)"
   [[ -n "${ACCOUNT_OF[${ENVNAME}]:-}" ]] || MISSING_IDS="${MISSING_IDS} ${ENVNAME}(account)"
 done
+[[ -n "${RO_GROUP:-}" ]] || MISSING_IDS="${MISSING_IDS} readonly(group)"
 
 if [[ -n "${MISSING_IDS}" ]]; then
   skip "stack ${STACK_NAME} — not yet resolvable:${MISSING_IDS}"
@@ -355,6 +386,7 @@ else
     "DevAccountId=${ACCOUNT_OF[dev]}"
     "TestAccountId=${ACCOUNT_OF[test]}"
     "ProdAccountId=${ACCOUNT_OF[prod]}"
+    "ReadOnlyGroupId=${RO_GROUP}"
   )
   if [[ -n "${UAT_GROUP}" && -n "${UAT_ACCOUNT}" ]]; then
     PARAMS+=("UatGroupId=${UAT_GROUP}" "UatAccountId=${UAT_ACCOUNT}")
@@ -380,6 +412,10 @@ else
   log "  aws ecs list-clusters"
   log "  aws secretsmanager list-secrets          # names, allowed everywhere"
   log "  aws secretsmanager get-secret-value --secret-id any   # DENIED in prod"
+  log ""
+  log "And as TenantReadOnly, in any account, the write must be refused:"
+  log "  aws ecs list-clusters                    # allowed"
+  log "  aws logs create-log-group --log-group-name probe   # DENIED"
   log ""
   log "A grant that reads correctly and does not hold is the failure this"
   log "cannot detect from here — design 11's gradient is only real once"

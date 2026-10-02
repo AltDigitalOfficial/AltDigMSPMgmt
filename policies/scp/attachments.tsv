@@ -64,6 +64,18 @@
 06-region-restriction.json	sandbox,members
 07-deny-bypass.json	sandbox,members
 
+# 08 is design 11 Layer 1's "platform-managed alarms and SSM associations",
+# which 01-03 never carried (B-148). PowerUserAccess in dev could rewrite the
+# response engine's code, disable the drift rule that recreates deleted
+# alarms, or flip /platform/response/enabled off -- each one a monitoring
+# control removed by somebody the platform is meant to be monitoring.
+#
+# Sandbox first, same as the v2 swap: the harness proves it there, then
+# members is added here and deployed with --confirm-production. Members then
+# carries nine of its ten SCPs (eight platform plus FullAWSAccess), so the
+# next control after this one extends an existing policy rather than adding.
+08-protect-platform-monitoring.json	sandbox
+
 # The first RCP. design 11 names cross-account trust as a bypass, and no
 # SCP condition key can see a trust policy's Principal -- an RCP
 # evaluates on the RESOURCE side and denies the assume itself. D-003.

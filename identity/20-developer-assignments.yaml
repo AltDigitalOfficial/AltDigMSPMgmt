@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
 Description: >-
-  AltDigital Managed Platform — per-tenant developer access assignments.
-  Binds one Identity Center group per member account to the permission set
-  design 11's gradient calls for. One stack per tenant, deployed by
-  scripts/grant-developer-access.sh.
+  AltDigital Managed Platform — per-tenant access assignments. Binds one
+  developer group per member account to the permission set design 11's
+  gradient calls for, and one read-only oversight group to every account.
+  One stack per tenant, deployed by scripts/grant-developer-access.sh.
 
 # ---------------------------------------------------------------------------
 # One group per ACCOUNT, and that is the whole idea
@@ -21,6 +21,20 @@ Description: >-
 #   * joiners and leavers are group membership and touch nothing here. design
 #     doc 03: "access is granted by group membership, never per-account
 #     configuration."
+#
+# ---------------------------------------------------------------------------
+# The one exception: the read-only group reaches EVERY account
+# ---------------------------------------------------------------------------
+# ReadOnlyGroupId is bound to TenantReadOnly in dev, test, prod and (where
+# elected) uat. That is its whole purpose -- oversight of the application, not
+# of one environment of it -- so the reviewer's check for this group is the
+# opposite one: it reaches all of the tenant's accounts, it reaches nothing
+# else, and in every one of them the grant is the same read-only set.
+#
+# Always present. Questionnaire 3.6 (development manager) is required, and the
+# manager is always in this group whether or not they also write code (3.6a).
+# A tenant therefore never has nobody able to see its accounts without being
+# able to change them.
 #
 # ---------------------------------------------------------------------------
 # UAT takes the PRODUCTION permission set
@@ -104,6 +118,14 @@ Parameters:
     AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     ConstraintDescription: Must be an identity store group id (UUID form).
 
+  ReadOnlyGroupId:
+    Type: String
+    Description: >-
+      Identity store group id for the tenant's read-only oversight group.
+      Assigned to every account below, unlike the per-account groups above.
+    AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ConstraintDescription: Must be an identity store group id (UUID form).
+
   UatGroupId:
     Type: String
     Default: ''
@@ -162,6 +184,12 @@ Parameters:
     Description: >-
       Published by identity/10-developer-access.yaml. Used for BOTH prod and
       UAT — see the header.
+
+  TenantReadOnlyArn:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: /platform/identity/permission-set/tenant-readonly
+    Description: >-
+      Published by identity/10-developer-access.yaml. Every environment.
 
 Conditions:
 
@@ -237,6 +265,54 @@ Resources:
       TargetType: AWS_ACCOUNT
       TargetId: !Ref UatAccountId
 
+  # =========================================================================
+  # read-only oversight — the same group and the same grant, everywhere
+  # =========================================================================
+  # Four resources rather than a loop because CloudFormation has none, and
+  # because a reviewer confirming "every account, same set" reads four
+  # identical blocks faster than they audit a macro.
+
+  DevReadOnlyAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref TenantReadOnlyArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref ReadOnlyGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref DevAccountId
+
+  TestReadOnlyAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref TenantReadOnlyArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref ReadOnlyGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref TestAccountId
+
+  ProdReadOnlyAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref TenantReadOnlyArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref ReadOnlyGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref ProdAccountId
+
+  UatReadOnlyAssignment:
+    Type: AWS::SSO::Assignment
+    Condition: HasUat
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref TenantReadOnlyArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref ReadOnlyGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref UatAccountId
+
 Outputs:
 
   Tenant:
@@ -251,4 +327,4 @@ Outputs:
 
   GrantSummary:
     Description: Which permission set each environment received.
-    Value: !Sub 'dev=${DeveloperDevArn} test=${DeveloperTestArn} prod=${DeveloperProdArn} uat=${DeveloperProdArn}'
+    Value: !Sub 'dev=${DeveloperDevArn} test=${DeveloperTestArn} prod=${DeveloperProdArn} uat=${DeveloperProdArn} readonly=${TenantReadOnlyArn}'

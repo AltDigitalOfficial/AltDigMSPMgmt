@@ -122,6 +122,66 @@ Resources:
               - 'logs:PutDataProtectionPolicy'
             Resource: '*'
 
+          # design 11 Layer 1's "platform-managed alarms and SSM associations",
+          # which this boundary and the SCPs both lacked until B-148. Mirrors
+          # policies/scp/08-protect-platform-monitoring.json.
+          #
+          # The case it closes is the one the header describes: a developer
+          # who may not touch platform-response writes a Lambda that may, and
+          # the Lambda rewrites the response engine's code. Keyed on the
+          # platform- name prefix, which every monitoring resource the
+          # baseline creates carries and which SCP 08 reserves account-wide.
+          - Sid: NeverThePlatformMonitoring
+            Effect: Deny
+            Action:
+              - 'cloudwatch:DeleteAlarms'
+              - 'cloudwatch:PutMetricAlarm'
+              - 'cloudwatch:PutCompositeAlarm'
+              - 'cloudwatch:DisableAlarmActions'
+              - 'cloudwatch:SetAlarmState'
+              - 'events:DeleteRule'
+              - 'events:DisableRule'
+              - 'events:PutRule'
+              - 'events:PutTargets'
+              - 'events:RemoveTargets'
+              - 'lambda:CreateFunction'
+              - 'lambda:DeleteFunction'
+              - 'lambda:UpdateFunctionCode'
+              - 'lambda:UpdateFunctionConfiguration'
+              - 'lambda:AddPermission'
+              - 'lambda:RemovePermission'
+              - 'lambda:PutFunctionConcurrency'
+              - 'ssm:PutParameter'
+              - 'ssm:DeleteParameter'
+              - 'ssm:DeleteParameters'
+              - 'dynamodb:DeleteTable'
+              - 'dynamodb:UpdateTable'
+              - 'dynamodb:PutItem'
+              - 'dynamodb:UpdateItem'
+              - 'dynamodb:DeleteItem'
+              - 'dynamodb:BatchWriteItem'
+              - 'cloudformation:CreateStack'
+              - 'cloudformation:UpdateStack'
+              - 'cloudformation:DeleteStack'
+              - 'cloudformation:ExecuteChangeSet'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:cloudwatch:*:${AWS::AccountId}:alarm:platform-*'
+              - !Sub 'arn:${AWS::Partition}:events:*:${AWS::AccountId}:rule/platform-*'
+              - !Sub 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:platform-*'
+              - !Sub 'arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/platform/*'
+              - !Sub 'arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/platform-*'
+              - !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/platform-*'
+              - !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/StackSet-platform-*'
+
+          # Associations carry an id, not a name, in their ARN, so they cannot
+          # be scoped to the platform's own. Denied for all; see SCP 08.
+          - Sid: NeverTheAgentAssociations
+            Effect: Deny
+            Action:
+              - 'ssm:DeleteAssociation'
+              - 'ssm:UpdateAssociation'
+            Resource: '*'
+
           # A role created by a developer must not be able to touch the
           # platform's own identities -- including, recursively, this boundary
           # and the roles that enforce it.

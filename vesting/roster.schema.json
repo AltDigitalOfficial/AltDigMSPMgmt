@@ -22,6 +22,29 @@
       }
     },
 
+    "readonly": {
+      "description": "Questionnaire 3b, read-only access. Each person receives TenantReadOnly in EVERY environment the tenant has -- see, never change. Must include the development manager from questionnaire 3.6, matched by email; derive-roster.py refuses otherwise, because the manager is the one person always owed this view. Optional in the schema only so rosters written before 2026-10-01 still parse and are then refused with that explanation rather than a schema error.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["given_name", "family_name", "email"],
+        "properties": {
+          "given_name":  { "type": "string", "minLength": 1 },
+          "family_name": { "type": "string", "minLength": 1 },
+          "email":       { "type": "string", "format": "email", "pattern": "^[^@ |,\t]+@[^@ |,\t]+[.][^@ |,\t]+$" },
+          "user_name": {
+            "description": "As for developers: points at an existing Identity Center entry whose sign-in name is not the email.",
+            "type": ["string", "null"]
+          },
+          "reason": {
+            "description": "Why this person needs oversight. Required by derive-roster.py for everyone except the development manager, whose reason is questionnaire 3.6.",
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+
     "developers": {
       "description": "One entry per person. An empty list is legal: section 3b is marked Dev, not Vest, so a tenant can be vested before its roster is known.",
       "type": "array",
