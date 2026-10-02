@@ -48,8 +48,10 @@ securityhub = boto3.client("securityhub")
 sts = boto3.client("sts")
 
 INCIDENT_TABLE = os.environ.get("INCIDENT_TABLE", "")
-RESPONDER_ROLE_NAME = os.environ.get("RESPONDER_ROLE_NAME",
-                                     "PlatformSecurityResponder")
+# The read-only reader, not the responder (B-146). The responder isolates and
+# revokes, and trusts containment alone. The readout only reads, so it gets a
+# role that can only read.
+READER_ROLE_NAME = os.environ.get("READER_ROLE_NAME", "PlatformIncidentReader")
 EXTERNAL_ID = os.environ.get("RESPONDER_EXTERNAL_ID", "")
 ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
 EVIDENCE_BUCKET = os.environ.get("EVIDENCE_BUCKET", "")
@@ -81,8 +83,8 @@ def _parse(value):
         return None
 
 
-def responder(account_id, purpose):
-    role_arn = f"arn:aws:iam::{account_id}:role/{RESPONDER_ROLE_NAME}"
+def reader(account_id, purpose):
+    role_arn = f"arn:aws:iam::{account_id}:role/{READER_ROLE_NAME}"
     kwargs = {"RoleArn": role_arn, "RoleSessionName": f"readout-{purpose}"[:64]}
     if EXTERNAL_ID:
         kwargs["ExternalId"] = EXTERNAL_ID
@@ -146,7 +148,7 @@ def stage_detail(stages, name):
 def principal_activity(account_id, principal_arn):
     """CloudTrail for the compromised principal, last LOOKBACK_HOURS.
 
-    Read through the responder role, from the member account's own trail. The
+    Read through the reader role, from the member account's own trail. The
     organization trail in Log Archive holds the same events and is the
     authoritative copy for evidence; LookupEvents is used here because it
     answers "what did this principal just do" in one call, and the readout is
@@ -159,7 +161,7 @@ def principal_activity(account_id, principal_arn):
     name = str(principal_arn).rsplit("/", 1)[-1]
     start = _now() - datetime.timedelta(hours=LOOKBACK_HOURS)
     try:
-        session = responder(account_id, "trail")
+        session = reader(account_id, "trail")
         trail = session.client("cloudtrail")
         paginator = trail.get_paginator("lookup_events")
         found = []
@@ -228,7 +230,7 @@ def principal_reach(account_id, principal_arn):
                 "reason": f"{principal_arn} is not an IAM role or user"}
 
     try:
-        iam = responder(account_id, "reach").client("iam")
+        iam = reader(account_id, "reach").client("iam")
         if kind == "role":
             attached = iam.list_attached_role_policies(RoleName=name)
             inline = iam.list_role_policies(RoleName=name)

@@ -87,9 +87,20 @@ Parameters:
       really apply within a single organization, so it is off by default rather
       than being ceremony everybody copies.
 
+  ReadoutRoleArn:
+    Type: String
+    Default: ''
+    Description: >-
+      The Audit-account role of the incident readout (PlatformIncidentReadout
+      in containment/10-containment.yaml), the only principal the read-only
+      PlatformIncidentReader trusts. Empty means no reader is created. Exact
+      principal, for the reason ContainmentRoleArn gives (B-146).
+    AllowedPattern: '^(arn:aws[a-z-]*:iam::[0-9]{12}:role/.+)?$'
+
 Conditions:
   HasForensics: !Not [!Equals [!Ref ForensicsAccountId, '']]
   HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
+  HasReadout: !Not [!Equals [!Ref ReadoutRoleArn, '']]
 
 Resources:
 
@@ -297,6 +308,74 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AWSReservedSSO*'
 
   # -------------------------------------------------------------------------
+  # The readout's own role: read, and nothing else (B-146)
+  # -------------------------------------------------------------------------
+  # The incident readout (design 07) has to look inside the incident account.
+  # It asks what the principal did (CloudTrail) and what the principal can
+  # reach (its attached and inline policies). It was written to borrow
+  # PlatformSecurityResponder for that. The responder never trusted it, so the
+  # readout could never read an account, and it said so only in CloudTrail.
+  # Trusting it would have fixed that by giving a READ path a role that can
+  # isolate instances and revoke sessions, and two principals instead of one
+  # behind the most dangerous role in the account.
+  #
+  # So the readout gets its own. Five read actions, no write of any kind, and
+  # one exact principal in its trust. None of these actions is denied by any
+  # SCP, so the role needs no exemption, and the responder's trust stays at
+  # containment only.
+  IncidentReaderRole:
+    Type: AWS::IAM::Role
+    Condition: HasReadout
+    # Retain, like the responder. A readout that silently loses its way into an
+    # account is the failure B-146 was.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: PlatformIncidentReader
+      Description: >-
+        Incident readout, read-only. Assumed by the readout from the Audit
+        account. Reads CloudTrail and a principal's policy list; changes nothing.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref ReadoutRoleArn
+            Action: sts:AssumeRole
+            Condition: !If
+              - HasExternalId
+              - StringEquals:
+                  'sts:ExternalId': !Ref ExternalId
+              - !Ref AWS::NoValue
+      Policies:
+        - PolicyName: ReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # What did the principal do. LookupEvents has no resource-level
+              # permission, so * is the only form it takes.
+              - Sid: WhatThePrincipalDid
+                Effect: Allow
+                Action: cloudtrail:LookupEvents
+                Resource: '*'
+              # What else can it reach (design 07: "what else that principal
+              # can reach"). Policy NAMES only; B-058 covers the deeper question.
+              - Sid: WhatThePrincipalCanReach
+                Effect: Allow
+                Action:
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedUserPolicies
+                  - iam:ListUserPolicies
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:user/*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  # -------------------------------------------------------------------------
   # Where evidence is allowed to go
   # -------------------------------------------------------------------------
   # Published so the containment automation does not have to be told, per
@@ -319,6 +398,10 @@ Outputs:
     Description: >-
       Assumed by the containment state machine in Audit.
     Value: !GetAtt SecurityResponderRole.Arn
+  ReaderRoleArn:
+    Condition: HasReadout
+    Description: Assumed by the incident readout in Audit (B-146).
+    Value: !GetAtt IncidentReaderRole.Arn
   ForensicsConfigured:
     Description: >-
       "none" means preservation creates snapshots locally and cannot move them

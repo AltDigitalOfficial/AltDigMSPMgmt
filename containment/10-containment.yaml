@@ -71,6 +71,14 @@ Parameters:
     Default: platform-security-incidents
     Description: Append-only incident record.
 
+  ReaderRoleName:
+    Type: String
+    Default: PlatformIncidentReader
+    Description: >-
+      The member-side read-only role the incident readout assumes, from
+      containment/00-responder-role.yaml (B-146). Read-only by construction; it
+      cannot isolate or revoke anything.
+
   ResponderRoleName:
     Type: String
     Default: PlatformSecurityResponder
@@ -506,14 +514,15 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: AssumeTheResponderRole
+              - Sid: AssumeTheReaderRole
                 Effect: Allow
-                # The same role containment uses, for the same reason: reading
-                # a member account CloudTrail and IAM needs a principal in that
-                # account, and the responder role is the one the member cannot
-                # deny.
+                # The read-only reader, not the responder (B-146). This used to
+                # name the responder, which never trusted the readout, so the
+                # readout could not read any account. Pointing the responder's
+                # trust at the readout would have handed a read path the role
+                # that isolates and revokes. The reader can only read.
                 Action: 'sts:AssumeRole'
-                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${ResponderRoleName}'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${ReaderRoleName}'
               - Sid: TheCrossAccountSweep
                 Effect: Allow
                 # The permission that makes prompt 7.2's cross-account
@@ -565,7 +574,7 @@ Resources:
       Environment:
         Variables:
           INCIDENT_TABLE: !Ref IncidentTable
-          RESPONDER_ROLE_NAME: !Ref ResponderRoleName
+          READER_ROLE_NAME: !Ref ReaderRoleName
           RESPONDER_EXTERNAL_ID: !Ref ResponderExternalId
           ALERT_BUS_NAME: !Ref AlertBusName
 
