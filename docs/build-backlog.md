@@ -6347,6 +6347,17 @@ the harness):**
   periodic control (about 24h). The Sandbox accounts, under the same
   organization trail, do not fail it. Re-check after the next evaluation, as
   above.
+- **IAM.1 suppressed, 2026-10-02.** `security/30-securityhub-suppressions.yaml`
+  is stack `platform-securityhub-suppressions` in Audit. It holds automation
+  rule `platform-suppress-iam1-developer-boundary`, matching control `IAM.1`
+  AND a resource containing `:policy/PlatformDeveloperBoundary`. The rule sets
+  `SUPPRESSED` and writes the reason into each finding's note.
+  - The 8 existing findings, which predate the rule, were given the same
+    status and note by `batch-update-findings`. No other IAM.1 finding
+    existed.
+  - The rule's tags are applied by `securityhub tag-resource`, because the
+    CloudFormation schema for this type rejects hyphenated tag keys.
+  - This template is where further suppressions go, one rule per cause.
 
 ---
 

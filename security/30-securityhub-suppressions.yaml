@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - Security Hub automation rules that suppress
+  findings the platform causes by design, each with its reason. Deployed to
+  the Audit account, Security Hub's delegated administrator, where rules
+  apply to findings from every member account.
+
+# ---------------------------------------------------------------------------
+# A suppression is a claim, so each one is narrow and says why
+# ---------------------------------------------------------------------------
+# B-147: every account opens on findings the platform itself causes, which
+# buries anything the tenant causes and trains people to ignore the counts. The
+# cure is not a blanket "suppress Security Hub". It is one rule per cause:
+#
+#   * matched as narrowly as the finding allows (control id AND resource),
+#   * with the reason written into the finding's note, so whoever opens it in
+#     the console reads why it is suppressed rather than guessing,
+#   * here, in a template, so adding one is a reviewed change and not a click.
+#
+# A rule only sets the workflow status to SUPPRESSED. The finding is still
+# recorded, still exported, and reappears if the rule is removed. Nothing is
+# deleted.
+#
+# Suppressions for the wider B-147 list (CIS 3.x, CloudFormation.3/.4, the
+# endpoint and flow-log mediums) belong to phase 15.6's central configuration,
+# where several are better handled by disabling the control for member
+# accounts than by suppressing each finding.
+
+Resources:
+
+  # IAM.1 flags any customer-managed policy, once attached, that allows "*" on
+  # "*". PlatformDeveloperBoundary does exactly that in its CeilingNotGrant
+  # statement, on purpose: it is a PERMISSIONS BOUNDARY, so it caps what a role
+  # can do and grants nothing. A role's effective permissions are the
+  # intersection of its own policies and the boundary. The boundary's content
+  # is its denies (baseline/80-developer-boundary.yaml). Every account that has
+  # a bounded role raises this finding, so without the rule each new tenant
+  # opens on a HIGH that means nothing.
+  #
+  # Matched on control AND resource. The resource match is CONTAINS on the
+  # policy name, because the account id differs per account. Nobody outside
+  # the platform can create a policy with that name: SCP 03 v2 denies creating
+  # or editing policy/Platform* to anyone but the deployment principals.
+  SuppressBoundaryIam1:
+    Type: AWS::SecurityHub::AutomationRule
+    Properties:
+      RuleName: platform-suppress-iam1-developer-boundary
+      RuleOrder: 10
+      RuleStatus: ENABLED
+      IsTerminal: false
+      Description: >-
+        IAM.1 on PlatformDeveloperBoundary is by design: a permissions boundary
+        allows * as a ceiling and grants nothing (B-147).
+      Criteria:
+        ComplianceSecurityControlId:
+          - { Value: IAM.1, Comparison: EQUALS }
+        ResourceId:
+          - { Value: ':policy/PlatformDeveloperBoundary', Comparison: CONTAINS }
+        RecordState:
+          - { Value: ACTIVE, Comparison: EQUALS }
+      Actions:
+        - Type: FINDING_FIELDS_UPDATE
+          FindingFieldsUpdate:
+            Workflow:
+              Status: SUPPRESSED
+            Note:
+              Text: >-
+                Suppressed by platform-suppress-iam1-developer-boundary.
+                PlatformDeveloperBoundary is a permissions boundary: its
+                Allow * on * is a ceiling, not a grant, and its denies are the
+                control. See B-147 and baseline/80-developer-boundary.yaml.
+              UpdatedBy: platform-automation-rule
+      # No Tags here, and not by choice. The CloudFormation schema for
+      # AWS::SecurityHub::AutomationRule allows tag KEYS matching
+      # ^[a-zA-Z0-9]{1,128}$ only, so platform-managed and platform-layer are
+      # rejected (cfn-lint E3002). Security Hub's own TagResource API accepts
+      # them. The tags are applied after deploy with
+      #   aws securityhub tag-resource --resource-arn <RuleArn> \
+      #     --tags platform-managed=true,platform-layer=infrastructure
+      # so the CLAUDE.md layer-tag rule holds. A redeploy does not remove them:
+      # CloudFormation leaves alone tags it does not manage.
+
+Outputs:
+  BoundaryIam1RuleArn:
+    Description: The IAM.1 suppression rule.
+    Value: !GetAtt SuppressBoundaryIam1.RuleArn
