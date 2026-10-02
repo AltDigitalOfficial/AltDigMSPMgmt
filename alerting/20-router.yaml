@@ -568,12 +568,21 @@ Resources:
           Value: !Ref RouterFunction
       Statistic: Sum
       Period: 300
-      EvaluationPeriods: 1
+      # Sustained, not a single burst, and low urgency (2026-10-02). Deployed
+      # high-urgency on one period, it paged seven times in an hour while the
+      # B-151 concurrency fix waited on AWS: it flips in and out of ALARM with
+      # every burst, and each re-entry is a new page. Throttled events are
+      # retried; loss shows up in the DLQ, which pages at high urgency. This is
+      # the early warning that the retries are working hard.
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref AlertsTopicArn
+        - !If [HasLowUrgency, !Ref LowUrgencyTopicArn, !Ref AlertsTopicArn]
+      OKActions:
+        - !If [HasLowUrgency, !Ref LowUrgencyTopicArn, !Ref AlertsTopicArn]
 
   # D-028. The dead man's switch for the routing path. Every other router
   # alarm treats silence as health, so events that stopped ARRIVING -- a
