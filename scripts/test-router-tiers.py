@@ -87,6 +87,78 @@ class TierMap(unittest.TestCase):
         self.assertIn("not in", note)
 
 
+class ByName:
+    """SSM stub answering per parameter: the tier map, and empty tenant facts
+    (an AltDigital platform account has no tenant)."""
+
+    def __init__(self, tiers):
+        self.tiers = tiers
+
+    def get_parameter(self, Name):
+        value = self.tiers if Name == router.ACCOUNT_TIER_PARAM else {}
+        return {"Parameter": {"Value": json.dumps(value)}}
+
+
+class TemplateAlarms(unittest.TestCase):
+    """D-028: alarms written into templates, routed by marker."""
+
+    class StubSecrets:
+        def get_secret_value(self, SecretId):
+            return {"SecretString": json.dumps({"events_v2_routing_key": "key:" + SecretId})}
+
+    def setUp(self):
+        self._ssm, self._secrets, self._now = router.ssm, router.secrets, router._now
+        self._high, self._low = router.PD_SECRET_NAME, router.PD_SECRET_NAME_LOW
+        router.PD_SECRET_NAME, router.PD_SECRET_NAME_LOW = "pd-high", "pd-low"
+        router.secrets = self.StubSecrets()
+        self.clock = datetime.datetime(2026, 10, 2, 22, 0, tzinfo=datetime.timezone.utc)
+        router._now = lambda: self.clock
+        router._TIER_CACHE.clear()
+        router._FACTS_CACHE.clear()
+        router.ssm = ByName({"692869638531": "prod"})
+
+    def tearDown(self):
+        router.ssm, router.secrets, router._now = self._ssm, self._secrets, self._now
+        router.PD_SECRET_NAME, router.PD_SECRET_NAME_LOW = self._high, self._low
+        router._TIER_CACHE.clear()
+        router._FACTS_CACHE.clear()
+
+    def alarm(self, trailer):
+        return {"kind": "alarm", "account_id": "692869638531",
+                "description": "Backup copy job failed. [platform-routing] " + trailer}
+
+    def test_marker_without_tier_looks_the_tier_up(self):
+        norm = self.alarm("routing=pagerduty layer=infrastructure")
+        routing, _ = router.decide(norm)
+        self.assertEqual(routing, "pagerduty")
+        self.assertEqual(norm["environment_tier"], "prod")
+
+    def test_urgency_low_downgrades_a_prod_platform_page(self):
+        norm = self.alarm("routing=pagerduty layer=infrastructure urgency=low")
+        router.decide(norm)
+        key, destination, _ = router.routing_key(norm["environment_tier"], norm.get("layer"),
+                                                 norm["account_id"], low=norm.get("urgency") == "low")
+        self.assertEqual(key, "key:pd-low")
+        self.assertEqual(destination, "platform")
+
+    def test_no_urgency_field_pages_high_in_prod(self):
+        norm = self.alarm("routing=pagerduty layer=infrastructure")
+        router.decide(norm)
+        key, _, _ = router.routing_key(norm["environment_tier"], norm.get("layer"),
+                                       norm["account_id"], low=norm.get("urgency") == "low")
+        self.assertEqual(key, "key:pd-high")
+
+    def test_an_emitter_cannot_escalate(self):
+        # Only "low" means anything. "urgency=high" in a dev account is ignored.
+        router.ssm = ByName({"692869638531": "dev"})
+        norm = self.alarm("routing=pagerduty layer=infrastructure urgency=high")
+        router.decide(norm)
+        self.assertNotIn("urgency", norm)
+        key, _, _ = router.routing_key(norm["environment_tier"], norm.get("layer"),
+                                       norm["account_id"])
+        self.assertEqual(key, "key:pd-low")
+
+
 class Heartbeat(unittest.TestCase):
     """D-028: a heartbeat is recorded as a metric and routed nowhere."""
 

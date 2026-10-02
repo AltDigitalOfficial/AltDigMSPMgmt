@@ -258,6 +258,12 @@ Resources:
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PagerDutySecretName}-*'
                   - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PagerDutySecretNameLow}-*'
+                  # Each tenant's own services (B-127), written by
+                  # scripts/sync-pagerduty-tenants.sh. Missing until 2026-10-02:
+                  # every tenant page would have fallen back to AltDigital's own
+                  # service with a logged note nobody reads -- the wrong-owner
+                  # outcome D-028 exists to end, arriving by another road.
+                  - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:platform/pagerduty/tenant/*'
               - Effect: Allow
                 Action: ['kms:GenerateDataKey', 'kms:Decrypt']
                 Resource: !Ref AlertsKeyArn

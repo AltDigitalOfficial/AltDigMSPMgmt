@@ -483,6 +483,19 @@ def decide(norm):
                     norm["layer_source"] = token.split("=", 1)[1]
                 elif token.startswith("layer="):
                     norm["layer"] = token.split("=", 1)[1]
+                # D-028. An emitter may DOWNGRADE its own event, never escalate
+                # it, so only "low" means anything; any other value is ignored.
+                elif token == "urgency=low":
+                    norm["urgency"] = "low"
+        # D-028. Alarms written into templates (backup, containment, the log
+        # archive) cannot know their account's tier, so their marker carries
+        # none: look it up, exactly as findings and dossiers do, rather than
+        # page() defaulting the absence to prod.
+        if routing and not norm.get("environment_tier"):
+            tier, tier_note = account_tier(norm.get("account_id"))
+            norm["environment_tier"] = tier
+            if tier_note:
+                norm["tier_note"] = tier_note
         if routing:
             return routing, f"alarm tag platform-routing={routing}"
         # No tag. Either an alarm the platform did not create, or one created
@@ -615,27 +628,45 @@ def dedup_key(norm):
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
+def _load_tenant_facts():
+    try:
+        raw = ssm.get_parameter(Name=TENANT_FACTS_PARAM)["Parameter"]["Value"]
+        _FACTS_CACHE["map"] = json.loads(raw)
+        _FACTS_CACHE.pop("error", None)
+    except Exception as exc:                          # noqa: BLE001
+        _FACTS_CACHE["map"] = _FACTS_CACHE.get("map") or {}
+        _FACTS_CACHE["error"] = type(exc).__name__
+    _FACTS_CACHE["loaded_at"] = _now()
+
+
 def tenant_facts(account_id):
-    """The tenant record for an account, or None. Cached for the container."""
+    """The tenant record for an account, or None.
+
+    A miss re-reads the map, at most once a minute, before concluding the
+    account has no tenant -- the same fix as account_tier(). Cached for the
+    container, a tenant vested after the container warmed was invisible until
+    it recycled, and its alarms paged AltDigital's own service instead.
+    """
     if not account_id:
         return None
     if "map" not in _FACTS_CACHE:
-        try:
-            raw = ssm.get_parameter(Name=TENANT_FACTS_PARAM)["Parameter"]["Value"]
-            _FACTS_CACHE["map"] = json.loads(raw)
-        except Exception as exc:                      # noqa: BLE001
-            _FACTS_CACHE["map"] = {}
-            _FACTS_CACHE["error"] = type(exc).__name__
+        _load_tenant_facts()
+    if account_id not in (_FACTS_CACHE["map"] or {}):
+        loaded = _FACTS_CACHE.get("loaded_at")
+        if not loaded or (_now() - loaded).total_seconds() >= TIER_MAP_MISS_REFRESH_SECONDS:
+            _load_tenant_facts()
     return (_FACTS_CACHE["map"] or {}).get(account_id)
 
 
-def platform_key(tier):
+def platform_key(tier, low=False):
     """AltDigital's own routing key for this tier.
 
     The destination for AltDigital's own accounts, and the fallback for every
-    tenant lookup that cannot complete.
+    tenant lookup that cannot complete. `low` is the emitter's own downgrade
+    (urgency=low in the routing marker, D-028): honoured, never the reverse.
+    Tenant services keep their own urgency rules; this applies only here.
     """
-    name = PD_SECRET_NAME_LOW if tier in ("dev", "test") and PD_SECRET_NAME_LOW \
+    name = PD_SECRET_NAME_LOW if (low or tier in ("dev", "test")) and PD_SECRET_NAME_LOW \
         else PD_SECRET_NAME
     if not name:
         return None
@@ -643,7 +674,7 @@ def platform_key(tier):
     return json.loads(raw).get("events_v2_routing_key")
 
 
-def routing_key(tier, layer=None, account_id=None):
+def routing_key(tier, layer=None, account_id=None, low=False):
     """(key, destination, note) for one alarm.
 
     Three dimensions, each from a different place so none can be quietly
@@ -684,7 +715,7 @@ def routing_key(tier, layer=None, account_id=None):
 
     facts = tenant_facts(account_id)
     if not facts:
-        return platform_key(tier), "platform", (
+        return platform_key(tier, low), "platform", (
             "no tenant facts for account " + str(account_id) + " in "
             + TENANT_FACTS_PARAM
             + ((" (" + _FACTS_CACHE["error"] + " reading it)")
@@ -694,7 +725,7 @@ def routing_key(tier, layer=None, account_id=None):
 
     client = facts.get("client")
     if not client:
-        return platform_key(tier), "platform", (
+        return platform_key(tier, low), "platform", (
             "account " + str(account_id) + " has tenant facts with no client; "
             "paged AltDigital's own service.")
 
@@ -703,7 +734,7 @@ def routing_key(tier, layer=None, account_id=None):
         # granularity the PagerDuty services were built at.
         object_name = facts.get("app")
         if not object_name:
-            return platform_key(tier), "platform", (
+            return platform_key(tier, low), "platform", (
                 "account " + str(account_id) + " is a tenant account with no "
                 "`app` recorded, so its application service cannot be named. "
                 "Paged AltDigital rather than guessing which of a tenant's "
@@ -717,13 +748,13 @@ def routing_key(tier, layer=None, account_id=None):
         raw = secrets.get_secret_value(SecretId=secret_name)["SecretString"]
         key = json.loads(raw).get("events_v2_routing_key")
     except Exception as exc:                          # noqa: BLE001
-        return platform_key(tier), "platform", (
+        return platform_key(tier, low), "platform", (
             "could not read " + secret_name + " (" + type(exc).__name__
             + "), so this tenant's service could not be paged. Fell back to "
               "AltDigital's own: a page to the wrong rotation is recoverable, "
               "silence is not. Run scripts/sync-pagerduty-tenants.sh.")
     if not key:
-        return platform_key(tier), "platform", (
+        return platform_key(tier, low), "platform", (
             secret_name + " holds no events_v2_routing_key.")
     _KEY_CACHE[secret_name] = key
     return key, "tenant:" + secret_name, None
@@ -732,7 +763,8 @@ def routing_key(tier, layer=None, account_id=None):
 def page(norm, routing, why):
     tier = norm.get("environment_tier") or "prod"
     key, destination, key_note = routing_key(
-        tier, norm.get("layer"), norm.get("account_id"))
+        tier, norm.get("layer"), norm.get("account_id"),
+        low=(norm.get("urgency") == "low"))
     if key_note:
         # Printed, never swallowed. A fallback nobody can see becomes permanent,
         # and this one routes a tenant's alarm to AltDigital -- which looks
