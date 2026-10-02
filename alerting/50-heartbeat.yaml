@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  D-028. A synthetic heartbeat from one member account to the router, every 15
+  minutes, so the routing path's absence can be alarmed on. Deployed to Sandbox
+  Canary only.
+
+# ---------------------------------------------------------------------------
+# Why this exists
+# ---------------------------------------------------------------------------
+# Every router alarm treats silence as health: errors, dead letters and
+# throttles all have to HAPPEN to be seen. Events that stop arriving at all --
+# a disabled forwarding rule, a broken organization-bus policy, a disabled route
+# rule -- produce no errors and look exactly like an estate with nothing wrong.
+# Until D-028, the only cover for that was the direct SNS copy on paging-class
+# alarms, which is being removed because it bypassed the router's decisions.
+#
+# So this account emits a heartbeat onto its own default bus, a rule forwards it
+# to the organization bus exactly as real events travel, the router records a
+# metric when it arrives, and platform-router-heartbeat-missing in Audit fires
+# when three 15-minute periods pass with none (alerting/20-router.yaml).
+#
+# Deploy THIS template first, and the router stack's heartbeat alarm after at
+# least one heartbeat has arrived: a dead man's switch counts missing data as
+# failure, so created before the first heartbeat it pages immediately.
+#
+# What it does NOT prove: that every member account's own forwarding rules are
+# enabled. It proves the organization bus, its policy, the route rule and the
+# router, from one account. Per-account rules are baseline StackSet resources,
+# and their drift belongs to the baseline drift checks.
+#
+#   scripts/deploy-to-account.sh --account altdig-sandbox-canary \
+#     --template alerting/50-heartbeat.yaml --stack platform-heartbeat \
+#     CentralBusArn=<platform-bus ARN in Audit>
+
+Parameters:
+
+  CentralBusArn:
+    Type: String
+    Description: The organization bus (platform-bus) in the Audit account.
+    AllowedPattern: '^arn:aws:events:[a-z0-9-]+:[0-9]{12}:event-bus/[A-Za-z0-9._-]+$'
+
+  ScheduleExpression:
+    Type: String
+    Default: 'rate(15 minutes)'
+    Description: >-
+      Must stay well inside the alarm's window (3 x 15 minutes), or the switch
+      fires on a healthy path.
+
+Resources:
+
+  # Puts the heartbeat on this account's default bus.
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformHeartbeatScheduler
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: EmitHeartbeat
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'events:PutEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  HeartbeatSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: platform-heartbeat
+      Description: D-028. Synthetic heartbeat to the router; its absence pages.
+      ScheduleExpression: !Ref ScheduleExpression
+      FlexibleTimeWindow: { Mode: 'OFF' }
+      State: ENABLED
+      Target:
+        Arn: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default'
+        RoleArn: !GetAtt SchedulerRole.Arn
+        EventBridgeParameters:
+          Source: platform.heartbeat
+          DetailType: Platform Router Heartbeat
+        Input: '{"purpose": "D-028 routing-path heartbeat. Routed nowhere; recorded as Platform/Router RouterHeartbeat."}'
+
+  # Carries it to the organization bus, the way real events travel.
+  ForwardingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformHeartbeatForwarding
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ForwardToCentralBus
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'events:PutEvents'
+                # Exactly one bus, as in baseline/70-event-forwarding.yaml.
+                Resource: !Ref CentralBusArn
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  HeartbeatForwarding:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-forward-heartbeat
+      Description: D-028. Carries the routing-path heartbeat to the organization bus.
+      EventPattern:
+        source: ['platform.heartbeat']
+        detail-type: ['Platform Router Heartbeat']
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+Outputs:
+  ScheduleName:
+    Value: !Ref HeartbeatSchedule

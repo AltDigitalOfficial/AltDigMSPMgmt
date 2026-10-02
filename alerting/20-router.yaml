@@ -268,6 +268,16 @@ Resources:
                 # Written by scripts/sync-account-tiers.sh.
                 Action: 'ssm:GetParameter'
                 Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/routing/*'
+              - Effect: Allow
+                # D-028: the heartbeat metric the dead man's switch reads.
+                # PutMetricData takes no resource, so the namespace condition
+                # is the only scoping available, and it is the right one: the
+                # router can write its own heartbeat and nothing else.
+                Action: 'cloudwatch:PutMetricData'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 'Platform/Router'
               # No CloudWatch permissions, deliberately.
               #
               # This granted cross-account ListTagsForResource so the router
@@ -350,6 +360,25 @@ Resources:
           RetryPolicy:
             MaximumRetryAttempts: 4
             MaximumEventAgeInSeconds: 3600
+
+  # D-028. The synthetic heartbeat from a member account (alerting/50-heartbeat
+  # .yaml). Its own rule rather than a broader pattern, so a heartbeat can never
+  # be mistaken for something to route, and the rule's existence is itself
+  # part of what the heartbeat proves.
+  HeartbeatRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-route-heartbeat
+      EventBusName: !Ref PlatformBus
+      EventPattern:
+        source: ['platform.heartbeat']
+        detail-type: ['Platform Router Heartbeat']
+      State: ENABLED
+      Targets:
+        - Id: router
+          Arn: !GetAtt RouterFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt RouterDlq.Arn
 
   FindingsRule:
     Type: AWS::Events::Rule
@@ -513,6 +542,64 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
+        - !Ref AlertsTopicArn
+
+  # D-028. A throttled router drops events without erroring, so the errors
+  # alarm above cannot see it.
+  RouterThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-router-throttled
+      AlarmDescription: >-
+        The routing layer is being throttled. Throttled invocations are retried
+        by EventBridge and then dead-lettered; neither is an error, so
+        platform-router-errors does not fire. Check reserved concurrency on
+        the router and the event volume behind it (platform-runaway).
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RouterFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopicArn
+
+  # D-028. The dead man's switch for the routing path. Every other router
+  # alarm treats silence as health, so events that stopped ARRIVING -- a
+  # disabled forwarding rule, a broken organization-bus policy, a disabled
+  # route rule -- looked exactly like a quiet estate. A member account emits a
+  # heartbeat every 15 minutes (alerting/50-heartbeat.yaml); the router records
+  # it; this fires when three periods pass with none. Direct to PagerDuty by
+  # definition: it watches the path it would otherwise page through.
+  RouterHeartbeatMissingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-router-heartbeat-missing
+      AlarmDescription: >-
+        No heartbeat has reached the router for 45 minutes. Events from member
+        accounts may not be arriving at all, which is otherwise
+        indistinguishable from an estate with nothing wrong. CHECK, in order:
+        the platform-heartbeat schedule in Sandbox Canary is ENABLED; the
+        platform-forward-heartbeat rule there is ENABLED; the platform-bus
+        resource policy admits the organization; platform-route-heartbeat is
+        ENABLED; /aws/lambda for the router shows invocations.
+      Namespace: Platform/Router
+      MetricName: RouterHeartbeat
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      # Absence IS the report. The inverse of every alarm above.
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertsTopicArn
+      OKActions:
         - !Ref AlertsTopicArn
 
   # The Jira backlog, which by design has no consumer until prompt 12.3. This

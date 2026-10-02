@@ -87,5 +87,43 @@ class TierMap(unittest.TestCase):
         self.assertIn("not in", note)
 
 
+class Heartbeat(unittest.TestCase):
+    """D-028: a heartbeat is recorded as a metric and routed nowhere."""
+
+    class StubCloudWatch:
+        def __init__(self):
+            self.calls = []
+
+        def put_metric_data(self, **kw):
+            self.calls.append(kw)
+
+    def setUp(self):
+        self._cw, self._enqueue = router.cloudwatch, router.enqueue
+        self.cw = router.cloudwatch = self.StubCloudWatch()
+        self.enqueued = []
+        router.enqueue = lambda *a, **k: self.enqueued.append(a)
+
+    def tearDown(self):
+        router.cloudwatch, router.enqueue = self._cw, self._enqueue
+
+    def test_heartbeat_is_recorded_and_not_routed(self):
+        out = router.handler({"source": "platform.heartbeat",
+                              "detail-type": "Platform Router Heartbeat",
+                              "account": "754280127660", "detail": {}}, None)
+        self.assertEqual(out["routed"], "heartbeat")
+        self.assertEqual(len(self.cw.calls), 1)
+        self.assertEqual(self.cw.calls[0]["Namespace"], "Platform/Router")
+        self.assertEqual(self.cw.calls[0]["MetricData"][0]["MetricName"], "RouterHeartbeat")
+        self.assertEqual(self.enqueued, [])
+
+    def test_lookalike_from_another_source_is_not_a_heartbeat(self):
+        # Only the exact source and detail-type count; anything else takes the
+        # normal path (here: unrecognised, so the review queue).
+        router.handler({"source": "someone.else", "detail-type": "Platform Router Heartbeat",
+                        "account": "754280127660", "detail": {}}, None)
+        self.assertEqual(self.cw.calls, [])
+        self.assertEqual(len(self.enqueued), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

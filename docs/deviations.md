@@ -1569,3 +1569,49 @@ minimum in total, and the requester never counts.
 the tenant credential is stored (`set-jira-token.sh --tenant oeight-oeight`),
 the approvers file is published, and the first reconciliation run after the
 Arc8 accounts exist reads its change records.
+
+---
+
+## D-028 · One path to PagerDuty; the router is watched instead of bypassed
+
+**Decided** — Jamie, 2026-10-02.
+
+**What the design had** — paging-class alarms carried a direct SNS action to
+PagerDuty as well as being forwarded to the router, as the fallback for a
+broken router ("degraded beats silent"). Hand-written machinery alarms (canary,
+instrumentation exception, Jira backlog) went to PagerDuty directly and to the
+router's review queue.
+
+**Why that changes** — the direct copies cannot apply anything the router knows
+at fire time. Seen on the first tenant (Arc8, 2026-10-01): a prod-class alarm
+during turnup would reach the AltDigital Platform service, outside the
+tenant's maintenance window; a prod APPLICATION alarm's copy lands on
+AltDigital rather than the application team (against B-127's layer rule); and
+one outage can open two incidents on two services that do not merge.
+
+Meanwhile the router's own watchdogs (errors, DLQ) both treat missing data as
+healthy, so events that stop REACHING the router -- a disabled forwarding rule,
+a broken bus policy, a disabled route rule, throttling -- were invisible except
+through those accidental direct copies.
+
+**Decision** —
+1. Every alarm and finding reaches PagerDuty only through the router.
+2. The only alarms with direct actions are the watchdogs of the path itself:
+   router errors, router DLQ, router throttles, cadence sweep stalled, and a
+   new end-to-end heartbeat.
+3. The heartbeat: a scheduled synthetic event every 15 minutes from a member
+   account (Sandbox Canary), carried by its own forwarding rule across the
+   organization bus to the router, which records a metric and routes it
+   nowhere. An alarm in Audit fires on the metric's ABSENCE for 45 minutes,
+   the cadence sweep's dead man's switch pattern.
+4. Order: watchdogs built and proved by deliberate failure first; direct
+   actions removed only after.
+
+**Accepted cost** — if the router and its watchdogs fail together, nothing
+pages. The regress stops at a CloudWatch alarm, as alerting/40-cadence.yaml
+already argues.
+
+**Honest limit of the heartbeat** — it proves the organization bus, its
+policy, the route rule and the router, from one account. It does not prove each
+member account's own forwarding rules are enabled; those are baseline StackSet
+resources, and drift on them belongs to the baseline drift checks.

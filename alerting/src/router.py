@@ -805,7 +805,37 @@ def enqueue(url, norm, routing, why, destination):
     return {"sent": True}
 
 
+HEARTBEAT_SOURCE = "platform.heartbeat"
+HEARTBEAT_DETAIL_TYPE = "Platform Router Heartbeat"
+HEARTBEAT_NAMESPACE = os.environ.get("HEARTBEAT_NAMESPACE", "Platform/Router")
+cloudwatch = boto3.client("cloudwatch")
+
+
+def heartbeat(event):
+    """Record that a synthetic heartbeat made it all the way here. D-028.
+
+    A member account emits one every 15 minutes; it crosses that account's
+    forwarding rule, the organization bus and the route rule to arrive here. An
+    alarm in this account fires on the ABSENCE of this metric, which is the
+    only way to notice events no longer reaching the router: every other
+    router alarm treats silence as health.
+
+    Routed nowhere -- no queue, no page. If the metric cannot be written this
+    raises, so the router's own error alarm fires rather than the heartbeat
+    quietly failing.
+    """
+    cloudwatch.put_metric_data(Namespace=HEARTBEAT_NAMESPACE, MetricData=[{
+        "MetricName": "RouterHeartbeat", "Value": 1, "Unit": "Count"}])
+    out = {"routed": "heartbeat", "source_account": event.get("account")}
+    print(json.dumps(out))
+    return out
+
+
 def handler(event, context):
+    if (event.get("source") == HEARTBEAT_SOURCE
+            and event.get("detail-type") == HEARTBEAT_DETAIL_TYPE):
+        return heartbeat(event)
+
     detail_type = event.get("detail-type") or ""
     normalise = NORMALISERS.get(detail_type)
 
