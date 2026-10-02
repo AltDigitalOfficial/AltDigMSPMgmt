@@ -112,11 +112,20 @@ Parameters:
     AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     ConstraintDescription: Must be an identity store group id (UUID form).
 
+  # Prod is optional for the same reason UAT is, and a different one: UAT may
+  # never be elected, prod may simply not be vested YET. Developers start in
+  # dev and test, and the grant should not wait for an account they cannot use
+  # until there is something to release (Arc8, B-140). Re-running
+  # grant-developer-access.sh once prod exists flips HasProd and adds both
+  # prod assignments to this same stack.
   ProdGroupId:
     Type: String
-    Description: Identity store group id for the prod account.
-    AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-    ConstraintDescription: Must be an identity store group id (UUID form).
+    Default: ''
+    Description: >-
+      Identity store group id for the prod account, or empty while prod is not
+      yet vested.
+    AllowedPattern: '^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ConstraintDescription: Must be an identity store group id, or empty.
 
   ReadOnlyGroupId:
     Type: String
@@ -153,9 +162,10 @@ Parameters:
 
   ProdAccountId:
     Type: String
-    AllowedPattern: '^[0-9]{12}$'
-    ConstraintDescription: Must be a 12-digit AWS account id.
-    Description: The tenant's prod member account.
+    Default: ''
+    AllowedPattern: '^$|^[0-9]{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account id, or empty.
+    Description: The tenant's prod member account, or empty while not yet vested.
 
   UatAccountId:
     Type: String
@@ -192,6 +202,11 @@ Parameters:
       Published by identity/10-developer-access.yaml. Every environment.
 
 Conditions:
+
+  # A pair, for the reason HasUat gives below.
+  HasProd: !And
+    - !Not [!Equals [!Ref ProdGroupId, '']]
+    - !Not [!Equals [!Ref ProdAccountId, '']]
 
   # Both must be present. A group id with no account, or an account with no
   # group, is a half-configured UAT election and would fail at create time with
@@ -240,6 +255,7 @@ Resources:
 
   ProdAssignment:
     Type: AWS::SSO::Assignment
+    Condition: HasProd
     Properties:
       InstanceArn: !Ref InstanceArn
       PermissionSetArn: !Ref DeveloperProdArn
@@ -294,6 +310,7 @@ Resources:
 
   ProdReadOnlyAssignment:
     Type: AWS::SSO::Assignment
+    Condition: HasProd
     Properties:
       InstanceArn: !Ref InstanceArn
       PermissionSetArn: !Ref TenantReadOnlyArn
@@ -318,6 +335,12 @@ Outputs:
   Tenant:
     Description: The tenant these assignments belong to.
     Value: !Ref TenantStem
+
+  ProdAssigned:
+    Description: >-
+      Whether the prod assignments exist. False while prod is not yet vested;
+      re-run grant-developer-access.sh once it is.
+    Value: !If [HasProd, 'true', 'false']
 
   UatAssigned:
     Description: >-

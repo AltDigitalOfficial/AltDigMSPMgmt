@@ -145,6 +145,18 @@ ok "Identity store ${IDENTITY_STORE_ID}"
 # exist must stop the run rather than be discovered after two groups have been
 # populated — the same reasoning resolve_accounts uses in lib/common.sh.
 #
+# Except prod and uat, which may be PENDING. Developers start in dev and test,
+# and prod can be weeks behind them -- Arc8's waited on the Organization's
+# account quota (B-140). Refusing the whole grant until prod exists would keep
+# a team out of the accounts it needs in order to have anything to put in
+# prod. So a pending environment is reported, gets no group and no
+# assignment, and is picked up by re-running this script once it is vested:
+# every step here is idempotent, and the stack gains the prod assignments
+# through its HasProd condition.
+#
+# dev and test are never optional. A grant with no dev account is not an
+# early grant; it is a grant against the wrong tenant or before vesting ran.
+#
 # The likely cause of a miss is simply that vesting has not run yet, so the
 # message says so instead of reporting a lookup failure.
 hr
@@ -164,6 +176,30 @@ for ENVNAME in ${ENVS}; do
   ok "${ENVNAME} = ${ACCT}  ($(account_alias "${PARTNER}" "${CLIENT}" "${APP}" "${ENVNAME}"))"
 done
 
+OPTIONAL_ENVS="prod uat"
+PENDING=""; REQUIRED_MISSING=""
+for ENVNAME in ${MISSING}; do
+  if [[ " ${OPTIONAL_ENVS} " == *" ${ENVNAME} "* ]]; then
+    PENDING="${PENDING} ${ENVNAME}"
+  else
+    REQUIRED_MISSING="${REQUIRED_MISSING} ${ENVNAME}"
+  fi
+done
+
+# The environments this run actually grants: everything except the pending.
+GRANT_ENVS=""
+for ENVNAME in ${ENVS}; do
+  [[ " ${PENDING} " == *" ${ENVNAME} "* ]] || GRANT_ENVS="${GRANT_ENVS} ${ENVNAME}"
+done
+GRANT_ENVS="${GRANT_ENVS# }"
+
+if [[ -n "${PENDING}" ]]; then
+  warn "Not yet vested, granted on a later run:${PENDING}"
+  warn "  No group and no assignment for these now. Re-run this script once the"
+  warn "  account exists; nothing about the earlier grant needs undoing."
+fi
+
+MISSING="${REQUIRED_MISSING}"
 if [[ -n "${MISSING}" ]]; then
   # A dry run WARNS where a real run dies, and the difference is not laziness.
   #
@@ -312,7 +348,7 @@ reconcile_group() {
 
 declare -A GROUP_OF
 
-for ENVNAME in ${ENVS}; do
+for ENVNAME in ${GRANT_ENVS}; do
   GROUP_NAME="$(d_get "['groups']['${ENVNAME}']['group_name']")"
   GRANT="$(d_get "['groups']['${ENVNAME}']['permission_set']")"
 
@@ -346,7 +382,7 @@ hr
 STACK_NAME="platform-identity-dev-${STEM}"
 
 UAT_GROUP=""; UAT_ACCOUNT=""
-if [[ " ${ENVS} " == *" uat "* ]]; then
+if [[ " ${GRANT_ENVS} " == *" uat "* ]]; then
   UAT_GROUP="${GROUP_OF[uat]:-}"
   UAT_ACCOUNT="${ACCOUNT_OF[uat]:-}"
 fi
@@ -358,7 +394,7 @@ fi
 # parameter rather than a cause; deploy-commercial-access.sh reports the same
 # limitation for the same reason.
 MISSING_IDS=""
-for ENVNAME in ${ENVS}; do
+for ENVNAME in ${GRANT_ENVS}; do
   [[ -n "${GROUP_OF[${ENVNAME}]:-}" ]]   || MISSING_IDS="${MISSING_IDS} ${ENVNAME}(group)"
   [[ -n "${ACCOUNT_OF[${ENVNAME}]:-}" ]] || MISSING_IDS="${MISSING_IDS} ${ENVNAME}(account)"
 done
@@ -382,12 +418,15 @@ else
     "TenantStem=${STEM}"
     "DevGroupId=${GROUP_OF[dev]}"
     "TestGroupId=${GROUP_OF[test]}"
-    "ProdGroupId=${GROUP_OF[prod]}"
     "DevAccountId=${ACCOUNT_OF[dev]}"
     "TestAccountId=${ACCOUNT_OF[test]}"
-    "ProdAccountId=${ACCOUNT_OF[prod]}"
     "ReadOnlyGroupId=${RO_GROUP}"
   )
+  # Prod follows UAT's rule: a pair or nothing, so a pending prod lets the
+  # template's empty defaults apply and HasProd stays false.
+  if [[ " ${GRANT_ENVS} " == *" prod "* ]]; then
+    PARAMS+=("ProdGroupId=${GROUP_OF[prod]}" "ProdAccountId=${ACCOUNT_OF[prod]}")
+  fi
   if [[ -n "${UAT_GROUP}" && -n "${UAT_ACCOUNT}" ]]; then
     PARAMS+=("UatGroupId=${UAT_GROUP}" "UatAccountId=${UAT_ACCOUNT}")
   elif [[ -n "${UAT_GROUP}" || -n "${UAT_ACCOUNT}" ]]; then
@@ -403,7 +442,8 @@ hr
 if [[ "${DRY_RUN}" == "1" ]]; then
   ok "Dry run complete — nothing created."
 else
-  ok "Developer access granted for ${PARTNER}/${CLIENT}/${APP}"
+  ok "Developer access granted for ${PARTNER}/${CLIENT}/${APP}: ${GRANT_ENVS}"
+  [[ -z "${PENDING}" ]] || warn "Still pending:${PENDING}. Re-run this script once vested."
   log ""
   log "Access portal: https://altdigital.awsapps.com/start"
   log ""
