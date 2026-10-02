@@ -6485,3 +6485,33 @@ new tenant makes it worse.
 tier like everything else, or to the digest. The emitter still never
 escalates (CLAUDE.md). Then confirm the per-hour rate drops back to
 near-zero for steady-state accounts.
+
+---
+
+## B-150 · A canary that never runs after creation is silent
+
+**Context** — 2026-10-02. The canary failure alarm (`canaries/10-canary.yaml`)
+moved from `TreatMissingData: breaching` to `missing` plus
+`InsufficientDataActions`, because the old setting fired within 90 seconds of
+any (re)creation, before the canary had run once. Verified against the real
+PagerDuty integration: OK -> INSUFFICIENT_DATA raises an incident, and back to
+OK resolves it. A canary that **stops** reporting is still heard.
+
+**The gap that leaves** — a canary that **never** runs after creation. Its alarm
+starts in INSUFFICIENT_DATA and never transitions, so nothing notifies. Causes
+would be a canary created stopped, a broken runtime, or a role that cannot
+write its artifacts.
+
+**Proposed fix** — the verification sweep (or a scheduled check in Audit)
+asserts that every `platform-canary-*-failed` alarm older than 30 minutes has
+left INSUFFICIENT_DATA at least once, and raises a finding naming the canary if
+not. "Has this alarm ever had data" is answerable from the alarm's state
+history, so it needs no new metric.
+
+**Build when** — before the first tenant canary (Arc8's, once it has an
+endpoint), or when the verification sweep is automated, whichever is first.
+Today only the Sandbox smoke canary exists, and it has run for weeks.
+
+**Cleanup from the test** — the throwaway alarm
+`platform-TEST-insufficient-data-delivery` in Sandbox Exercise
+(`801093629821`) has its actions disabled and can be deleted.

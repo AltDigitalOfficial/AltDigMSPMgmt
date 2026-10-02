@@ -653,13 +653,34 @@ Resources:
       ComparisonOperator: LessThanThreshold
       # A canary that has stopped reporting is a canary that is not checking.
       # Treating that as healthy is the specific failure synthetic monitoring
-      # exists to avoid.
-      TreatMissingData: breaching
+      # exists to avoid -- so a STOPPED canary still notifies, but through
+      # InsufficientDataActions rather than by counting missing data as a
+      # failure.
+      #
+      # Why the change (2026-10-02). With TreatMissingData: breaching, CloudWatch
+      # evaluated a newly created or re-created alarm against two periods of no
+      # data and fired within 90 seconds, before the canary had run once: Sandbox
+      # paged at 21:26 on 2026-10-01 when the alarm was redeployed. "Missing"
+      # leaves a new alarm in INSUFFICIENT_DATA, its starting state, which is not
+      # a transition and notifies nobody. A canary that ran and then stopped
+      # goes OK -> INSUFFICIENT_DATA, which IS a transition and notifies.
+      #
+      # Verified against the real integration before relying on it: a test alarm
+      # in Sandbox Exercise forced OK -> INSUFFICIENT_DATA raised a PagerDuty
+      # incident ("Insufficient data for ..."), and back to OK resolved it.
+      #
+      # What this does NOT catch: a canary that never runs at all after
+      # creation stays in INSUFFICIENT_DATA silently. B-150 carries that.
+      TreatMissingData: missing
       AlarmActions: !If
         - LowUrgency
         - [!Ref LowUrgencyTopicArn]
         - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
       OKActions: !If
+        - LowUrgency
+        - [!Ref LowUrgencyTopicArn]
+        - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+      InsufficientDataActions: !If
         - LowUrgency
         - [!Ref LowUrgencyTopicArn]
         - !If [HasAlerting, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
