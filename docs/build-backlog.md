@@ -6251,7 +6251,7 @@ through. Staging explicitly protects commits; it does nothing for publishes.
 
 ---
 
-## B-145 · publish-telemetry.sh has refused to publish since 2026-09-21
+## B-145 · publish-telemetry.sh has refused to publish since 2026-09-21 — CLOSED
 
 **Observed** — 2026-10-01, testing B-144's guard. `publish-telemetry.sh`'s own
 self-check fails on committed code: "gap.py has lost a control: 3 scenario(s)
@@ -6266,6 +6266,15 @@ because only a publish runs the check.
 **Next** — read design 11's scenario table against `SCENARIOS` in
 `telemetry/src/gap.py`. Then fix whichever is wrong. Do not loosen the check
 to make it pass.
+
+**Fixed 2026-10-02: the check was wrong, not the code.** The third alarming
+row is `instance-stopped-off-schedule`, added on purpose by a8d6dbf for design
+14 / prompt 13.4. It splits design 11's "stopped" row by HOOP state, so that a
+stop the platform did not perform is reported instead of looking like a
+turndown. The check counted design 11's two rows only. It now compares the
+exact SET of alarming scenarios by name, each with its source. That is
+stricter than the count, which a swap of one row for another would have
+passed. `publish-telemetry.sh --dry-run` passes.
 
 ---
 

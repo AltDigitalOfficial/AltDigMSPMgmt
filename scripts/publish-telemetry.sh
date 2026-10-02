@@ -88,18 +88,35 @@ if "if signals.unreadable" not in source:
         "Every row of the table is a positive claim about four signals, and "
         "an unknown is not a value any of them take.")
 
-# Exactly two rows of design 11's table alarm. A third would mean somebody
-# widened it; zero would mean the detector is inert.
-alarms = source.count('"alarm": True')
-if alarms != 2:
+# The exact set of scenarios that alarm, by name, each with its source.
+#
+#   cloudwatch-agent-killed            design 11's table, "CloudWatch agent killed"
+#   both-agents-killed-or-path-broken  design 11's table, "Both agents killed"
+#   instance-stopped-off-schedule      design 14 / prompt 13.4 (a8d6dbf): a stop
+#                                      the platform did not perform is reported,
+#                                      not treated like a scheduled turndown
+#
+# This used to count to two, from design 11 alone. a8d6dbf added the third on
+# purpose, and the count made publishing impossible from 2026-09-21 (B-145). A
+# count was also the weaker check: swapping one alarming row for another kept
+# it at two. A set catches a widening, a removal and a swap, and names which.
+import re
+EXPECTED = {"cloudwatch-agent-killed", "both-agents-killed-or-path-broken",
+            "instance-stopped-off-schedule"}
+alarming = {n for n, a in re.findall(r'"name":\s*"([^"]+)".*?"alarm":\s*(True|False)',
+                                     source, re.S) if a == "True"}
+if alarming != EXPECTED:
     problems.append(
-        f"{alarms} scenario(s) alarm; design 11's table has exactly two. "
-        "Check SCENARIOS against the table before changing this.")
+        "the scenarios that alarm are " + (", ".join(sorted(alarming)) or "none")
+        + "; expected " + ", ".join(sorted(EXPECTED))
+        + ". Widened: " + (", ".join(sorted(alarming - EXPECTED)) or "none")
+        + ". Missing: " + (", ".join(sorted(EXPECTED - alarming)) or "none")
+        + ". Check SCENARIOS against design 11's table and design 14 before changing this.")
 
 if problems:
     sys.exit("gap.py has lost a control:" + nl
              + nl.join("      - " + p for p in problems))
-print("  unreadable stays unreadable; two rows alarm")
+print("  unreadable stays unreadable; the three expected rows alarm")
 HONESTEOF
 [[ $? -eq 0 ]] || die "gap.py is not safe to publish."
 ok "unreadable is not false"
