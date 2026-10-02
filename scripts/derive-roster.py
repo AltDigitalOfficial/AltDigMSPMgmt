@@ -280,9 +280,10 @@ def warnings_for(roster, envs):
     for e in envs:
         if not any(e in p["environments"] for p in people):
             w.append(
-                f"Nobody reaches {e}. The account is vested and baselined and no "
-                "human can\n    sign in to it. Intended for a pipeline-only "
-                "environment; worth confirming\n    otherwise.")
+                f"No developer reaches {e}. Expected while {e} is not yet vested, "
+                "or for a\n    pipeline-only environment. Otherwise, once the "
+                "account exists, no developer\n    can sign in to it -- worth "
+                "confirming.")
 
     for p in people:
         if "dev" in envs and "dev" not in p["environments"]:
