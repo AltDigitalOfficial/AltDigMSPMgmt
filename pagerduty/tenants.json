@@ -1,3 +1,19 @@
 {
-  "tenants": {}
+  "tenants": {
+    "oeight": {
+      "partner": "oeight",
+      "tiers": {
+        "dev": {
+          "objects": [
+            "arc8"
+          ]
+        },
+        "test": {
+          "objects": [
+            "arc8"
+          ]
+        }
+      }
+    }
+  }
 }

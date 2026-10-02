@@ -112,6 +112,32 @@ for item in items:
             continue
         clients[tid] = s(item, "partner")
 
+    elif kind == "CLIENT":
+        # The record onboarding actually writes (scripts/registry.sh
+        # put-client): PARTNER#<p> / CLIENT#<slug>. The TENANT shape above is
+        # the provisioning saga's, which is written and not deployed. Until
+        # 2026-10-01 only that shape was read, so a tenant onboarded through
+        # onboard-client.sh was never rendered: the first real one (OEight /
+        # Arc8) came out as "clients included: 0" with its accounts listed as
+        # orphans, and would have had no PagerDuty services at all.
+        #
+        # Keyed by slug, because that is what account records carry in
+        # `client` and so what the tier/object grouping below matches on.
+        # Two partners with the same client slug would collide here -- noted
+        # in docs/scale-watch.md territory; today there is one tenant.
+        tid = s(item, "slug")
+        state = s(item, "state")
+        if not tid:
+            continue
+        if state not in LIVE_STATES:
+            skipped.append({"client": tid, "state": state})
+            continue
+        if tid in clients and clients[tid] != s(item, "partner"):
+            raise SystemExit(f"client slug '{tid}' exists under two partners "
+                             f"({clients[tid]}, {s(item, 'partner')}); the tenant map "
+                             "cannot tell them apart. Resolve before rendering.")
+        clients[tid] = s(item, "partner")
+
     elif kind == "ACCOUNT":
         # Tenant accounts in every tier. A PLATFORM account is AltDigital's own
         # and is covered by the platform service, not by a tenant one -- that

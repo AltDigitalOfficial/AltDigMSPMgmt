@@ -208,16 +208,38 @@ unset PAYLOAD
 # recoverable by re-running -- rather than saying it has one that is not fully
 # wired.
 
+# Which partner each client sits under, from the rendered tenant map. Needed
+# because onboarding's client record is keyed PARTNER#<p> / CLIENT#<slug>, not
+# TENANT#<slug> -- see the CLIENT branch in render-pagerduty-tenants.sh.
+PARTNER_OF="$("$(command -v python || command -v python3)" -c '
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+for c, t in (d.get("tenants") or {}).items():
+    print(c + "\t" + (t.get("partner") or ""))
+' "$(win_path "${REPO_ROOT}/pagerduty/tenants.json")" 2>/dev/null || true)"
+
 while IFS=$'\t' read -r CLIENT BSID TIERS OBJECTS; do
   [[ -n "${CLIENT}" ]] || continue
-  in_account "${TOOLING}" aws dynamodb update-item \
-    --table-name platform-registry \
-    --key "{\"PK\":{\"S\":\"TENANT#${CLIENT}\"},\"SK\":{\"S\":\"META\"}}" \
-    --update-expression "SET pagerduty_business_service_id = :b, pagerduty_tier_services = :t, pagerduty_object_services = :o, updated_at = :u" \
-    --expression-attribute-values "{\":b\":{\"S\":\"${BSID}\"},\":t\":{\"S\":${TIERS}},\":o\":{\"S\":${OBJECTS}},\":u\":{\"S\":\"$(now_iso)\"}}" \
-    --condition-expression "attribute_exists(PK)" >/dev/null 2>&1 \
-    && ok "stamped TENANT#${CLIENT}" \
-    || warn "could not stamp TENANT#${CLIENT} -- the registry record must exist first (saga step 1)."
+  SET_EXPR="SET pagerduty_business_service_id = :b, pagerduty_tier_services = :t, pagerduty_object_services = :o, updated_at = :u"
+  VALUES="{\":b\":{\"S\":\"${BSID}\"},\":t\":{\"S\":${TIERS}},\":o\":{\"S\":${OBJECTS}},\":u\":{\"S\":\"$(now_iso)\"}}"
+  PARTNER="$(printf '%s\n' "${PARTNER_OF}" | awk -F'\t' -v c="${CLIENT}" '$1==c {print $2}')"
+  # The saga's record first, then onboarding's. Each update is conditional on
+  # the record existing, so neither can create a stray record.
+  if in_account "${TOOLING}" aws dynamodb update-item \
+       --table-name platform-registry \
+       --key "{\"PK\":{\"S\":\"TENANT#${CLIENT}\"},\"SK\":{\"S\":\"META\"}}" \
+       --update-expression "${SET_EXPR}" --expression-attribute-values "${VALUES}" \
+       --condition-expression "attribute_exists(PK)" >/dev/null 2>&1; then
+    ok "stamped TENANT#${CLIENT}"
+  elif [[ -n "${PARTNER}" ]] && in_account "${TOOLING}" aws dynamodb update-item \
+       --table-name platform-registry \
+       --key "{\"PK\":{\"S\":\"PARTNER#${PARTNER}\"},\"SK\":{\"S\":\"CLIENT#${CLIENT}\"}}" \
+       --update-expression "${SET_EXPR}" --expression-attribute-values "${VALUES}" \
+       --condition-expression "attribute_exists(PK)" >/dev/null 2>&1; then
+    ok "stamped PARTNER#${PARTNER} / CLIENT#${CLIENT}"
+  else
+    warn "could not stamp ${CLIENT}: no TENANT#${CLIENT} record, and no client record under partner '${PARTNER:-unknown}'."
+  fi
 done < <(printf '%s' "${PLAN}" | python -c '
 import json, sys
 for r in json.load(sys.stdin)["registry"]:
