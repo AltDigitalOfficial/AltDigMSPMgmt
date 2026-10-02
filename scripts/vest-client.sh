@@ -460,6 +460,25 @@ for ENVNAME in ${ENVS}; do
     --source-parent-id "$(org_root_id)" --destination-parent-id "${CLIENT_OU}"
   ok "moved into ${CLIENT}"
   CREATED_IDS="${CREATED_IDS} ${ENVNAME}:${ACCT}"
+
+  # Register the account and publish the router's tier map NOW, before the
+  # baseline StackSets -- which start deploying the moment the account lands in
+  # the OU -- bring up event forwarding. Until the router knows the account it
+  # treats it as prod, which pages, and a brand-new account's first Security
+  # Hub findings (CloudTrail.1, Config.1, CIS 2.1, all transient while the
+  # baseline is still arriving) are many. On the first real vesting (Arc8,
+  # 2026-10-01) the account was registered only in step 7, after the baseline
+  # settled, and the tier map published in onboarding step 8: four [prod]
+  # pages at 21:36 for two dev/test accounts. Step 7 still re-writes the
+  # record with the final baseline version.
+  bash "${REPO_ROOT}/scripts/registry.sh" put-account \
+    --account-id "${ACCT}" --partner "${PARTNER}" --slug "${CLIENT}" \
+    --app "${APP}" --env "${ENVNAME}" --state provisioning \
+    --service-model "${SERVICE_MODEL}" --compliance "${COMPLIANCE}" >/dev/null \
+    || die "Could not register ${ACCT} (${ENVNAME}). The router will treat it as prod and page; register it before continuing."
+  bash "${REPO_ROOT}/scripts/sync-account-tiers.sh" >/dev/null \
+    || die "Could not publish the tier map for ${ACCT}. Run scripts/sync-account-tiers.sh before the baseline arrives, or its findings page as prod."
+  ok "registered ${ACCT} as ${ENVNAME}; router tier map published"
 done
 
 # ---------------------------------------------------------------------------

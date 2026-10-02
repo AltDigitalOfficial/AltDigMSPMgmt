@@ -152,6 +152,25 @@ def _now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
+TIER_MAP_MISS_REFRESH_SECONDS = int(os.environ.get("TIER_MAP_MISS_REFRESH_SECONDS", "60"))
+
+
+def _load_tier_map():
+    try:
+        raw = ssm.get_parameter(Name=ACCOUNT_TIER_PARAM)["Parameter"]["Value"]
+        _TIER_CACHE["map"] = json.loads(raw)
+        _TIER_CACHE.pop("error", None)
+    except Exception as exc:
+        _TIER_CACHE["map"] = _TIER_CACHE.get("map") or {}
+        _TIER_CACHE["error"] = f"{type(exc).__name__}"
+    _TIER_CACHE["loaded_at"] = _now()
+
+
+def _tier_map_age():
+    loaded = _TIER_CACHE.get("loaded_at")
+    return (_now() - loaded).total_seconds() if loaded else float("inf")
+
+
 def account_tier(account_id):
     """Environment tier for an account. Returns (tier, note).
 
@@ -168,13 +187,21 @@ def account_tier(account_id):
     if not account_id:
         return "prod", "no account id on the event; treated as prod"
     if "map" not in _TIER_CACHE:
-        try:
-            raw = ssm.get_parameter(Name=ACCOUNT_TIER_PARAM)["Parameter"]["Value"]
-            _TIER_CACHE["map"] = json.loads(raw)
-        except Exception as exc:
-            _TIER_CACHE["map"] = {}
-            _TIER_CACHE["error"] = f"{type(exc).__name__}"
+        _load_tier_map()
     mapping = _TIER_CACHE["map"]
+    if account_id not in mapping and _tier_map_age() >= TIER_MAP_MISS_REFRESH_SECONDS:
+        # A MISS re-reads the map before concluding the account is unknown.
+        #
+        # The cache used to live for the whole execution environment, so an
+        # account vested after the container warmed stayed "unknown" -- and
+        # therefore prod, and therefore paging -- until AWS happened to recycle
+        # it. On the first real vesting (Arc8 dev and test, 2026-10-01) a
+        # Config.1 finding paged as [prod] at 22:40, after onboarding had
+        # published both accounts as dev and test. Hits keep the cheap path;
+        # only a miss pays for a read, at most once a minute, so a burst of
+        # findings from a genuinely unknown account cannot hammer SSM.
+        _load_tier_map()
+        mapping = _TIER_CACHE["map"]
     if account_id in mapping:
         return mapping[account_id], None
     why = _TIER_CACHE.get("error")
