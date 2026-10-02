@@ -158,18 +158,15 @@ else
 fi
 
 hr
-info "Deploy the pipeline into the Audit account:"
+# These instructions named telemetry/10-telemetry.yaml, an executor role and
+# an approver sync, none of which exist. They had been copied from the quorum
+# component. Found 2026-10-02 (B-145). The live stack is platform-telemetry,
+# built from 10-telemetry-gap.yaml, and the per-account role is the reader.
+info "Deploy the scan into the Audit account (other parameters keep their values):"
 log "  scripts/deploy-to-account.sh --account altdig-security-audit \\"
-log "    --template telemetry/10-telemetry.yaml --stack platform-telemetry \\"
-log "    ArtifactBucket=${BUCKET} ArtifactKey=${KEY} \\"
-log "    JiraSite=\${PLATFORM_JIRA_SITE} LogsKeyArn=<alerts key>"
+log "    --template telemetry/10-telemetry-gap.yaml --stack platform-telemetry \\"
+log "    ArtifactKey=${KEY}"
 log ""
-info "Then the executor role into each target account, passing the"
-info "ExecuteRoleArn the stack above outputs:"
-log "  scripts/deploy-to-account.sh --account <target> \\"
-log "    --template telemetry/00-executor-role.yaml --stack platform-telemetry-executor \\"
-log "    TelemetryPipelineRoleArn=<ExecuteRoleArn> Scope=member"
-log ""
-info "And publish the approver list, which is NOT in the repository:"
-log "  scripts/sync-telemetry-approvers.sh"
+info "The read-only role it assumes in each account is a separate template:"
+log "  telemetry/00-telemetry-reader.yaml  (TelemetryScanRoleArn = the scan's role)"
 hr
