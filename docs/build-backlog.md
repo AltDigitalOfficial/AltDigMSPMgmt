@@ -6343,7 +6343,7 @@ the harness):**
 
 ---
 
-## B-148 · Developers could rewrite or switch off the platform's monitoring
+## B-149 · Developers could rewrite or switch off the platform's monitoring
 
 **Observed** — 2026-10-01, defining the Arc8 developer and read-only roles.
 design 11 Layer 1 lists "platform-managed alarms and SSM associations" among
@@ -6384,14 +6384,52 @@ own dev account does the first one.
   (B-127). This lives in the permission set rather than an SCP, so it needs no
   list of platform-role exemptions.
 
+**State Manager associations — NOT accepted, must be narrowed before Members.**
+As committed, SCP 08 and the boundary deny `DeleteAssociation` and
+`UpdateAssociation` on EVERY association, because association ARNs carry an
+id rather than a name. Jamie questioned it on 2026-10-01, and the cost turned
+out larger than it was first written:
+
+- The SCP binds every principal in the account, **including the tenant
+  pipeline**. Any CloudFormation, CDK or Terraform stack containing an
+  association can create it but can never update or delete it. A schedule
+  change fails the stack update, and a dev teardown ends in `DELETE_FAILED`.
+- Configuration management through State Manager (Ansible, package installs,
+  config pushes) cannot be iterated. Each fix becomes a new association and
+  leaves the broken one behind.
+- Quick Setup, Quick Setup patching, Distributor and Default Host Management
+  all create associations nobody could then modify.
+- Close to zero impact on Arc8 if it is ECS/Fargate. The pain lands on the
+  first EC2 tenant, or on any pipeline that includes an association.
+
+**The premise was half wrong.** The IAM authorization data (iann0036
+iam-dataset, which mirrors the Service Authorization Reference, read
+2026-10-01; not yet confirmed live) lists `aws:ResourceTag/${TagKey}` for the
+`association` resource on both `DeleteAssociation` and `UpdateAssociation`.
+So a tag-scoped deny is possible. The obstacle is different:
+`platform-install-cloudwatch-agent` in `baseline/50-instrumentation.yaml`
+carries no tags. It *targets* `tag:platform-managed`, but is not tagged
+itself. It is also unconfirmed whether `AWS::SSM::Association` takes a `Tags`
+property in CloudFormation.
+
+**Next, in Sandbox, before any Members deploy:**
+1. Tag the platform association `platform-managed=true`, in the template if
+   CloudFormation supports it, otherwise post-deploy with
+   `ssm add-tags-to-resource --resource-type Association`.
+2. Narrow the deny in SCP 08 and the boundary to
+   `aws:ResourceTag/platform-managed = true`.
+3. Deny `ssm:AddTagsToResource` / `RemoveTagsFromResource` carrying the
+   `platform-managed` key, the pattern SCP 03 uses for EC2. Otherwise untag
+   and then delete is the bypass.
+4. Make the harness prove both directions: the test admin cannot delete the
+   platform association, and can delete one it created.
+
+If the tag condition does not evaluate in practice, drop the prevention and
+alarm instead on CloudTrail `DeleteAssociation`/`UpdateAssociation` against
+the platform association's id. That is weaker, and it breaks nobody's
+pipeline.
+
 **Known costs, accepted:**
-- **State Manager associations.** Their ARNs carry an id, not a name, so the
-  platform's own cannot be singled out. `DeleteAssociation` and
-  `UpdateAssociation` are denied for every association. Developers can still
-  create associations but cannot change or remove them afterwards.
-  *Trigger:* the first tenant whose application uses State Manager. At that
-  point, test whether `aws:ResourceTag` evaluates on associations and narrow
-  the deny to tagged ones.
 - **The `platform-` prefix is reserved.** A developer stack or function named
   `platform-*` is refused, just as SCP 03 reserves `Platform*` roles.
 - **`lambda:InvokeFunction` is not denied.** Invoking `platform-response`

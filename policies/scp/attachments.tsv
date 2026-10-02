@@ -65,7 +65,7 @@
 07-deny-bypass.json	sandbox,members
 
 # 08 is design 11 Layer 1's "platform-managed alarms and SSM associations",
-# which 01-03 never carried (B-148). PowerUserAccess in dev could rewrite the
+# which 01-03 never carried (B-149). PowerUserAccess in dev could rewrite the
 # response engine's code, disable the drift rule that recreates deleted
 # alarms, or flip /platform/response/enabled off -- each one a monitoring
 # control removed by somebody the platform is meant to be monitoring.

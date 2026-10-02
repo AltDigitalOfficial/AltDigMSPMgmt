@@ -123,7 +123,7 @@ Resources:
             Resource: '*'
 
           # design 11 Layer 1's "platform-managed alarms and SSM associations",
-          # which this boundary and the SCPs both lacked until B-148. Mirrors
+          # which this boundary and the SCPs both lacked until B-149. Mirrors
           # policies/scp/08-protect-platform-monitoring.json.
           #
           # The case it closes is the one the header describes: a developer
