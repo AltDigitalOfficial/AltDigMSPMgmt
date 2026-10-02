@@ -1615,3 +1615,34 @@ already argues.
 policy, the route rule and the router, from one account. It does not prove each
 member account's own forwarding rules are enabled; those are baseline StackSet
 resources, and drift on them belongs to the baseline drift checks.
+
+**Proved, 2026-10-02** — by deliberate failure, as decided.
+
+| Time (UTC) | Event |
+|---|---|
+| 16:55 | Router stack deployed: heartbeat route, throttle and heartbeat-missing alarms |
+| 16:59 | Heartbeat emitter deployed to Sandbox Canary |
+| 17:00:20 | heartbeat-missing ALARM -> OK on the first heartbeat |
+| 20:07:45 | `platform-forward-heartbeat` disabled in Sandbox Canary (the failure under test) |
+| 21:14:20 | heartbeat-missing OK -> ALARM; PagerDuty high-urgency incident on AltDigital Platform, same second |
+| 21:15:32 | Rule re-enabled |
+| 21:29:20 | ALARM -> OK; OK notification delivered to the topic |
+
+Detection took 67 minutes from the break: the alarm needs three whole 15-minute
+periods without a heartbeat, so it fires 45–60 minutes after the last one,
+plus evaluation lag. Treat "within an hour" as the guarantee, not 45 minutes.
+The incident was resolved by hand before the OK arrived, so auto-resolution
+was not observed here; the same CloudWatch integration did resolve on OK in
+the canary test earlier the same day (B-150).
+
+**Found while proving** —
+- The throttle alarm went to ALARM within minutes of deployment: the router
+  had been throttled hourly since the night before, invisible to the errors
+  alarm. Cause: Lambda concurrency 10 in every account (B-151).
+- Deployed high-urgency on a single period, that alarm paged seven times in
+  an hour. Now low urgency, 2 of 3 periods, with OK actions.
+- Each heartbeat reached the router twice, through its own rule and the
+  catch-all, so a disabled heartbeat route would have gone unnoticed. The
+  catch-all now excludes it; one heartbeat per period since.
+
+**Step 2, removing the direct actions, may now proceed.**
