@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  D-028. Forwards routing-marked alarms from a platform account (Audit, Log
+  Archive, Security Backup, Infra Tooling, Security Forensics) to the
+  organization bus, so the router can deliver them.
+
+# ---------------------------------------------------------------------------
+# Why platform accounts need this
+# ---------------------------------------------------------------------------
+# baseline/70-event-forwarding.yaml forwards every alarm from Sandbox and Members
+# accounts. The platform's own accounts are outside those OUs, so their alarms
+# -- backup copy deleted, log-archive replication failed, change reconciliation
+# errors -- never reached the router, and went to PagerDuty only by their own
+# direct SNS action. D-028 moves them to the router, which first needs them to
+# arrive.
+#
+# ---------------------------------------------------------------------------
+# Why only MARKED alarms
+# ---------------------------------------------------------------------------
+# The pattern matches alarms whose description carries "[platform-routing]",
+# the marker the router reads its routing class from. Two reasons to forward
+# nothing else:
+#
+#   - The watchdogs (router errors, DLQ, throttles, heartbeat, cadence, runaway,
+#     alert delivery) deliberately carry no marker and page directly. Forwarded
+#     to the router, they would be judged by the thing they watch.
+#   - Audit is Security Hub's delegated administrator; its default bus sees
+#     aggregated findings for every account. Forwarding more than marked alarms
+#     from here would route findings a second time.
+#
+# In the Audit account the target is the organization bus in the same account,
+# which EventBridge reaches the same way: a rule, a role, PutEvents.
+#
+#   scripts/deploy-to-account.sh --account <alias> \
+#     --template alerting/60-alarm-forwarding.yaml --stack platform-alarm-forwarding \
+#     CentralBusArn=<platform-alerts bus ARN in Audit>
+
+Parameters:
+
+  CentralBusArn:
+    Type: String
+    Description: The organization bus (platform-alerts) in the Audit account.
+    AllowedPattern: '^arn:aws:events:[a-z0-9-]+:[0-9]{12}:event-bus/[A-Za-z0-9._-]+$'
+
+Resources:
+
+  ForwardingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformAlarmForwarding
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ForwardToCentralBus
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'events:PutEvents'
+                # Exactly one bus, as in baseline/70-event-forwarding.yaml.
+                Resource: !Ref CentralBusArn
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  MarkedAlarmForwarding:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-forward-marked-alarms
+      Description: D-028. Routing-marked alarms only; watchdogs carry no marker and page directly.
+      EventPattern:
+        source: ['aws.cloudwatch']
+        detail-type: ['CloudWatch Alarm State Change']
+        detail:
+          state:
+            # OK as well, so the router's incidents resolve themselves.
+            value: ['ALARM', 'OK']
+          configuration:
+            description:
+              - wildcard: '*[platform-routing]*'
+      State: ENABLED
+      Targets:
+        - Id: central
+          Arn: !Ref CentralBusArn
+          RoleArn: !GetAtt ForwardingRole.Arn
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
