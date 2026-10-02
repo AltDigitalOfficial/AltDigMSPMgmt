@@ -109,11 +109,32 @@
       }
     },
     {
-      "Sid": "ProtectStateManagerAssociations",
+      "Sid": "ProtectPlatformAssociations",
       "Effect": "Deny",
       "Action": [
         "ssm:DeleteAssociation",
         "ssm:UpdateAssociation"
+      ],
+      "Resource": "arn:aws:ssm:*:*:association/*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer"
+          ]
+        },
+        "StringEquals": {
+          "aws:ResourceTag/platform-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "ProtectSsmManagedTag",
+      "Effect": "Deny",
+      "Action": [
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource"
       ],
       "Resource": "*",
       "Condition": {
@@ -122,6 +143,11 @@
             "arn:aws:iam::*:role/OrganizationAccountAccessRole",
             "arn:aws:iam::*:role/stacksets-exec-*",
             "arn:aws:iam::*:role/PlatformDeployer"
+          ]
+        },
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": [
+            "platform-managed"
           ]
         }
       }

@@ -173,14 +173,31 @@ Resources:
               - !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/platform-*'
               - !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/StackSet-platform-*'
 
-          # Associations carry an id, not a name, in their ARN, so they cannot
-          # be scoped to the platform's own. Denied for all; see SCP 08.
+          # Associations carry an id, not a name, in their ARN, so the
+          # platform's own are identified by tag instead -- and the tag is
+          # protected by the statement after this one, or untag-then-delete
+          # would be the way round it. A developer's own associations stay
+          # theirs to change and remove (B-149).
           - Sid: NeverTheAgentAssociations
             Effect: Deny
             Action:
               - 'ssm:DeleteAssociation'
               - 'ssm:UpdateAssociation'
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:association/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/platform-managed': 'true'
+
+          - Sid: NeverTheSsmManagedTag
+            Effect: Deny
+            Action:
+              - 'ssm:AddTagsToResource'
+              - 'ssm:RemoveTagsFromResource'
             Resource: '*'
+            Condition:
+              'ForAnyValue:StringEquals':
+                'aws:TagKeys':
+                  - platform-managed
 
           # A role created by a developer must not be able to touch the
           # platform's own identities -- including, recursively, this boundary

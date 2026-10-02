@@ -820,6 +820,16 @@ Resources:
       ComplianceSeverity: HIGH
       MaxConcurrency: '10%'
       MaxErrors: '10%'
+      # The tag is what protects this association. An association's ARN
+      # carries an id rather than a name, so SCP 08 and the developer
+      # boundary cannot reserve it by prefix the way they reserve platform-*
+      # functions and rules; they key on platform-managed instead, and deny
+      # removing that tag. Untagged, this association was protected only by a
+      # deny on EVERY association, which also froze the tenant pipeline's own
+      # (B-149).
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
 
 Outputs:
 

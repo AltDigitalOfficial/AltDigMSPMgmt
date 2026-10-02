@@ -718,6 +718,198 @@ z = zipfile.ZipFile(sys.argv[1], "w"); z.writestr("index.py", "def h(e, c): retu
   remove_harness_role "${APP_CLONE}"
 fi
 
+# --- 08: the platform's own monitoring (B-149, design 11 Layer 1) ---------
+#
+# None of these use the differential. 08 does not exempt the probe -- its
+# exemption lists name the deployment principals and the one platform role
+# that writes each resource, nothing else -- so the probe would be denied too
+# and every check would read AMBIGUOUS. They use `real` instead: a genuine
+# platform resource, a subject holding AdministratorAccess, so a denial can
+# only be an SCP.
+#
+# `real` has a cost the differential does not: if the guardrail is ABSENT,
+# the subject's call SUCCEEDS against a live control. So every call below is
+# chosen to be harmless when it succeeds -- a tag added and then removed, a
+# value overwritten with itself, an EC2 dry run, a fixture the harness made.
+# Nothing here rewrites code, disables a rule or deletes a platform resource,
+# even in the failure case. B-137 is what happens otherwise.
+
+R="${TEST_REGION}"; A="${TARGET_ACCOUNT}"
+HARNESS_TAG_KEY="guardrail-harness"
+
+# Functions. Tagging stands in for UpdateFunctionCode: same statement, same
+# resource match, and a stray tag is the worst outcome if it is not denied.
+FN_ARN="arn:aws:lambda:${R}:${A}:function:platform-response"
+if as_org aws lambda get-function-configuration --function-name platform-response \
+     --region "${R}" >/dev/null 2>&1; then
+  check 08 ProtectPlatformFunctions "lambda:TagResource platform-response" real -- \
+    aws lambda tag-resource --resource "${FN_ARN}" --tags "${HARNESS_TAG_KEY}=probe" --region "${R}"
+  as_org aws lambda untag-resource --resource "${FN_ARN}" \
+    --tag-keys "${HARNESS_TAG_KEY}" --region "${R}" >/dev/null 2>&1 || true
+else
+  emit AMBIG "lambda:TagResource platform-response" "08/ProtectPlatformFunctions" \
+    "platform-response is not deployed here; nothing real to test against"
+fi
+
+# Rules. The drift rule is the one whose loss makes every later alarm
+# deletion permanent, so it is the one to prove.
+RULE_ARN="arn:aws:events:${R}:${A}:rule/platform-alarm-drift-on-delete"
+if as_org aws events describe-rule --name platform-alarm-drift-on-delete \
+     --region "${R}" >/dev/null 2>&1; then
+  check 08 ProtectPlatformEventRules "events:TagResource drift rule" real -- \
+    aws events tag-resource --resource-arn "${RULE_ARN}" \
+      --tags "Key=${HARNESS_TAG_KEY},Value=probe" --region "${R}"
+  as_org aws events untag-resource --resource-arn "${RULE_ARN}" \
+    --tag-keys "${HARNESS_TAG_KEY}" --region "${R}" >/dev/null 2>&1 || true
+else
+  emit AMBIG "events:TagResource drift rule" "08/ProtectPlatformEventRules" \
+    "platform-alarm-drift-on-delete is not deployed here"
+fi
+
+ALARM_ARN="arn:aws:cloudwatch:${R}:${A}:alarm:platform-alarm-drift"
+if [[ "$(as_org aws cloudwatch describe-alarms --alarm-names platform-alarm-drift \
+          --region "${R}" --query 'length(MetricAlarms)' --output text 2>/dev/null | no_cr)" == "1" ]]; then
+  check 08 ProtectPlatformAlarms "cloudwatch:TagResource platform alarm" real -- \
+    aws cloudwatch tag-resource --resource-arn "${ALARM_ARN}" \
+      --tags "Key=${HARNESS_TAG_KEY},Value=probe" --region "${R}"
+  as_org aws cloudwatch untag-resource --resource-arn "${ALARM_ARN}" \
+    --tag-keys "${HARNESS_TAG_KEY}" --region "${R}" >/dev/null 2>&1 || true
+else
+  emit AMBIG "cloudwatch:TagResource platform alarm" "08/ProtectPlatformAlarms" \
+    "platform-alarm-drift is not deployed here"
+fi
+
+# The kill switch, overwritten with its own current value. If the guardrail
+# is absent this writes a new version identical to the last.
+read -r KS_VALUE KS_TYPE <<<"$(as_org aws ssm get-parameter --name /platform/response/enabled \
+  --region "${R}" --query 'Parameter.[Value,Type]' --output text 2>/dev/null | no_cr)"
+if [[ -n "${KS_VALUE:-}" && -n "${KS_TYPE:-}" ]]; then
+  check 08 ProtectPlatformParameters "ssm:PutParameter kill switch (same value)" real -- \
+    aws ssm put-parameter --name /platform/response/enabled --value "${KS_VALUE}" \
+      --type "${KS_TYPE}" --overwrite --region "${R}"
+else
+  emit AMBIG "ssm:PutParameter kill switch" "08/ProtectPlatformParameters" \
+    "/platform/response/enabled does not exist here"
+fi
+
+# Records. A delete of a key that cannot exist: DynamoDB treats it as a
+# successful no-op, so an absent guardrail costs nothing, and the remediation
+# history -- which is evidence -- is never written to.
+KEYS_JSON="$(as_org aws dynamodb describe-table --table-name platform-remediation-history \
+  --region "${R}" --query 'Table.[KeySchema,AttributeDefinitions]' --output json 2>/dev/null)" || KEYS_JSON=""
+if [[ -n "${KEYS_JSON}" ]]; then
+  ITEM_KEY="$(printf '%s' "${KEYS_JSON}" | "$(command -v python || command -v python3)" -c '
+import json,sys
+schema, defs = json.load(sys.stdin)
+types = {d["AttributeName"]: d["AttributeType"] for d in defs}
+val = {"S": "guardrail-harness-does-not-exist", "N": "-1", "B": "Z3VhcmRyYWls"}
+print(json.dumps({k["AttributeName"]: {types[k["AttributeName"]]: val[types[k["AttributeName"]]]}
+                  for k in schema}))')"
+  check 08 ProtectPlatformRecords "dynamodb:DeleteItem remediation history" real -- \
+    aws dynamodb delete-item --table-name platform-remediation-history \
+      --key "${ITEM_KEY}" --region "${R}"
+else
+  emit AMBIG "dynamodb:DeleteItem remediation history" "08/ProtectPlatformRecords" \
+    "platform-remediation-history does not exist here"
+fi
+
+# Stacks. Termination protection set to the value it already has.
+PSTACK="$(as_org aws cloudformation describe-stacks --region "${R}" \
+  --query "Stacks[?starts_with(StackName,'StackSet-platform-')]|[0].[StackName,EnableTerminationProtection]" \
+  --output text 2>/dev/null | no_cr)"
+PSTACK_NAME="${PSTACK%%[[:space:]]*}"; PSTACK_TP="${PSTACK##*[[:space:]]}"
+if [[ "${PSTACK_NAME}" == StackSet-platform-* ]]; then
+  TP_FLAG="--no-enable-termination-protection"
+  [[ "${PSTACK_TP}" == "True" ]] && TP_FLAG="--enable-termination-protection"
+  check 08 ProtectPlatformStacks "cloudformation:UpdateTerminationProtection (same value)" real -- \
+    aws cloudformation update-termination-protection --stack-name "${PSTACK_NAME}" \
+      "${TP_FLAG}" --region "${R}"
+else
+  emit AMBIG "cloudformation:UpdateTerminationProtection" "08/ProtectPlatformStacks" \
+    "no StackSet-platform-* stack here"
+fi
+
+# Associations, both directions. This is the statement whose first draft
+# denied every association in the account, including the tenant pipeline's
+# (B-149); it is narrowed to platform-managed=true and the tag is protected.
+# Proving the deny alone would pass the over-broad version too -- the
+# positive control below is what shows it was narrowed.
+#
+# The fixture is created by OrganizationAccountAccessRole, which is exempt and
+# may therefore apply the protected tag. It targets a tag nothing carries, so
+# it never runs anywhere.
+FIX_ID="$(as_org aws ssm create-association --name AWS-UpdateSSMAgent \
+  --association-name guardrail-harness-platform-fixture \
+  --targets "Key=tag:${HARNESS_TAG_KEY},Values=never-matches" \
+  --tags Key=platform-managed,Value=true "Key=${HARNESS_TAG_KEY},Value=fixture" \
+  --region "${R}" --query AssociationDescription.AssociationId --output text 2>/dev/null | no_cr)" || FIX_ID=""
+if [[ -n "${FIX_ID}" && "${FIX_ID}" != "None" ]]; then
+  check 08 ProtectPlatformAssociations "ssm:DeleteAssociation platform-managed" real -- \
+    aws ssm delete-association --association-id "${FIX_ID}" --region "${R}"
+  # Untag-then-delete is the way round the statement above.
+  check 08 ProtectSsmManagedTag "ssm:RemoveTagsFromResource platform-managed" real -- \
+    aws ssm remove-tags-from-resource --resource-type Association \
+      --resource-id "${FIX_ID}" --tag-keys platform-managed --region "${R}"
+  as_org aws ssm delete-association --association-id "${FIX_ID}" --region "${R}" >/dev/null 2>&1 \
+    || warn "Could not delete the harness association fixture ${FIX_ID} - remove it by hand."
+else
+  emit AMBIG "ssm:DeleteAssociation platform-managed" "08/ProtectPlatformAssociations" \
+    "could not create the tagged fixture association"
+fi
+
+OWN_ID="$(as_test aws ssm create-association --name AWS-UpdateSSMAgent \
+  --association-name guardrail-harness-own \
+  --targets "Key=tag:${HARNESS_TAG_KEY},Values=never-matches" \
+  --region "${R}" --query AssociationDescription.AssociationId --output text 2>/dev/null | no_cr)" || OWN_ID=""
+if [[ -n "${OWN_ID}" && "${OWN_ID}" != "None" ]]; then
+  expect_allowed "ssm:UpdateAssociation (own, untagged)" -- \
+    aws ssm update-association --association-id "${OWN_ID}" \
+      --association-name guardrail-harness-own-updated --region "${R}"
+  expect_allowed "ssm:DeleteAssociation (own, untagged)" -- \
+    aws ssm delete-association --association-id "${OWN_ID}" --region "${R}"
+else
+  emit FAIL "ssm:CreateAssociation (own)" "control" \
+    "a local administrator could not create an ordinary association"
+fi
+
+# --- 07: the baseline network (B-149) --------------------------------------
+
+# A dry run. Permitted returns DryRunOperation, which `check` reports as got
+# past authorization -- FAIL, correctly -- and nothing changes either way.
+BASE_SG="$(as_org aws ec2 describe-security-groups --region "${R}" \
+  --filters Name=tag:platform-managed,Values=true \
+  --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null | no_cr)"
+if [[ "${BASE_SG}" == sg-* ]]; then
+  check 07 ProtectBaselineNetwork "ec2:AuthorizeSecurityGroupEgress baseline (dry run)" real -- \
+    aws ec2 authorize-security-group-egress --dry-run --group-id "${BASE_SG}" \
+      --ip-permissions 'IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=203.0.113.9/32}]' \
+      --region "${R}"
+else
+  emit AMBIG "ec2:AuthorizeSecurityGroupEgress baseline" "07/ProtectBaselineNetwork" \
+    "no platform-managed security group here"
+fi
+
+# The DNS firewall's tag is what ProtectBaselineNetwork keys on, so removing
+# it is the bypass. Re-applied afterwards only if the subject got through.
+FRG_ARN="$(as_org aws route53resolver list-firewall-rule-groups --region "${R}" \
+  --query 'FirewallRuleGroups[?starts_with(Name,`platform-`)]|[0].Arn' --output text 2>/dev/null | no_cr)"
+FRG_TAGGED=""
+if [[ "${FRG_ARN}" == arn:* ]]; then
+  FRG_TAGGED="$(as_org aws route53resolver list-tags-for-resource \
+    --resource-arn "${FRG_ARN}" --region "${R}" \
+    --query "Tags[?Key=='platform-managed'].Value|[0]" --output text 2>/dev/null | no_cr)"
+fi
+if [[ "${FRG_TAGGED}" == "true" ]]; then
+  check 07 ProtectResolverTags "route53resolver:UntagResource platform-managed" real -- \
+    aws route53resolver untag-resource --resource-arn "${FRG_ARN}" \
+      --tag-keys platform-managed --region "${R}"
+  as_org aws route53resolver tag-resource --resource-arn "${FRG_ARN}" \
+    --tags Key=platform-managed,Value=true --region "${R}" >/dev/null 2>&1 || true
+else
+  emit AMBIG "route53resolver:UntagResource" "07/ProtectResolverTags" \
+    "no platform-managed DNS firewall rule group here"
+fi
+
 check 01 ProtectCloudTrail "cloudtrail:StopLogging" yes -- \
   aws cloudtrail stop-logging --name "${NOPE}"
 
