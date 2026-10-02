@@ -320,6 +320,8 @@ Resources:
         Most likely: a resource created without the tags or in a region the
         selection does not cover, or a vault access policy change. Check AWS
         Backup, Jobs, filtered to Failed.
+
+        [platform-routing] routing=pagerduty layer=infrastructure
       Namespace: AWS/Backup
       MetricName: NumberOfBackupJobsFailed
       Statistic: Sum

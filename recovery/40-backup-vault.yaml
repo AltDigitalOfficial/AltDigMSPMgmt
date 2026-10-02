@@ -234,6 +234,8 @@ Resources:
 
         CHECK: CloudTrail in the backup account for DeleteRecoveryPoint, then
         the vault access policy and the lock configuration.
+
+        [platform-routing] routing=pagerduty layer=infrastructure
       Namespace: AWS/Backup
       MetricName: NumberOfRecoveryPointsDeleted
       Statistic: Sum

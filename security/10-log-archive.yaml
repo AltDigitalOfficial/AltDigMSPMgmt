@@ -868,6 +868,8 @@ Resources:
         again for as long as this alarm is firing.
         Diagnose with head-object ReplicationStatus on a recent object, then
         re-run scripts/backfill-replication.sh once the cause is fixed.
+
+        [platform-routing] routing=pagerduty layer=infrastructure
       Namespace: AWS/S3
       MetricName: OperationsFailedReplication
       Dimensions:
@@ -902,6 +904,8 @@ Resources:
         again for as long as this alarm is firing.
         Diagnose with head-object ReplicationStatus on a recent object, then
         re-run scripts/backfill-replication.sh once the cause is fixed.
+
+        [platform-routing] routing=pagerduty layer=infrastructure
       Namespace: AWS/S3
       MetricName: OperationsFailedReplication
       Dimensions:
@@ -936,6 +940,8 @@ Resources:
         again for as long as this alarm is firing.
         Diagnose with head-object ReplicationStatus on a recent object, then
         re-run scripts/backfill-replication.sh once the cause is fixed.
+
+        [platform-routing] routing=pagerduty layer=infrastructure
       Namespace: AWS/S3
       MetricName: OperationsFailedReplication
       Dimensions:
