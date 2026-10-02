@@ -6441,9 +6441,48 @@ pipeline.
   rule as well as the group. Rules do not inherit the group's tags, so this
   one action may not be caught. Authorize and Revoke are.
 
-**Not yet live.** 08 is attached to Sandbox only, and the 07 and boundary
-changes are not deployed. Arc8 dev and test are vested, so Members needs this
-before the Arc8 developers get access:
+**Status 2026-10-02.** The association deny is narrowed (`ca30634`), and the
+harness carries 08 and 07 assertions. The platform association in Sandbox
+Canary `754280127660` and Sandbox Exercise `801093629821` was tagged
+`platform-managed=true` and `platform-layer=infrastructure` directly, through
+OrganizationAccountAccessRole. Nothing else is live. The Claude Code session
+doing this was stopped at the first SCP apply by its own permission
+classifier, correctly, so every remaining step is an operator command:
+
+```
+# Sandbox
+scripts/deploy-policies.sh --only 08-protect-platform-monitoring.json --attach
+scripts/deploy-stackset.sh --name platform-developer-boundary \
+  --template baseline/80-developer-boundary.yaml --ou sandbox
+scripts/test-guardrails.sh --account 754280127660
+#   expect the 07/ProtectBaselineNetwork and 07/ProtectResolverTags checks
+#   to FAIL here: 07's new statements are not deployed yet
+scripts/deploy-policies.sh --only 07-deny-bypass.json --confirm-production
+#   07 is ONE object attached to Sandbox and Members: this is live in Arc8 at once
+scripts/test-guardrails.sh --account 754280127660      # now clean
+
+# Watch an hour, then: CloudTrail in Canary, errorCode AccessDenied, from any
+# Platform* role. The exemption lists were derived, not observed.
+
+# Members
+#   tag the platform association in Arc8 dev 624606539840 and test 904883674541
+#   (same add-tags-to-resource call as Sandbox), then:
+#   attachments.tsv: 08 -> sandbox,members
+scripts/deploy-policies.sh --only 08-protect-platform-monitoring.json --attach --confirm-production
+#   and widen the boundary StackSet to Members when 15.4b does (B-143)
+
+# Permission sets (management account, stack platform-developer-access)
+#   identity/10-developer-access.yaml: TenantReadOnly and the DeveloperDev
+#   layer-tag denies
+```
+
+`baseline/50-instrumentation.yaml` now tags the association. It deploys with
+the next instrumentation publish rather than separately, because
+update-stack-set redeploys every instance.
+
+**Original plan, kept for the reasoning.** 08 is attached to Sandbox only,
+and the 07 and boundary changes are not deployed. Arc8 dev and test are
+vested, so Members needs this before the Arc8 developers get access:
 1. `scripts/deploy-policies.sh`, Sandbox. Then `scripts/test-guardrails.sh`
    with an assertion added that `GuardrailTestAdmin` cannot
    `UpdateFunctionCode` on `platform-response` or `PutParameter`

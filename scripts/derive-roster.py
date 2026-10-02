@@ -269,10 +269,12 @@ def warnings_for(roster, envs):
     people = roster["developers"]
 
     if not people:
+        readers = len(roster.get("readonly") or [])
         w.append(
-            "The roster is empty. Legal -- section 3b is marked Dev, not Vest, so a "
-            "tenant\n    can be vested before its roster is known -- and it means "
-            "nobody will have\n    access to these accounts when this run finishes.")
+            "No developers on the roster. Legal -- section 3b is marked Dev, not "
+            "Vest, so a\n    tenant can be vested before its roster is known -- "
+            "and it means nobody can\n    build in these accounts when this run "
+            f"finishes. {readers} read-only member(s) can see\n    them.")
         return w
 
     for e in envs:
