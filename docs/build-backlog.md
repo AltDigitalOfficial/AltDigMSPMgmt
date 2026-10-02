@@ -6278,7 +6278,7 @@ passed. `publish-telemetry.sh --dry-run` passes.
 
 ---
 
-## B-146 · The incident readout cannot assume the responder role it is written to use
+## B-146 · The incident readout cannot assume the responder role it is written to use — CLOSED
 
 **Observed** — 2026-10-01T19:07Z, during the post-swap watch for 15.4a.
 `PlatformIncidentReadout` (Audit) was refused `sts:AssumeRole` on
@@ -6310,6 +6310,29 @@ too, or the readout gets its own read-only role in members accounts. The
 second keeps the responder (which can isolate and revoke) trusted by exactly
 one principal. That is the reason to prefer it, and it is a containment design
 choice. Do not just widen the responder's trust to make this pass.
+
+**Closed 2026-10-02 — the separate role, by the operator's decision.**
+`PlatformIncidentReader` (`containment/00-responder-role.yaml`, condition
+`HasReadout`) trusts exactly `PlatformIncidentReadout`. It holds
+`cloudtrail:LookupEvents` and the four IAM policy-list calls, and nothing that
+writes. It needs no SCP exemption. The responder's trust is unchanged:
+containment only.
+- It was rolled out through `platform-security-responder` to both Sandbox
+  accounts and both Arc8 accounts, all `CURRENT`.
+- The readout and its role policy point at the reader (620f97b). Containment
+  was redeployed in Audit on `containment-40c253597dcb006d`.
+
+That redeploy also shipped d752a46 (the clock can record a notification as
+made) and fd11f14 (B12's two-person rule). Both were decided 2026-09-22 and
+had never been deployed, because the four functions share one package.
+Rollback is `containment-988c583636b3913a`.
+
+Proof: a guardrail harness run on Canary opened an incident.
+- Declaration ran 4 times, containment 24, the readout 4, the clock 2, with
+  zero errors.
+- CloudTrail shows `PlatformIncidentReadout` assuming `PlatformIncidentReader`
+  6 times, all SUCCESS: `readout-trail` ×3 and `readout-reach` ×3. It was
+  refused 8 times out of 8 before.
 
 ---
 
