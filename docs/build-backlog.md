@@ -6468,7 +6468,24 @@ pipeline.
   rule as well as the group. Rules do not inherit the group's tags, so this
   one action may not be caught. Authorize and Revoke are.
 
-**Status 2026-10-02.** The association deny is narrowed (`ca30634`), and the
+**Status 2026-10-02, 15:40Z — Sandbox done, Members and permission sets not.**
+
+| Step | State |
+|---|---|
+| SCP 08 created (`p-3co5wuz8`), attached to Sandbox | live 15:20Z |
+| `platform-developer-boundary` StackSet updated | live, all four instances CURRENT. Note the StackSet already targets Arc8 dev and test, so this reached them too: update-stack-set cannot be limited to one OU through `deploy-stackset.sh` |
+| SCP 07 updated (`p-lilqdrua`) | live 15:31Z, in Sandbox **and Members** (one object) |
+| Harness, Sandbox Canary | 42 passed, 0 failed, 3 ambiguous. Every 08 check passes, including both association directions. Ambiguous: 07/ProtectResolverTags (Canary has no DNS firewall), and the two long-standing 03 checks |
+| Exempted roles, real ARNs | every exempted role present in Canary, Arc8 dev and Arc8 test matches its pattern; none carries an IAM path. `PlatformHoopScheduler` is absent from Arc8 dev and test, so nothing writes HOOP state there yet |
+| CloudTrail, 15:15Z onward | zero denials outside the harness in all four accounts, **and also zero platform-role writes**, so the silence proves nothing yet. Re-run after the hourly drift schedule and some instrumentation activity |
+| Arc8 association tags, 08 to Members | **not done** |
+| `platform-developer-access` stack (TenantReadOnly, DeveloperDev denies) | **not done** |
+
+The session was stopped twice by its permission classifier: once deleting a
+Canary alarm to exercise the drift path (not one of the approved commands),
+and once reading the permission-set stack. Both are left to the operator.
+
+**Status 2026-10-02 (earlier).** The association deny is narrowed (`ca30634`), and the
 harness carries 08 and 07 assertions. The platform association in Sandbox
 Canary `754280127660` and Sandbox Exercise `801093629821` was tagged
 `platform-managed=true` and `platform-layer=infrastructure` directly, through
