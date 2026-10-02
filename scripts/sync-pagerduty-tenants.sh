@@ -221,7 +221,7 @@ for c, t in (d.get("tenants") or {}).items():
 while IFS=$'\t' read -r CLIENT BSID TIERS OBJECTS; do
   [[ -n "${CLIENT}" ]] || continue
   SET_EXPR="SET pagerduty_business_service_id = :b, pagerduty_tier_services = :t, pagerduty_object_services = :o, updated_at = :u"
-  VALUES="{\":b\":{\"S\":\"${BSID}\"},\":t\":{\"S\":${TIERS}},\":o\":{\"S\":${OBJECTS}},\":u\":{\"S\":\"$(now_iso)\"}}"
+  VALUES="{\":b\":{\"S\":\"${BSID}\"},\":t\":{\"S\":${TIERS}},\":o\":{\"S\":${OBJECTS}},\":u\":{\"S\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}"
   PARTNER="$(printf '%s\n' "${PARTNER_OF}" | awk -F'\t' -v c="${CLIENT}" '$1==c {print $2}')"
   # The saga's record first, then onboarding's. Each update is conditional on
   # the record existing, so neither can create a stray record.
