@@ -23,11 +23,16 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 APPLY=0
+TENANT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --apply) APPLY=1; shift ;;
+    # One tenant's module only, and only if every change is a creation. For
+    # onboarding, which must not apply anything it did not cause -- see the
+    # tenant section at the end of this script.
+    --tenant) TENANT="$2"; shift 2 ;;
     -h|--help)
-      printf 'Usage: PAGERDUTY_TOKEN=... %s [--apply]\n' "$0"; exit 0 ;;
+      printf 'Usage: PAGERDUTY_TOKEN=... %s [--apply] [--tenant <client>]\n' "$0"; exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
@@ -124,6 +129,72 @@ info "terraform init"
 
 info "terraform validate"
 (cd "${TFDIR}" && "${TF}" validate)
+
+# ---------------------------------------------------------------------------
+# One tenant, creations only (decided 2026-10-01)
+# ---------------------------------------------------------------------------
+# Onboarding applies a new tenant's services itself instead of stopping for a
+# person -- but only what that onboarding caused. The plan is limited to the
+# tenant's module, saved, and checked: every change must be a CREATE inside
+# module.tenant["<client>"]. Anything else -- an update, a destroy, a change
+# outside the tenant -- stops for review, because that is a change to
+# something people already depend on.
+#
+# The first real run showed why. The full plan for Arc8 also carried an
+# in-place change to the platform on-call schedule: someone had added it to a
+# PagerDuty team in the web console, and an unattended full apply would have
+# quietly removed that. A targeted plan does not touch it, and still says so.
+#
+# With --apply, the SAVED plan is applied, so what was checked is exactly what
+# happens; nothing can change between the check and the apply.
+if [[ -n "${TENANT}" ]]; then
+  [[ "${TENANT}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--tenant must be a client slug."
+  PLAN_FILE="tenant-${TENANT}.tfplan"
+  TARGET="module.tenant[\"${TENANT}\"]"
+  info "terraform plan, ${TARGET} only"
+  (cd "${TFDIR}" && "${TF}" plan -input=false -target="${TARGET}" -out="${PLAN_FILE}") \
+    || die "terraform plan failed for ${TARGET}."
+  VERDICT="$(cd "${TFDIR}" && "${TF}" show -json "${PLAN_FILE}" | "$(command -v python || command -v python3)" -c '
+import json, sys
+prefix = sys.argv[1]
+plan = json.load(sys.stdin)
+creates, other = 0, []
+for rc in plan.get("resource_changes") or []:
+    actions = (rc.get("change") or {}).get("actions") or []
+    if actions in (["no-op"], ["read"]):
+        continue
+    if actions == ["create"] and rc["address"].startswith(prefix):
+        creates += 1
+    else:
+        other.append(rc["address"] + ": " + "/".join(actions))
+print("creates=" + str(creates))
+for o in other:
+    print("other " + o)
+' "${TARGET}")" || die "Could not read the saved plan."
+  CREATES="$(printf '%s\n' "${VERDICT}" | sed -n 's/^creates=//p')"
+  OTHER="$(printf '%s\n' "${VERDICT}" | sed -n 's/^other //p')"
+  if [[ -n "${OTHER}" ]]; then
+    rm -f "${TFDIR}/${PLAN_FILE}"
+    die "The plan for ${TARGET} changes more than it creates:
+$(printf '%s\n' "${OTHER}" | sed 's/^/        /')
+      Not applied. Review with scripts/pagerduty-apply.sh and apply by hand."
+  fi
+  if [[ "${CREATES}" == "0" ]]; then
+    rm -f "${TFDIR}/${PLAN_FILE}"
+    ok "${TARGET}: nothing to create; already in place"
+    exit 0
+  fi
+  ok "${TARGET}: ${CREATES} creation(s), nothing else"
+  if [[ ${APPLY} -eq 1 ]]; then
+    (cd "${TFDIR}" && "${TF}" apply -input=false "${PLAN_FILE}") || {
+      rm -f "${TFDIR}/${PLAN_FILE}"; die "terraform apply failed for ${TARGET}."; }
+    ok "applied ${CREATES} creation(s) for ${TENANT}"
+  else
+    info "Plan only. Re-run with --apply to create them."
+  fi
+  rm -f "${TFDIR}/${PLAN_FILE}"
+  exit 0
+fi
 
 if [[ ${APPLY} -eq 1 ]]; then
   info "terraform apply"
