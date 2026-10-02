@@ -53,6 +53,7 @@ considered omission from an unmade decision.
 """
 
 import datetime
+import fnmatch
 import json
 import os
 import re
@@ -186,6 +187,9 @@ DEFAULTS = SPEC.get("defaults", {})
 ALARM_SETS = SPEC.get("alarm_sets", {})
 IN_SCOPE = set(SPEC.get("resource_types_in_scope", []))
 NO_ALARMS = set(SPEC.get("resource_types_no_alarms", []))
+# AWS's own pre-made resources, recognised by id within types a tenant could
+# also use for real. See 06a's aws_default_resources.
+AWS_DEFAULTS = {t: list(p or []) for t, p in (SPEC.get("aws_default_resources") or {}).items()}
 
 # There is deliberately no hardcoded ignore list here.
 #
@@ -549,6 +553,12 @@ def derived_metrics(spec, dimension_name, resource_id):
     ], None
 
 
+def is_aws_default(resource_type, resource_id):
+    """True when this is one of AWS's own pre-made resources (06a aws_default_resources)."""
+    return any(fnmatch.fnmatchcase(str(resource_id or ""), pattern)
+               for pattern in AWS_DEFAULTS.get(resource_type, []))
+
+
 def plan_alarms(resource_type, resource_id, layer=DEFAULT_LAYER,
                 layer_source="default"):
     """Work out what alarms this resource SHOULD have. Creates nothing.
@@ -571,6 +581,12 @@ def plan_alarms(resource_type, resource_id, layer=DEFAULT_LAYER,
         # The spec's own words: "known, no alarms applicable". Recorded in the
         # return value, not raised, because the decision is in the spec.
         return None, None, {"status": "known-no-alarms", "resource_type": resource_type}
+
+    if is_aws_default(resource_type, resource_id):
+        # AWS made it, in every account. A tenant's own resource of the same
+        # type does not match and still raises the exception below.
+        return None, None, {"status": "known-aws-default",
+                            "resource_type": resource_type}
 
     if resource_type not in IN_SCOPE:
         record_exception("unrecognised-resource-type", {

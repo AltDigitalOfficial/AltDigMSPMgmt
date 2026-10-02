@@ -157,6 +157,76 @@ resource_types_no_alarms:
   - AWS::SecretsManager::Secret
   - AWS::CloudFormation::Stack
 
+  # --- found on the first tenant turnup, 2026-10-01 -----------------------------
+  # Arc8's test account raised platform-instrumentation-exception for 28
+  # resource types within the hour, every one of them created by the platform's
+  # own baseline or by AWS itself. Each tenant would have alarmed on day one for
+  # things nobody built. The types below are never meaningfully alarmed on,
+  # whoever creates them; AWS's own pre-made resources of types a tenant COULD
+  # use for real are matched by name in aws_default_resources instead.
+  #
+  # Account-level settings, not workloads. apply-account-settings.sh --verify
+  # and Config rules watch them.
+  - AWS::EC2::SnapshotBlockPublicAccess
+  - AWS::EC2::VPCBlockPublicAccessOptions
+  - AWS::S3::AccountPublicAccessBlock
+  # Security service enablement records. verify-security-coverage.sh watches
+  # them; a metric alarm on "GuardDuty is on" says nothing.
+  - AWS::GuardDuty::Detector
+  - AWS::InspectorV2::Activation
+  - AWS::Macie::Session
+  - AWS::SecurityHub::Hub
+  - AWS::SecurityHub::Standard
+  - AWS::SSM::ResourceDataSync     # Inspector's own data sync
+  # Network plumbing. No meaningful metric of its own: a gateway publishes none,
+  # and an interface or association fails visibly through what it belongs to
+  # (a NAT gateway, an endpoint, an instance), which is monitored in its own
+  # right.
+  - AWS::EC2::InternetGateway
+  - AWS::EC2::NetworkInterface
+  - AWS::EC2::DHCPOptions
+  - AWS::EC2::SubnetNetworkAclAssociation
+  - AWS::EC2::SubnetRouteTableAssociation
+  - AWS::EC2::VPCGatewayAttachment
+  # Pointers and definitions, never workloads. An alias points at a key, which
+  # is covered by CloudTrail event alarms; a document is a definition with no
+  # metric.
+  - AWS::KMS::Alias
+  - AWS::SSM::Document
+  # DEFERRED, with a trigger. A VPC endpoint DOES have useful metrics
+  # (PrivateLink packet drops, rejected connections), and for an `isolated`
+  # tenant a broken endpoint breaks everything. Listed here only so it stops
+  # alarming as unrecognised. Revisit when the first `isolated` tenant is
+  # vested, or an endpoint failure is the cause of an incident: give it an
+  # alarm set and move it to resource_types_in_scope.
+  - AWS::EC2::VPCEndpoint
+
+# =============================================================================
+# AWS DEFAULT RESOURCES -- known by NAME, not by type
+# =============================================================================
+# Added 2026-10-01. Every account comes with resources AWS made: the default
+# event bus, the Athena "primary" workgroup, the FARGATE capacity providers,
+# Keyspaces' system keyspaces. Their TYPES are ones a tenant can use for real
+# -- a tenant's own event bus or workgroup may well need monitoring -- so
+# listing the type in resource_types_no_alarms would silently leave the
+# tenant's resources unmonitored. Instead these patterns (shell-style, matched
+# against the AWS Config resource id) recognise AWS's own, and anything else of
+# the same type still raises the unrecognised-type exception for a decision.
+#
+# Patterns are taken from what a new account actually contained (Arc8 test,
+# 2026-10-01), not from documentation.
+aws_default_resources:
+  AWS::Events::EventBus:                   ["default"]
+  AWS::Athena::WorkGroup:                  ["primary"]
+  AWS::ECS::CapacityProvider:              ["FARGATE", "FARGATE_SPOT"]
+  AWS::Cassandra::Keyspace:                ["system", "system_*"]
+  AWS::Scheduler::ScheduleGroup:           ["default"]
+  AWS::AppConfig::DeploymentStrategy:      ["AppConfig.*"]
+  AWS::CodeDeploy::DeploymentConfig:       ["00000000-0000-0000-0000-*"]
+  AWS::IoT::DomainConfiguration:           ["iot:*"]
+  AWS::Route53Resolver::ResolverRule:      ["rslvr-autodefined-*"]
+  AWS::Route53Resolver::ResolverRuleAssociation: ["rslvr-autodefined-assoc-*"]
+
 # =============================================================================
 # ALARM SETS
 #
