@@ -479,6 +479,12 @@ Resources:
               - 'GuardDuty Finding'
               - 'Config Rules Compliance Change'
               - 'Platform Incident Dossier'
+              # D-028. Without this the heartbeat reached the router twice,
+              # through its own rule and through this one, and a disabled
+              # platform-route-heartbeat went unnoticed because this rule kept
+              # delivering. Each heartbeat must travel exactly one route, so
+              # its absence can point at that route.
+              - 'Platform Router Heartbeat'
       State: ENABLED
       Targets:
         - Id: router
