@@ -6324,6 +6324,23 @@ opens at CRITICAL because of how the platform itself is built.
 **Build when** — phase 15.6, which is already changing the Config recorder and
 building Security Hub central configuration.
 
+**Update 2026-10-02 (the session that built the boundary StackSet and ran
+the harness):**
+- **IAM.1 is not harness fixtures.** Every IAM.1 finding is on
+  `policy/PlatformDeveloperBoundary`. In Exercise it appeared at 01:41Z, when
+  the boundary StackSet created the policy there (B-143). In Canary it
+  appeared at 19:08Z, when the harness attached it to bounded roles. Its
+  `CeilingNotGrant` statement is `Allow * on *` by design: a permissions
+  boundary caps a role and grants nothing. Every tenant account will raise
+  IAM.1 once a developer creates a bounded role. Fix: a Security Hub
+  suppression scoped to that one policy ARN, with this reason recorded. Do not
+  rewrite the boundary to dodge the check.
+- **CloudTrail.1 on Arc8 is most likely a turnup artefact.** The last
+  evaluation was 2026-10-01T21:36–21:37Z, during turnup, and this is a
+  periodic control (about 24h). The Sandbox accounts, under the same
+  organization trail, do not fail it. Re-check after the next evaluation, as
+  above.
+
 ---
 
 ## B-148 · Developers could rewrite or switch off the platform's monitoring
@@ -6399,3 +6416,34 @@ before the Arc8 developers get access:
 3. Add `members` to 08 in `attachments.tsv`, deploy 07 and 08 with
    `--confirm-production`, and update the `platform-developer-boundary`
    StackSet.
+
+---
+
+## B-148 · The router has never recognised evidence-completeness or telemetry-gap events, and Arc8's turnup multiplied them by thirteen
+
+**Observed** — 2026-10-02, reading the router's log after a reconciliation
+run. `platform-router` sends `evidence-completeness` and `telemetry-gap`
+events to the review queue with reason "unrecognised event shape". Hourly
+counts:
+
+| Period | Count per hour |
+|---|---|
+| Before Arc8 (09-30 and 10-01, same hours) | about 30 |
+| 10-01, 21:00Z hour (Arc8 joined 21:32Z) | 664 |
+| 10-01, 22:00Z hour | 1,394 |
+| Since | about 400 |
+
+So the router has never had a shape for these two event types: they have
+always fallen through to review. A new account multiplies them, presumably
+completeness gaps for accounts that have not emitted yet. 248c29a ("turnup
+noise") addressed part of turnup noise, not this.
+
+**Why it matters** — nothing pages. But `platform-review-queue` has no
+consumer and keeps messages for 14 days. A real item sent to review is now
+one message in thousands, so the review queue as a control is drowned. Every
+new tenant makes it worse.
+
+**Fix** — give the router a shape for both event types, and route them by
+tier like everything else, or to the digest. The emitter still never
+escalates (CLAUDE.md). Then confirm the per-hour rate drops back to
+near-zero for steady-state accounts.
