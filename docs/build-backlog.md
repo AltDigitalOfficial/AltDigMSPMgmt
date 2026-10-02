@@ -6294,3 +6294,32 @@ too, or the readout gets its own read-only role in members accounts. The
 second keeps the responder (which can isolate and revoke) trusted by exactly
 one principal. That is the reason to prefer it, and it is a containment design
 choice. Do not just widen the responder's trust to make this pass.
+
+---
+
+## B-147 · Every account carries the same Security Hub findings, most of them the platform's own
+
+**Observed** — 2026-10-01, reading Security Hub from Audit after the first
+tenant vesting (Arc8 dev `624606539840`, test `904883674541`). Sandbox
+Exercise `801093629821` and both new accounts show near-identical failed
+findings: 2 CRITICAL, 2 HIGH, 15–17 LOW, 39–55 MEDIUM. A tenant's security
+view therefore opens on findings the PLATFORM causes, which buries anything the
+tenant causes and trains people to ignore the critical count.
+
+**For phase 15.6** (AWS Config everywhere, Security Hub central configuration),
+which owns the templates and the central configuration involved:
+
+| Finding | Count / where | Cause | Proposed fix |
+|---|---|---|---|
+| **Config.1** (FSBP Config.1 and CIS 2.5) | CRITICAL ×2, every account; Sandbox since 2026-09-19 | `baseline/10-config-recorder.yaml` gives the recorder a custom role (`ConfigRecorderRole`); Config.1 requires the service-linked role `AWSServiceRoleForConfig` | Record with the service-linked role. Confirm nothing depends on the custom role's extra permissions first |
+| **CIS 3.1–3.14** (CloudWatch.1–.14) | LOW ×13–15, every account | Each expects a CloudWatch Logs metric filter and alarm on the account's own trail. The organization trail does not deliver to per-account CloudWatch Logs | Confirm the central event rules (06a CloudTrail event alarms) cover each control, record the mapping, then disable these controls for member accounts in Security Hub central configuration |
+| **CloudTrail.1** (and CIS 2.1) | HIGH ×2, Arc8 accounts | Last updated 21:37 during turnup, before the baseline settled. Periodic check | Re-check after its next evaluation before acting; if it persists, the organization trail's multi-Region / read-and-write settings are the place to look |
+| **IAM.1** | HIGH ×2, Sandbox Exercise only, since 2026-10-01 01:41 | Probably guardrail-harness fixtures (full-admin policy) from overnight testing | Confirm with whoever ran the harness; fixtures should be cleaned up or the finding suppressed in Sandbox with a reason |
+| **Mediums** | 39–55 per account | Mostly baseline design: CloudFormation.3/.4 on StackSet stacks, recommended VPC endpoints (EC2.10/.55–.60), flow logs (EC2.6, B-012), KMS.2, DynamoDB.6, EC2.172, SSM.6, Account.1 (B-139's open item) | Triage once: fix, or suppress per control with a recorded reason |
+
+**Why it matters for onboarding without Jamie** — a partner opening their
+tenant's security view should see their own findings. Today every new account
+opens at CRITICAL because of how the platform itself is built.
+
+**Build when** — phase 15.6, which is already changing the Config recorder and
+building Security Hub central configuration.

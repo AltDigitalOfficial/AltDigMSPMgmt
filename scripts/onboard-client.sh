@@ -672,6 +672,12 @@ if should_run 8 monitoring-and-schedules; then
     "sync-notification-windows.sh|the incident clock's per-account notification windows"
     "sync-evidence-tenants.sh|the evidence pipeline's tenant list"
     "sync-tenant-facts.sh|tenant facts published for the alarm and digest layers"
+    # Not a map, but the same failure shape: assigned per account, from the
+    # Organizations account list, so a new account is covered only when this
+    # runs again. It said "re-run after vesting" and onboarding never did --
+    # Arc8's accounts came up (2026-10-01) with no permission set assigned to
+    # anyone, and the security function could not open them.
+    "deploy-security-access.sh|SecurityReadOnly assigned to the new accounts, so the security function can open them"
   )
   STEP7_FAILED=""
   for entry in "${SYNCS[@]}"; do
