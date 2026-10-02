@@ -2243,7 +2243,14 @@ Exercise's own artifacts bucket exists.
 parameter is gone. The live StackSet is left as it is. It is management-owned
 and due to be recreated under Infra Tooling (F-2), where the corrected
 template creates Exercise's canary fresh. Only Canary's instance needs the
-retain-and-import path. The stack instances sit at `OUTDATED` indefinitely,
+retain-and-import path.
+
+**Fixed 2026-10-02.** `platform-canary-smoke` was redeployed from the corrected
+template. `deploy-stackset.sh` kept all 19 existing parameter values
+(`UsePreviousValue`) and dropped the removed `ArtifactsBucketName`. Both
+instances are `CURRENT`. Exercise's canary is `RUNNING` and writes to its own
+account's bucket. `settle-baseline.sh` reports all 11 of Exercise's stack sets
+`CURRENT`, so the estate's one known-red instance is gone. The stack instances sit at `OUTDATED` indefinitely,
 the account looks provisioned, and the missing pieces are exactly the ones that
 make it monitored — instrumentation is how alarms get created at all.
 

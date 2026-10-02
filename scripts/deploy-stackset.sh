@@ -255,6 +255,39 @@ fi
 EXISTS="$(cfn_ss describe-stack-set --stack-set-name "${NAME}" \
   --query 'StackSet.StackSetId' --output text 2>/dev/null | no_cr || true)"
 
+# On UPDATE, keep every parameter the command line does not name.
+#
+# update-stack-set takes the parameter list as given. A template parameter the
+# stack set already has but the command line omits does not keep its value: it
+# falls back to the template default, or the update fails if there is none. So
+# a routine redeploy of platform-network, passed only the parameter being
+# changed, could reset the rest. Now each omitted parameter the stack set
+# already has goes as UsePreviousValue=true, and the run says which ones it
+# kept. Parameters the template no longer declares are left out, because
+# CloudFormation rejects unknown keys. That is how a removed parameter
+# (canary-smoke's ArtifactsBucketName, B-062) is dropped.
+if [[ -n "${EXISTS}" ]]; then
+  EXISTING_KEYS="$(cfn_ss describe-stack-set --stack-set-name "${NAME}" \
+    --query 'StackSet.Parameters[].ParameterKey' --output text | no_cr)"
+  PARAM_JSON="$(GIVEN="${PARAM_JSON:-[]}" EXISTING="${EXISTING_KEYS}" \
+    "$(command -v python || command -v python3)" - "$(win_path "${REPO_ROOT}/${TEMPLATE}")" <<'PYEOF'
+import json, os, sys
+import cfnlint.decode
+tpl, _ = cfnlint.decode.decode(sys.argv[1])
+declared = set((tpl or {}).get("Parameters", {}))
+given = json.loads(os.environ["GIVEN"] or "[]")
+named = {p["ParameterKey"] for p in given}
+existing = set(os.environ["EXISTING"].split())
+kept = sorted((declared & existing) - named)
+dropped = sorted(existing - declared)
+print(json.dumps(given + [{"ParameterKey": k, "UsePreviousValue": True} for k in kept]))
+print("kept " + (", ".join(kept) or "none") + "; no longer in the template: "
+      + (", ".join(dropped) or "none"), file=sys.stderr)
+PYEOF
+  )" || die "Could not build the parameter list for ${NAME}."
+  [[ "${PARAM_JSON}" == "[]" ]] && PARAM_JSON=""
+fi
+
 if [[ "${DRY_RUN}" == "1" ]]; then
   printf '%s DRY%s  %s stack set %s (from Infra Tooling, DELEGATED_ADMIN)\n' "${C_YELLOW}" "${C_RESET}" \
     "$([[ -n "${EXISTS}" ]] && echo update || echo create)" "${NAME}"
