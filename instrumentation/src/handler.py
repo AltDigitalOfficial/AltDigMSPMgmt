@@ -737,15 +737,18 @@ def plan_alarms(resource_type, resource_id, layer=DEFAULT_LAYER,
         # so every `digest` and `digest_and_jira` alarm paged. The same fault in
         # the event rules produced five PagerDuty incidents for a call that
         # ENABLED S3 public access blocks.
-        if pages:
-            actions = [ALERT_TOPIC_ARN] if ALERT_TOPIC_ARN else []
-            if not actions:
-                classes["pending_destination"].append(
-                    {"alarm": aid, "routing": routing, "sent_to": "nowhere",
-                     "why": "routing class pages but no alert topic is configured"})
-        else:
-            actions = []
-            classes["routed_by_router"].append({"alarm": aid, "routing": routing})
+        #
+        # D-028 (2026-10-02) removes that fallback for paging classes too. The
+        # direct copy could not apply anything the router knows at fire time --
+        # a tenant's turnup window, the layer's owner, the tenant's own service
+        # -- and one outage opened two incidents that never merged. The router
+        # is now watched instead of bypassed: errors, DLQ, throttles and an
+        # end-to-end heartbeat page directly, proved by deliberate failure on
+        # 2026-10-02. So every class reaches PagerDuty through the router.
+        # `pages` is kept in the output, so the class still says what it does.
+        actions = []
+        classes["routed_by_router"].append(
+            {"alarm": aid, "routing": routing, "pages": pages})
 
         dimension_name = type_cfg.get("dimension") or _dimension_for(resource_type)
 
