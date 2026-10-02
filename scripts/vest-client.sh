@@ -479,6 +479,29 @@ for ENVNAME in ${ENVS}; do
   bash "${REPO_ROOT}/scripts/sync-account-tiers.sh" >/dev/null \
     || die "Could not publish the tier map for ${ACCT}. Run scripts/sync-account-tiers.sh before the baseline arrives, or its findings page as prod."
   ok "registered ${ACCT} as ${ENVNAME}; router tier map published"
+
+  # Lambda concurrency (B-151). New accounts arrive with 10 concurrent
+  # executions in the home region, shared between the platform's own functions
+  # (instrumentation, response) and whatever the tenant deploys -- so a busy
+  # application can starve the platform's monitoring in its own account. Every
+  # account in the organization was found at 10 on 2026-10-02. The increase is
+  # requested here, from inside the new account, as the account is created; it
+  # is routine and approved by AWS on its own schedule. A failed request warns
+  # rather than stopping vesting: the account works at 10, and B-151's check
+  # reports any account still below 1000.
+  if ( unset AWS_PROFILE
+       CA="$(aws sts assume-role --role-arn "arn:aws:iam::${ACCT}:role/OrganizationAccountAccessRole" \
+             --role-session-name vest-lambda-quota \
+             --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text | no_cr)"
+       read -r QK QS QT <<<"${CA}"
+       export AWS_ACCESS_KEY_ID="${QK}" AWS_SECRET_ACCESS_KEY="${QS}" AWS_SESSION_TOKEN="${QT}"
+       aws service-quotas request-service-quota-increase --region "${PLATFORM_HOME_REGION}" \
+         --service-code lambda --quota-code L-B99A9384 --desired-value 1000 >/dev/null ); then
+    ok "requested Lambda concurrency 1000 for ${ACCT} (from 10)"
+  else
+    warn "Could not request the Lambda concurrency increase for ${ACCT}. It runs at 10
+      until someone does: Service Quotas, Lambda, Concurrent executions (L-B99A9384)."
+  fi
 done
 
 # ---------------------------------------------------------------------------

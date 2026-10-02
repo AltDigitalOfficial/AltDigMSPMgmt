@@ -6621,3 +6621,48 @@ Today only the Sandbox smoke canary exists, and it has run for weeks.
 **Cleanup from the test** — the throwaway alarm
 `platform-TEST-insufficient-data-delivery` in Sandbox Exercise
 (`801093629821`) has its actions disabled and can be deleted.
+
+---
+
+## B-151 · Every account had a Lambda concurrency limit of 10
+
+**Found** — 2026-10-02, by the router throttle alarm added under D-028, which
+went to ALARM within minutes of being deployed. The router in Audit had been
+throttled every hour since about 22:55 the night before (5 to 69 throttles an
+hour, against 400–1,270 invocations). Throttles are not errors, so
+`platform-router-errors` never saw them. The router DLQ was empty: every
+throttled event succeeded on retry, so nothing was lost -- but the margin was
+retries.
+
+**Cause** — the Lambda "Concurrent executions" quota (`L-B99A9384`) was **10** in
+us-east-2 in every account in the organization, management, platform,
+Sandbox and both Arc8 accounts. That is AWS's low default for new accounts. In
+Audit, the router, reconciliation, evidence pipeline and cadence sweep share
+those ten. In a tenant account the platform's instrumentation and response
+functions share them with whatever the tenant deploys.
+
+**Done 2026-10-02** — increases to 1000 requested in all ten accounts, from
+inside each account, all PENDING:
+
+| Account | Request id |
+|---|---|
+| management `738815759702` | `164c5421e91c405a991bf2e3bb917e33jWIiVIyN` |
+| Log Archive `868150784436` | `f28f2452579f476a86130223e3415dd3pE0VNybe` |
+| Infra Tooling `751479507989` | `051c1a323efa4bedaa35165872ac1185E7qQ66qO` |
+| Audit `692869638531` | `09207acc7e75495c9b57a1c66687fb8aUOiD7eok` |
+| Security Forensics `947247529132` | `ab692418df9447eeac926d99531088fe9l0dpV0T` |
+| Arc8 test `904883674541` | `b39647e2fea043e7884f45b9fd41c6ceyUbQfahJ` |
+| Arc8 dev `624606539840` | `272346d521564df88745bbb947cfe2ebMMO15bDF` |
+| Security Backup `061976161709` | `502fa5fc46f140b191322e550f7be116H0ebOeVW` |
+| Sandbox Canary `754280127660` | `f61ea4662a28499fbdabc0e102c0ee441pS7fezw` |
+| Sandbox Exercise `801093629821` | `a91ff80bfaf64414842eeec4b592ba92ww360K3K` |
+
+`vest-client.sh` now requests the same increase for every account it creates,
+straight after creation.
+
+**Still open** —
+- **Confirm the approvals** and that `platform-router-throttled` returns to OK.
+- **A standing check.** Nothing verifies the quota after the request. The
+  verification sweep should report any account below 1000 in the home region.
+- **Other regions.** us-east-1 and us-west-2 are allowed regions and still at
+  their defaults. Request when the platform first runs Lambda there.
