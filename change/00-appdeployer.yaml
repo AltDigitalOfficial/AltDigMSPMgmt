@@ -43,7 +43,47 @@ Description: >-
 # shared by every GitHub user on earth. The `sub` condition is what narrows it
 # to one tenant's repository, and this template refuses to deploy without one.
 
+# ---------------------------------------------------------------------------
+# What the pipeline may build, and what it may never do (2026-10-02)
+# ---------------------------------------------------------------------------
+# Until 2026-10-02 this role deployed compute only, and every data store,
+# queue and topic was a request to AltDigital. That was an early assumption,
+# not a compliance decision. Jamie's line, 2026-10-02: the pipeline provisions
+# pretty much anything, EXCEPT what would compromise HIPAA or SOC 2, or
+# AltDigital's ability to keep the application up.
+#
+#   granted       S3, RDS/Aurora, DynamoDB, ElastiCache, EFS, SQS, SNS,
+#                 EventBridge, CloudWatch alarms and dashboards, application
+#                 security groups, secrets and parameters -- all named for the
+#                 application, all in the approved regions
+#   compliance    unencrypted RDS, EFS or ElastiCache refused at creation;
+#                 SNS subscriptions that deliver outside AWS (email, SMS,
+#                 HTTP) refused; the account's S3 public access block is
+#                 untouchable
+#   stability     in uat and prod, data stores cannot be deleted at all
+#   not granted   IAM, beyond passing the application's own roles and the
+#                 service-linked roles AWS defines. Application roles are an
+#                 AltDigital request: "I'm not scared of a ticket queue if it
+#                 prevents us from having compliance issues or outages."
+#
+# Some compliance properties have no IAM condition key and are DETECTED by
+# Security Hub's default standards instead of refused here: RDS
+# PubliclyAccessible, PITR or backup retention switched off, a security group
+# open to the internet. That split is stated in docs/developer-guide.md rather
+# than implied away. Log retention has no check in the default standards at
+# all, and is not claimed as covered.
+
 Parameters:
+
+  AccountTier:
+    Type: String
+    Default: prod
+    AllowedValues: [test, uat, prod]
+    Description: >-
+      The tier of the account this role deploys into. In uat and prod, data
+      stores cannot be deleted by the pipeline. Defaults to prod so that a
+      forgotten parameter gets the stricter behaviour, never the looser one.
+      There is no dev value: dev changes directly and has no deploy role.
 
   ApplicationCode:
     Type: String
@@ -132,6 +172,8 @@ Parameters:
 
 Conditions:
   MakeProvider: !Equals [!Ref CreateOidcProvider, 'true']
+  # uat holds real data (design 14) and is protected as prod is.
+  ProtectData: !Not [!Equals [!Ref AccountTier, test]]
 
 Resources:
 
@@ -183,11 +225,22 @@ Resources:
               - 'ecs:*'
               - 'lambda:*'
               - 'ec2:Describe*'
+              - 'ec2:CreateSecurityGroup'
+              - 'ec2:DeleteSecurityGroup'
+              - 'ec2:AuthorizeSecurityGroupIngress'
+              - 'ec2:AuthorizeSecurityGroupEgress'
+              - 'ec2:RevokeSecurityGroupIngress'
+              - 'ec2:RevokeSecurityGroupEgress'
+              - 'ec2:ModifySecurityGroupRules'
+              - 'ec2:UpdateSecurityGroupRuleDescriptions*'
+              - 'ec2:CreateTags'
               - 'ecr:*'
               - 'logs:*'
               - 's3:*'
-              - 'rds:Describe*'
-              - 'rds:ModifyDBParameterGroup'
+              - 'rds:*'
+              - 'dynamodb:*'
+              - 'elasticache:*'
+              - 'elasticfilesystem:*'
               - 'elasticloadbalancing:*'
               - 'application-autoscaling:*'
               - 'apigateway:*'
@@ -195,16 +248,135 @@ Resources:
               - 'events:*'
               - 'sqs:*'
               - 'sns:*'
+              - 'cloudwatch:*'
               - 'ssm:GetParameter*'
-              - 'secretsmanager:GetSecretValue'
+              - 'ssm:PutParameter'
+              - 'ssm:DeleteParameter*'
+              - 'ssm:DescribeParameters'
+              - 'ssm:AddTagsToResource'
+              - 'ssm:ListTagsForResource'
+              - 'secretsmanager:*'
               - 'iam:PassRole'
+              - 'iam:CreateServiceLinkedRole'
               - 'iam:Get*'
               - 'iam:List*'
               - 'sts:GetCallerIdentity'
               - 'kms:Decrypt'
-              - 'kms:GenerateDataKey'
+              - 'kms:Encrypt'
+              - 'kms:GenerateDataKey*'
               - 'kms:DescribeKey'
+              - 'kms:CreateGrant'
             Resource: '*'
+
+          # -----------------------------------------------------------------
+          # Compliance: refused at creation, wherever a condition key exists
+          # -----------------------------------------------------------------
+          # In the boundary rather than the role's policy so that a widened
+          # role policy cannot undo them. BoolIfExists, so a request that
+          # omits the encryption flag -- CloudFormation's default for
+          # AWS::RDS::DBInstance is unencrypted -- is refused, not waved
+          # through.
+          #
+          # Aurora member instances are excluded from the RDS instance rule:
+          # their storage is the cluster's, which the cluster rule covers,
+          # and the flag may be absent on the instance request.
+          #
+          # UNPROVEN until the Sandbox case runs (B-153): how rds:
+          # StorageEncrypted and elasticache:AtRestEncryptionEnabled resolve
+          # when the request omits them. If either is absent rather than
+          # false, BoolIfExists refuses -- the safe direction -- but an
+          # encrypted request that still carries no key would also be
+          # refused, and that would be a false denial to fix.
+          - Sid: NoUnencryptedRdsCluster
+            Effect: Deny
+            Action: 'rds:CreateDBCluster'
+            Resource: '*'
+            Condition:
+              BoolIfExists:
+                'rds:StorageEncrypted': 'false'
+
+          - Sid: NoUnencryptedRdsInstance
+            Effect: Deny
+            Action: 'rds:CreateDBInstance'
+            Resource: '*'
+            Condition:
+              BoolIfExists:
+                'rds:StorageEncrypted': 'false'
+              StringNotLikeIfExists:
+                'rds:DatabaseEngine': 'aurora*'
+
+          - Sid: NoUnencryptedFileSystems
+            Effect: Deny
+            Action: 'elasticfilesystem:CreateFileSystem'
+            Resource: '*'
+            Condition:
+              BoolIfExists:
+                'elasticfilesystem:Encrypted': 'false'
+
+          - Sid: NoUnencryptedCaches
+            Effect: Deny
+            Action: 'elasticache:CreateReplicationGroup'
+            Resource: '*'
+            Condition:
+              BoolIfExists:
+                'elasticache:AtRestEncryptionEnabled': 'false'
+
+          # A subscription is how regulated data leaves the account without
+          # anything that looks like an export: an alarm or an event payload
+          # forwarded to a mailbox or a webhook. Delivery stays inside AWS
+          # (SQS, Lambda, Firehose); anything else is a reviewed change.
+          - Sid: NoSubscriptionsOutsideAws
+            Effect: Deny
+            Action: 'sns:Subscribe'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'sns:Protocol': [email, email-json, sms, http, https]
+
+          # The account-level block is what makes every bucket-level setting
+          # irrelevant, so it is the one that must never move. Bucket-level
+          # PutBucketPublicAccessBlock stays allowed: CloudFormation calls it
+          # whenever a template sets PublicAccessBlockConfiguration, including
+          # to all-true, and denying it would refuse the careful template.
+          - Sid: NeverTheAccountPublicAccessBlock
+            Effect: Deny
+            Action: 's3:PutAccountPublicAccessBlock'
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # Stability: in uat and prod, data stores are never deleted
+          # -----------------------------------------------------------------
+          # The failure this exists for is not a malicious delete. It is a
+          # one-line template change that makes CloudFormation REPLACE a
+          # database -- create a new one, then delete the old -- with every
+          # permission check passing. With this deny the delete fails; the
+          # data survives, and the stack reports the cleanup failure.
+          #
+          # It does not stop the stack pointing at the NEW, empty resource.
+          # Only an explicit resource name does that (CloudFormation refuses
+          # to replace a custom-named resource), which is why the developer
+          # guide tells people to name their data stores. A deliberate
+          # deletion in uat or prod is an AltDigital change.
+          - !If
+            - ProtectData
+            - Sid: NeverDeleteDataInProduction
+              Effect: Deny
+              Action:
+                - 'rds:DeleteDBInstance'
+                - 'rds:DeleteDBCluster'
+                - 'rds:DeleteDBSnapshot'
+                - 'rds:DeleteDBClusterSnapshot'
+                - 'dynamodb:DeleteTable'
+                - 'dynamodb:DeleteBackup'
+                - 's3:DeleteBucket'
+                - 'elasticache:DeleteReplicationGroup'
+                - 'elasticache:DeleteCacheCluster'
+                - 'elasticache:DeleteServerlessCache'
+                - 'elasticfilesystem:DeleteFileSystem'
+                - 'sqs:DeleteQueue'
+                - 'secretsmanager:DeleteSecret'
+              Resource: '*'
+            - !Ref AWS::NoValue
 
           - Sid: NeverTouchPlatformManagedResources
             Effect: Deny
@@ -425,14 +597,232 @@ Resources:
             # that role. Narrowed to roles named for this application.
             Action: 'iam:PassRole'
             Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ApplicationCode}-*'
-          - Sid: ReadConfigurationAndSecretsItOwns
+          # Parameters and secrets as IaC. The pipeline creates the secret
+          # RESOURCE -- with a generated value (GenerateSecretString), or
+          # empty for a SecretsCustodian to fill -- and never carries a
+          # third-party value itself: that would put it in the repository.
+          - Sid: ConfigurationItOwns
             Effect: Allow
-            Action: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath']
+            Action:
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'ssm:PutParameter'
+              - 'ssm:DeleteParameter'
+              - 'ssm:AddTagsToResource'
+              - 'ssm:ListTagsForResource'
             Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ApplicationCode}/*'
-          - Sid: SecretsForItsOwnApplication
+          - Sid: SecretsItOwns
             Effect: Allow
-            Action: 'secretsmanager:GetSecretValue'
+            Action:
+              - 'secretsmanager:CreateSecret'
+              - 'secretsmanager:DescribeSecret'
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:PutSecretValue'
+              - 'secretsmanager:UpdateSecret'
+              - 'secretsmanager:TagResource'
+              - 'secretsmanager:UntagResource'
+              - 'secretsmanager:RotateSecret'
+              - 'secretsmanager:DeleteSecret'
             Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationCode}/*'
+          # RDS ManageMasterUserPassword creates its own secret, named rds!...,
+          # with the caller's permissions. Without this an RDS template using
+          # the managed password -- the right way to do it -- fails.
+          - Sid: SecretsRdsManagesForIt
+            Effect: Allow
+            Action:
+              - 'secretsmanager:CreateSecret'
+              - 'secretsmanager:TagResource'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!*'
+          - Sid: SecretsAndParametersDiscovery
+            Effect: Allow
+            Action:
+              - 'secretsmanager:ListSecrets'
+              - 'secretsmanager:GetRandomPassword'
+              - 'ssm:DescribeParameters'
+            Resource: '*'
+          # The platform key, or a tenant key. A secret created with neither
+          # lands on aws/secretsmanager, which platform-secret-uses-cmk flags.
+          - Sid: SecretsUseACustomerManagedKey
+            Effect: Deny
+            Action: 'secretsmanager:CreateSecret'
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationCode}/*'
+            Condition:
+              'Null':
+                'secretsmanager:KmsKeyArn': 'true'
+
+          # -----------------------------------------------------------------
+          # Data stores and messaging, named for the application (2026-10-02)
+          # -----------------------------------------------------------------
+          # Name-scoped for the reason the stacks are: two applications in one
+          # account cannot reach each other's data. CloudFormation's generated
+          # names begin with the stack name, which begins with the
+          # application code, so unnamed resources in an ${ApplicationCode}-*
+          # stack pass too.
+          - Sid: DataStoresNamedForTheApplication
+            Effect: Allow
+            Action:
+              - 's3:*'
+              - 'dynamodb:*'
+              - 'sqs:*'
+              - 'sns:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:s3:::${ApplicationCode}-*/*'
+              - !Sub 'arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:sns:*:${AWS::AccountId}:${ApplicationCode}-*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': !Ref AllowedRegions
+
+          # RDS ARNs carry the resource TYPE and its name, and a create call
+          # touches several -- the instance, its subnet group, its parameter
+          # and option groups. The AWS default groups are named default.*, so
+          # they are allowed for reference; the application's own are named
+          # for it.
+          - Sid: RelationalDatabasesNamedForTheApplication
+            Effect: Allow
+            Action: 'rds:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:subgrp:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:pg:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-pg:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:og:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:snapshot:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-snapshot:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:pg:default*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-pg:default*'
+              - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:og:default*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': !Ref AllowedRegions
+
+          - Sid: CachesNamedForTheApplication
+            Effect: Allow
+            Action: 'elasticache:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:cluster:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:replicationgroup:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:serverlesscache:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:subnetgroup:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:parametergroup:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:parametergroup:default*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': !Ref AllowedRegions
+
+          # EFS ARNs carry a generated id, not a name, so EFS is scoped by the
+          # Application tag instead: created carrying it, touched only when
+          # carrying it. SCP 04 does not cover EFS, so this is the only thing
+          # requiring the tag.
+          - Sid: FileSystemsCreatedForTheApplication
+            Effect: Allow
+            Action: ['elasticfilesystem:CreateFileSystem', 'elasticfilesystem:TagResource']
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Application': !Ref ApplicationCode
+                'aws:RequestedRegion': !Ref AllowedRegions
+          - Sid: FileSystemsTaggedForTheApplication
+            Effect: Allow
+            Action: 'elasticfilesystem:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Application': !Ref ApplicationCode
+
+          - Sid: EventsAndAlarmsNamedForTheApplication
+            Effect: Allow
+            Action: ['events:*', 'cloudwatch:*']
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:events:*:${AWS::AccountId}:rule/${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:events:*:${AWS::AccountId}:event-bus/${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:cloudwatch:*:${AWS::AccountId}:alarm:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/${ApplicationCode}-*'
+          - Sid: MetricsHaveNoResource
+            Effect: Allow
+            Action: ['cloudwatch:PutMetricData', 'cloudwatch:GetMetric*', 'cloudwatch:ListMetrics', 'cloudwatch:Describe*']
+            Resource: '*'
+
+          # Security groups for the application's own resources, inside the
+          # baseline VPC. Created carrying the Application tag, changed only
+          # while carrying it. The baseline's groups are tagged
+          # platform-managed and SCP 07 protects them whatever this says.
+          # A database group opened to 0.0.0.0/0 is not refusable by IAM and
+          # is a Security Hub finding instead.
+          - Sid: SecurityGroupsCreatedForTheApplication
+            Effect: Allow
+            Action: 'ec2:CreateSecurityGroup'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:vpc/*'
+              - !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': !Ref AllowedRegions
+          - Sid: TagSecurityGroupsOnlyAsTheyAreCreated
+            Effect: Allow
+            Action: 'ec2:CreateTags'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*'
+            Condition:
+              StringEquals:
+                'ec2:CreateAction': CreateSecurityGroup
+          - Sid: SecurityGroupsTaggedForTheApplication
+            Effect: Allow
+            Action:
+              - 'ec2:DeleteSecurityGroup'
+              - 'ec2:AuthorizeSecurityGroupIngress'
+              - 'ec2:AuthorizeSecurityGroupEgress'
+              - 'ec2:RevokeSecurityGroupIngress'
+              - 'ec2:RevokeSecurityGroupEgress'
+              - 'ec2:ModifySecurityGroupRules'
+              - 'ec2:UpdateSecurityGroupRuleDescriptions*'
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Application': !Ref ApplicationCode
+          - Sid: SeeTheNetworkItDeploysInto
+            Effect: Allow
+            Action: 'ec2:Describe*'
+            Resource: '*'
+
+          # Encryption with the platform keys. CreateGrant is how RDS, EFS,
+          # ElastiCache and DynamoDB take a CMK on the caller's behalf, and
+          # GrantIsForAWSResource keeps the grant usable by the service only.
+          # Key administration stays denied by SCP 02 whatever this says.
+          - Sid: UseKeysThroughTheServices
+            Effect: Allow
+            Action: ['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey*', 'kms:DescribeKey']
+            Resource: '*'
+          - Sid: GrantKeysToServicesOnly
+            Effect: Allow
+            Action: 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              Bool:
+                'kms:GrantIsForAWSResource': 'true'
+
+          # Service-linked roles are defined by AWS, not by the tenant: their
+          # permissions are fixed and cannot be widened, so creating one is
+          # not the IAM authority Jamie kept back. Each data service creates
+          # its own on first use in an account, and without this the FIRST
+          # RDS or ElastiCache deploy in a fresh account fails on IAM.
+          - Sid: ServiceLinkedRolesOnly
+            Effect: Allow
+            Action: 'iam:CreateServiceLinkedRole'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'iam:AWSServiceName':
+                  - rds.amazonaws.com
+                  - elasticache.amazonaws.com
+                  - elasticfilesystem.amazonaws.com
+                  - ecs.amazonaws.com
+                  - elasticloadbalancing.amazonaws.com
+                  - dynamodb.application-autoscaling.amazonaws.com
+                  - ecs.application-autoscaling.amazonaws.com
           - Sid: KnowWhoItIs
             Effect: Allow
             # sts:GetCallerIdentity is how a pipeline proves which role it

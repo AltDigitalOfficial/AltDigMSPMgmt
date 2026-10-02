@@ -2,9 +2,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 
 Description: >-
   AltDigital Managed Platform — tenant permission sets (prompt 10.1). design
-  11's Layer 3: three developer grants across the environment gradient, and
-  one read-only oversight grant that spans it. Deployed to the Identity Center
-  delegated administrator.
+  11's Layer 3: three developer grants across the environment gradient, one
+  read-only oversight grant that spans it, and one write-only secrets grant
+  for the environments developers cannot write to. Deployed to the Identity
+  Center delegated administrator.
 
 # ---------------------------------------------------------------------------
 # Four sets in one template, because the GRADIENT is the thing being reviewed
@@ -797,6 +798,211 @@ Resources:
               - 'kms:ReEncryptFrom'
             Resource: '*'
 
+  # =========================================================================
+  # secrets custodian — write secret values, never read them
+  # =========================================================================
+  # The gap this closes: in test, uat and prod a developer cannot create a
+  # secret or read one, and the pipeline can only read. So a third-party API
+  # key had nowhere to come from except an AltDigital operator pasting it into
+  # the console -- a person in every release, and no record of who set what.
+  #
+  # Generated secrets (database passwords, signing keys) do not need this:
+  # CloudFormation's GenerateSecretString and RDS ManageMasterUserPassword
+  # create them inside AWS, and nobody ever holds the value. This set is for
+  # the values that originate OUTSIDE AWS -- a payment provider's key, a
+  # carrier API token -- which some human has to type once.
+  #
+  # Considered instead: GitHub environment secrets, written by the pipeline
+  # with PutSecretValue. Rejected because it makes GitHub a second store of
+  # every production key, outside this platform's evidence and its KMS keys.
+  # One store, and a named human writing to it, is the simpler audit story.
+  #
+  # ---------------------------------------------------------------------------
+  # Write-only, and that is the whole design
+  # ---------------------------------------------------------------------------
+  # The custodian can create a secret, put a new value and rotate it. They can
+  # never read a value back -- not one they wrote, not anybody else's. Somebody
+  # who sets the production payment key does not thereby gain a way to read
+  # it next month, and a compromised custodian session can replace a secret
+  # (loud: the application breaks, and CloudTrail names the session) but not
+  # quietly exfiltrate one.
+  #
+  # ---------------------------------------------------------------------------
+  # Scope: the account, not the application name
+  # ---------------------------------------------------------------------------
+  # A permission set is one object shared by every tenant, so it cannot name a
+  # tenant's application prefix. The account boundary does that instead: the
+  # set is only ever assigned to one tenant's accounts. What it must never
+  # touch inside those accounts is the platform's own secrets, all named
+  # platform/... (PagerDuty routing keys, Jira and Truveon credentials), and
+  # the platform's parameters under /platform/. Both are denied by name.
+  #
+  # No deletion, anywhere. Deleting a production secret is an outage, and the
+  # set cannot tell prod from test -- tier is not visible to a permission set.
+  # Deletion is an AltDigital change. Jamie, 2026-10-02: a ticket queue is an
+  # acceptable price for not causing outages.
+  #
+  # Every write is a CloudTrail event naming the custodian. Change
+  # reconciliation does not yet count PutSecretValue as a deployment -- B-152.
+
+  SecretsCustodianPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: SecretsCustodian
+      Description: >-
+        Create, update and rotate application secrets and parameters in test,
+        uat and prod. Write-only: no value can be read back. No deletion. No
+        access to platform/ secrets or /platform/ parameters.
+      InstanceArn: !Ref InstanceArn
+      # One hour. This set writes production credentials; it is used for a
+      # few minutes at a time and should not outlive the task.
+      SessionDuration: PT1H
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+
+          - Sid: SeeWhatExists
+            Effect: Allow
+            Action:
+              - 'secretsmanager:ListSecrets'
+              - 'secretsmanager:DescribeSecret'
+              - 'secretsmanager:ListSecretVersionIds'
+              - 'secretsmanager:GetRandomPassword'
+              - 'ssm:DescribeParameters'
+              - 'kms:ListAliases'
+              - 'kms:DescribeKey'
+              - 'sts:GetCallerIdentity'
+            Resource: '*'
+
+          - Sid: WriteSecrets
+            Effect: Allow
+            Action:
+              - 'secretsmanager:CreateSecret'
+              - 'secretsmanager:PutSecretValue'
+              - 'secretsmanager:UpdateSecret'
+              - 'secretsmanager:UpdateSecretVersionStage'
+              - 'secretsmanager:RotateSecret'
+              - 'secretsmanager:CancelRotateSecret'
+              - 'secretsmanager:RestoreSecret'
+              - 'secretsmanager:TagResource'
+            Resource: '*'
+
+          - Sid: WriteParameters
+            Effect: Allow
+            Action:
+              - 'ssm:PutParameter'
+              - 'ssm:LabelParameterVersion'
+              - 'ssm:AddTagsToResource'
+            Resource: '*'
+
+          # Encrypting a value needs the key; reading one back would need
+          # Decrypt through GetSecretValue, which is denied below. ViaService
+          # keeps the grant from being usable directly against KMS.
+          - Sid: EncryptThroughTheServicesOnly
+            Effect: Allow
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:Decrypt'
+            Resource: '*'
+            Condition:
+              StringLike:
+                'kms:ViaService':
+                  - 'secretsmanager.*.amazonaws.com'
+                  - 'ssm.*.amazonaws.com'
+
+          # The write-only property. Denied explicitly as well as not granted,
+          # so a second policy attached to this set later cannot undo it.
+          # GetParameterHistory returns values too, which is easy to miss.
+          - Sid: NeverReadAValue
+            Effect: Deny
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:BatchGetSecretValue'
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'ssm:GetParameterHistory'
+            Resource: '*'
+
+          # A resource policy can grant another account read access, and
+          # replication copies the value somewhere this account's controls do
+          # not reach. Deletion is the outage case in the header.
+          - Sid: NeverWidenMoveOrDelete
+            Effect: Deny
+            Action:
+              - 'secretsmanager:DeleteSecret'
+              - 'secretsmanager:PutResourcePolicy'
+              - 'secretsmanager:DeleteResourcePolicy'
+              - 'secretsmanager:ReplicateSecretToRegions'
+              - 'secretsmanager:RemoveRegionsFromReplication'
+              - 'secretsmanager:StopReplicationToReplica'
+              - 'secretsmanager:UntagResource'
+              - 'ssm:DeleteParameter'
+              - 'ssm:DeleteParameters'
+              - 'ssm:RemoveTagsFromResource'
+            Resource: '*'
+
+          - Sid: NeverThePlatformsOwn
+            Effect: Deny
+            Action:
+              - 'secretsmanager:*'
+              - 'ssm:*'
+            Resource:
+              - 'arn:aws:secretsmanager:*:*:secret:platform/*'
+              - 'arn:aws:ssm:*:*:parameter/platform/*'
+
+          # The platform secrets key, or a tenant key -- never the AWS-managed
+          # aws/secretsmanager key, which platform-secret-uses-cmk flags and
+          # which cannot carry the quorum deny. Refused at creation rather than
+          # found later.
+          - Sid: SecretsUseACustomerManagedKey
+            Effect: Deny
+            Action: 'secretsmanager:CreateSecret'
+            Resource: '*'
+            Condition:
+              'Null':
+                'secretsmanager:KmsKeyArn': 'true'
+
+          # Same reasoning as DeveloperDev's pair: this set writes the
+          # application layer and must not claim or relabel the other one.
+          - Sid: NeverClaimTheInfrastructureLayer
+            Effect: Deny
+            Action: '*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/platform-layer': infrastructure
+
+          # Fail closed, as TenantReadOnly does: anything outside the actions
+          # above is denied whatever else is ever attached to this set.
+          - Sid: NothingElse
+            Effect: Deny
+            NotAction:
+              - 'secretsmanager:ListSecrets'
+              - 'secretsmanager:DescribeSecret'
+              - 'secretsmanager:ListSecretVersionIds'
+              - 'secretsmanager:GetRandomPassword'
+              - 'secretsmanager:CreateSecret'
+              - 'secretsmanager:PutSecretValue'
+              - 'secretsmanager:UpdateSecret'
+              - 'secretsmanager:UpdateSecretVersionStage'
+              - 'secretsmanager:RotateSecret'
+              - 'secretsmanager:CancelRotateSecret'
+              - 'secretsmanager:RestoreSecret'
+              - 'secretsmanager:TagResource'
+              - 'ssm:DescribeParameters'
+              - 'ssm:PutParameter'
+              - 'ssm:LabelParameterVersion'
+              - 'ssm:AddTagsToResource'
+              - 'kms:ListAliases'
+              - 'kms:DescribeKey'
+              - 'kms:Encrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:Decrypt'
+              - 'sts:GetCallerIdentity'
+            Resource: '*'
+
   # Published so provisioning (phase 12) can assign these without being told
   # the ARNs. identity/00-commercial-readonly.yaml does the same.
   DevArnParam:
@@ -827,6 +1033,13 @@ Resources:
       Type: String
       Value: !GetAtt TenantReadOnlyPermissionSet.PermissionSetArn
 
+  SecretsCustodianArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/secrets-custodian'
+      Type: String
+      Value: !GetAtt SecretsCustodianPermissionSet.PermissionSetArn
+
 Outputs:
 
   DeveloperDevArn:
@@ -844,3 +1057,7 @@ Outputs:
   TenantReadOnlyArn:
     Description: oversight grant, every environment. Read and observe.
     Value: !GetAtt TenantReadOnlyPermissionSet.PermissionSetArn
+
+  SecretsCustodianArn:
+    Description: secrets grant, test/uat/prod. Write values, never read them.
+    Value: !GetAtt SecretsCustodianPermissionSet.PermissionSetArn

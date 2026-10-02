@@ -3,8 +3,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   AltDigital Managed Platform — per-tenant access assignments. Binds one
   developer group per member account to the permission set design 11's
-  gradient calls for, and one read-only oversight group to every account.
-  One stack per tenant, deployed by scripts/grant-developer-access.sh.
+  gradient calls for, one read-only oversight group to every account, and an
+  optional secrets custodian group to every account except dev. One stack per
+  tenant, deployed by scripts/grant-developer-access.sh.
 
 # ---------------------------------------------------------------------------
 # One group per ACCOUNT, and that is the whole idea
@@ -135,6 +136,20 @@ Parameters:
     AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     ConstraintDescription: Must be an identity store group id (UUID form).
 
+  # The second cross-account group, and the mirror image of the read-only one:
+  # it reaches every account EXCEPT dev. Developers already write secrets in
+  # dev with DeveloperDev, so a custodian grant there would be a second path to
+  # the same thing. Optional, because a tenant may have no third-party secrets
+  # yet, and an empty group bound to production is access nobody asked for.
+  SecretsGroupId:
+    Type: String
+    Default: ''
+    Description: >-
+      Identity store group id for the tenant's secrets custodians, or empty
+      where none are named. Bound to SecretsCustodian in test, uat and prod.
+    AllowedPattern: '^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ConstraintDescription: Must be an identity store group id, or empty.
+
   UatGroupId:
     Type: String
     Default: ''
@@ -201,6 +216,15 @@ Parameters:
     Description: >-
       Published by identity/10-developer-access.yaml. Every environment.
 
+  # Resolved even when SecretsGroupId is empty -- CloudFormation resolves every
+  # SSM-typed parameter -- so identity/10-developer-access.yaml must be
+  # redeployed before any tenant's assignment stack is next updated.
+  SecretsCustodianArn:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: /platform/identity/permission-set/secrets-custodian
+    Description: >-
+      Published by identity/10-developer-access.yaml. Test, uat and prod.
+
 Conditions:
 
   # A pair, for the reason HasUat gives below.
@@ -215,6 +239,10 @@ Conditions:
   HasUat: !And
     - !Not [!Equals [!Ref UatGroupId, '']]
     - !Not [!Equals [!Ref UatAccountId, '']]
+
+  HasSecrets: !Not [!Equals [!Ref SecretsGroupId, '']]
+  HasSecretsProd: !And [!Condition HasSecrets, !Condition HasProd]
+  HasSecretsUat: !And [!Condition HasSecrets, !Condition HasUat]
 
 Resources:
 
@@ -330,6 +358,45 @@ Resources:
       TargetType: AWS_ACCOUNT
       TargetId: !Ref UatAccountId
 
+  # =========================================================================
+  # secrets custodians — every account except dev
+  # =========================================================================
+  # Conditioned on the same HasProd and HasUat pairs as the developer groups,
+  # so a custodian never reaches an account the tenant does not have yet.
+
+  TestSecretsAssignment:
+    Type: AWS::SSO::Assignment
+    Condition: HasSecrets
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref SecretsCustodianArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref SecretsGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref TestAccountId
+
+  ProdSecretsAssignment:
+    Type: AWS::SSO::Assignment
+    Condition: HasSecretsProd
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref SecretsCustodianArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref SecretsGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref ProdAccountId
+
+  UatSecretsAssignment:
+    Type: AWS::SSO::Assignment
+    Condition: HasSecretsUat
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !Ref SecretsCustodianArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref SecretsGroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref UatAccountId
+
 Outputs:
 
   Tenant:
@@ -347,6 +414,10 @@ Outputs:
       Whether a UAT assignment was created. Explicit because its absence is a
       legitimate state and reads identically to a failure otherwise.
     Value: !If [HasUat, 'true', 'false']
+
+  SecretsAssigned:
+    Description: Whether a secrets custodian group is bound. False where none is named.
+    Value: !If [HasSecrets, 'true', 'false']
 
   GrantSummary:
     Description: Which permission set each environment received.

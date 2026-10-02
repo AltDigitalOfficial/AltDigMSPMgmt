@@ -6666,3 +6666,74 @@ straight after creation.
   verification sweep should report any account below 1000 in the home region.
 - **Other regions.** us-east-1 and us-west-2 are allowed regions and still at
   their defaults. Request when the platform first runs Lambda there.
+
+---
+
+## B-152 · A secret written by hand in prod is a change nothing reconciles
+
+**Open** — 2026-10-02. Created with the `SecretsCustodian` permission set
+(identity/10-developer-access.yaml).
+
+A custodian's `PutSecretValue` in prod replaces a credential the application
+is using. That is a production change, and an outage if the value is wrong.
+CloudTrail records it and names the custodian, but `change/src/reconcile.py`'s
+`DEPLOYMENT_EVENTS` does not include it, so there is no change-record match,
+no finding and no evidence row.
+
+**Fix** — add `secretsmanager:PutSecretValue`, `UpdateSecret`,
+`RotateSecret` and `ssm:PutParameter` against the application's prefixes to
+the captured deployment events, matched by account and time like any other
+deployment. Platform-prefixed names stay excluded: those are AltDigital's and
+reconcile against the ops project.
+
+**Trigger** — the first custodian is put in the group for a tenant that has
+prod. Until then nobody holds the set where it matters.
+
+## B-153 · The deploy role's encryption denies are written and not proven
+
+**Open** — 2026-10-02. `change/00-appdeployer.yaml` refuses unencrypted RDS,
+EFS and ElastiCache, conditioned on `rds:StorageEncrypted`,
+`elasticfilesystem:Encrypted` and `elasticache:AtRestEncryptionEnabled` with
+`BoolIfExists`.
+
+What is not known: how each key resolves when the request OMITS the flag.
+If it is absent, `BoolIfExists` refuses, which is the safe direction. But if
+an encrypted request also arrives without the key (for example, encryption
+inherited from a snapshot or a cluster), the result is a false denial of a
+compliant deploy. The same question applies to `secretsmanager:KmsKeyArn`
+when a key is named by alias rather than ARN, on both the deploy role and
+`SecretsCustodian`.
+
+**Fix** — a Sandbox case in the shape of `scripts/test-tag-on-create.sh`:
+a clone of the boundary on an ordinary role (`test-guardrails.sh`'s
+`APP_CLONE` pattern), then create calls with the flag true, false and
+omitted, plus `create-secret --kms-key-id alias/platform-secrets`. A denied
+create costs nothing. The permitted RDS case is the only one with a cost, and
+it can use the smallest instance class, deleted at once.
+
+**Trigger** — before `TenantAppDeployer-arc8` is deployed with this template.
+Blocks Arc8's first data store.
+
+## B-154 · Nothing stops a dev developer touching a platform secret, if one ever lands there
+
+**Latent** — 2026-10-02. Found while scoping `SecretsCustodian`, which denies
+`secret:platform/*` by name.
+
+`DeveloperDev` is PowerUserAccess. SCP 08 protects `/platform/` *parameters*,
+but no SCP covers Secrets Manager. A `platform/...` secret in a dev account
+could be read, overwritten or deleted by any developer. The developer boundary
+does not help: it bounds the roles developers create, not developers
+themselves.
+
+**Why it is latent, not live** — no platform secret is held in a member
+account. The PagerDuty routing key lives once, in Audit, on purpose
+(`scripts/sync-pagerduty-secrets.sh` explains why), and `list-secrets` in Arc8
+dev on 2026-10-02 returned nothing at all.
+
+**Fix, when triggered** — add `secretsmanager:*` on
+`arn:aws:secretsmanager:*:*:secret:platform/*` to SCP 08, beside
+`ProtectPlatformParameters`, with the writing role exempt, plus a harness case.
+
+**Trigger** — the first design that places a `platform/` secret in a member
+account. Whoever writes that template adds the SCP statement in the same
+change.

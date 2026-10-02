@@ -110,6 +110,24 @@
           "aws:ResourceTag/platform-managed": "true"
         }
       }
+    },
+    {
+      "Sid": "ProtectAccountPublicAccessBlock",
+      "Effect": "Deny",
+      "Action": [
+        "s3:PutAccountPublicAccessBlock"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:iam::*:role/stacksets-exec-*",
+            "arn:aws:iam::*:role/PlatformDeployer",
+            "arn:aws:iam::*:role/PlatformQuorumExecutor"
+          ]
+        }
+      }
     }
   ]
 }

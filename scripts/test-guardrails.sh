@@ -942,6 +942,14 @@ if [[ ${VAULT_OK} -eq 1 ]]; then
     aws backup delete-backup-vault --backup-vault-name "${VAULT_NAME}"
 fi
 
+# Writes the all-true block apply-account-settings.sh already sets, so the
+# call is harmless whether or not the guardrail holds: the account's real
+# exposure cannot change. The account-level setting is real, so `real` holds.
+check 02 ProtectAccountPublicAccessBlock "s3:PutAccountPublicAccessBlock" real -- \
+  aws s3control put-public-access-block --account-id "${TARGET_ACCOUNT}" \
+    --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
 # The critical one. If this fails, a member administrator can name their way
 # out of every wildcard exclusion in policies 01 and 02, and the whole set is
 # decorative. No differential: the probe is itself excluded here.
