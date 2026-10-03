@@ -6757,3 +6757,42 @@ dev on 2026-10-02 returned nothing at all.
 **Trigger** — the first design that places a `platform/` secret in a member
 account. Whoever writes that template adds the SCP statement in the same
 change.
+
+---
+
+## B-155 · The digest is sending, and SES's sandbox will refuse the dev manager
+
+**Built 2026-10-03.** `platform-digest` (Infra Tooling) runs the 10-01 code,
+which sends to the client's `dev_manager` and falls back to `tech_contact`.
+It was the 09-18 package until today. `DigestSender=platform@altdigital.ai`,
+so it is in sending mode for the first time, and `DigestCc` is Jamie.
+
+**The CC is Jamie, for now (Jamie, 2026-10-02).** It has two jobs: keep tabs on
+Arc8 during turnup, and vet the digest's usability together with Wayne.
+Design 06 intends the CC to be an AltDigital address, so a bounce or a departed
+contact is visible to us. A person serves that today; a person stops being
+the right answer once there is more than one tenant. *Trigger:* the second
+tenant vests, or Jamie says the digest is settled. Then move `DigestCc` to a
+shared ops mailbox.
+
+**What still stops Wayne receiving it.** SES in Tooling is in the sandbox
+(B-028: `ProductionAccessEnabled false`, 200 a day). The sandbox delivers
+only to verified identities. `altdigital.ai` is verified, so the CC can
+arrive. The dev manager's OEight address is not, and SES rejects a message if
+any recipient is unverified. So the first scheduled run (Mon 2026-10-05,
+13:00Z) fails for Arc8, CC included, and is recorded as `failed`. Two ways
+out:
+- verify the one address: AWS emails a link, and Wayne clicks it. Fast, but it
+  does not scale to a client's staff (B-028's own objection);
+- the B-028 production-access request, which is the real fix.
+
+**Nobody is subscribed to `platform-digest-bounces`.** The template creates
+the topic and the SES event destination, but nothing listens. A bounce is
+published to a topic with zero subscribers, which is design 06's "rotted
+contact, invisible" case one hop later. It should route through the central
+router like every other platform event, not to an inbox. *Trigger:* before
+SES leaves the sandbox, because that is when sends to unverified client
+addresses, and therefore real bounces, begin.
+
+**Unconfirmed:** whether `platform@altdigital.ai` is a mailbox anyone reads.
+Replies to the digest go there.
