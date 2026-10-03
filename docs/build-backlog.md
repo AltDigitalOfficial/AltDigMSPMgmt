@@ -6818,10 +6818,12 @@ out:
 - the B-028 production-access request, which is the real fix. Submitted
   2026-10-03, review pending.
 
-**Interim, 2026-10-03:** SES email identities created in Tooling for
-Jamie's and Wayne's OEight addresses (tagged `purpose=digest-sandbox-recipient`),
-so the digest can be delivered before production access clears. Each is
-verified only once its owner clicks AWS's link. *Remove them* when production
+**Interim, 2026-10-03:** an SES email identity created in Tooling for
+Wayne's OEight address (tagged `purpose=digest-sandbox-recipient`), so the
+digest can be delivered before production access clears. It is verified only
+once he clicks AWS's link. One for Jamie's OEight address was created and
+deleted the same day: the CC stays on his AltDigital address (Jamie,
+2026-10-03), which the verified domain already covers. *Remove it* when production
 access is granted. Verified recipient identities are a sandbox workaround,
 and keeping them would hide which recipients the account can reach on its own.
 
