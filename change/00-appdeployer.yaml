@@ -281,12 +281,12 @@ Resources:
           # their storage is the cluster's, which the cluster rule covers,
           # and the flag may be absent on the instance request.
           #
-          # UNPROVEN until the Sandbox case runs (B-153): how rds:
-          # StorageEncrypted and elasticache:AtRestEncryptionEnabled resolve
-          # when the request omits them. If either is absent rather than
-          # false, BoolIfExists refuses -- the safe direction -- but an
-          # encrypted request that still carries no key would also be
-          # refused, and that would be a false denial to fix.
+          # PROVEN 2026-10-02 in Sandbox Canary by
+          # scripts/test-deployer-conditions.sh (B-153). For RDS instances,
+          # Aurora clusters, EFS and ElastiCache: flag omitted is refused,
+          # flag false is refused, flag true is authorized. An Aurora member
+          # instance with no flag is authorized. Re-run that script after any
+          # change to these statements.
           - Sid: NoUnencryptedRdsCluster
             Effect: Deny
             Action: 'rds:CreateDBCluster'
@@ -313,10 +313,17 @@ Resources:
               BoolIfExists:
                 'elasticfilesystem:Encrypted': 'false'
 
+          # Resource-scoped, unlike the others, and not by choice.
+          # CreateReplicationGroup is authorized against several resources
+          # -- the replication group, and its parameter, subnet and user
+          # groups -- and the encryption key is only present on the
+          # replication group. Against Resource '*', BoolIfExists met the
+          # parameter group's evaluation with no key, and refused an
+          # encrypted request (observed 2026-10-02, B-153).
           - Sid: NoUnencryptedCaches
             Effect: Deny
             Action: 'elasticache:CreateReplicationGroup'
-            Resource: '*'
+            Resource: !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:replicationgroup:*'
             Condition:
               BoolIfExists:
                 'elasticache:AtRestEncryptionEnabled': 'false'
@@ -700,6 +707,16 @@ Resources:
               StringEquals:
                 'aws:RequestedRegion': !Ref AllowedRegions
 
+          # The caches themselves are name-scoped. Their supporting resources
+          # are not, and cannot be: when a template leaves the parameter
+          # group, subnet group or user group to its default, ElastiCache
+          # authorizes the create against the WILDCARD ARN
+          # (parametergroup:*), not against default.redis7. Observed
+          # 2026-10-02 by scripts/test-deployer-conditions.sh: a compliant,
+          # encrypted CreateReplicationGroup was refused on
+          # parametergroup:* until this was widened (B-153). The wildcard is
+          # within this one account, and an account belongs to one
+          # application, so it reaches nobody else's cache configuration.
           - Sid: CachesNamedForTheApplication
             Effect: Allow
             Action: 'elasticache:*'
@@ -707,9 +724,11 @@ Resources:
               - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:cluster:${ApplicationCode}-*'
               - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:replicationgroup:${ApplicationCode}-*'
               - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:serverlesscache:${ApplicationCode}-*'
-              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:subnetgroup:${ApplicationCode}-*'
-              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:parametergroup:${ApplicationCode}-*'
-              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:parametergroup:default*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:snapshot:${ApplicationCode}-*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:subnetgroup:*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:parametergroup:*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:usergroup:*'
+              - !Sub 'arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:user:*'
             Condition:
               StringEquals:
                 'aws:RequestedRegion': !Ref AllowedRegions

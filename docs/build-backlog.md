@@ -6711,28 +6711,49 @@ prod. Until then nobody holds the set where it matters.
 
 ## B-153 · The deploy role's encryption denies are written and not proven
 
-**Open** — 2026-10-02. `change/00-appdeployer.yaml` refuses unencrypted RDS,
-EFS and ElastiCache, conditioned on `rds:StorageEncrypted`,
-`elasticfilesystem:Encrypted` and `elasticache:AtRestEncryptionEnabled` with
-`BoolIfExists`.
+**Closed 2026-10-02.** Proven in Sandbox Canary by
+`scripts/test-deployer-conditions.sh`, 23 passed and 0 failed, against
+`TenantAppDeployer-demo` redeployed from the current template with
+`AccountTier=prod`. The real role trusts GitHub OIDC only, so the subject was
+a clone carrying its boundary and its `Deploy` policy, removed afterwards.
 
-What is not known: how each key resolves when the request OMITS the flag.
-If it is absent, `BoolIfExists` refuses, which is the safe direction. But if
-an encrypted request also arrives without the key (for example, encryption
-inherited from a snapshot or a cluster), the result is a false denial of a
-compliant deploy. The same question applies to `secretsmanager:KmsKeyArn`
-when a key is named by alias rather than ARN, on both the deploy role and
-`SecretsCustodian`.
+**The question it asked:** how each encryption key resolves when a request
+omits the flag. Answered:
 
-**Fix** — a Sandbox case in the shape of `scripts/test-tag-on-create.sh`:
-a clone of the boundary on an ordinary role (`test-guardrails.sh`'s
-`APP_CLONE` pattern), then create calls with the flag true, false and
-omitted, plus `create-secret --kms-key-id alias/platform-secrets`. A denied
-create costs nothing. The permitted RDS case is the only one with a cost, and
-it can use the smallest instance class, deleted at once.
+| Create | flag omitted | false | true |
+|---|---|---|---|
+| RDS instance | refused | refused | authorized |
+| Aurora cluster | refused | n/a | authorized |
+| Aurora member instance | authorized (storage is the cluster's) | n/a | n/a |
+| ElastiCache replication group | refused | refused | authorized |
+| EFS | refused | n/a | authorized |
+| Secret | no key: refused | n/a | alias and ARN both authorized |
 
-**Trigger** — before `TenantAppDeployer-arc8` is deployed with this template.
-Blocks Arc8's first data store.
+So an omitted flag reads as unencrypted, and no compliant request was falsely
+refused. `secretsmanager:KmsKeyArn` is populated when the key is named by
+alias, so the same condition in `SecretsCustodian` behaves the same way.
+Also proven: SNS email and https subscriptions refused, sqs authorized; uat/prod
+deletes of an RDS instance, a DynamoDB table and a real secret refused; the
+account public access block refused.
+
+**What it found, both in ElastiCache and both fixed in the template:**
+1. A compliant `CreateReplicationGroup` was refused by the role's OWN policy:
+   with no parameter group named, ElastiCache authorizes against
+   `parametergroup:*`, which `demo-*` and `default*` did not match. The
+   supporting resources (parameter, subnet and user groups) are now
+   account-wide; the caches stay name-scoped.
+2. Then refused by the boundary: the create is evaluated against each of
+   those resources, and only the replication group carries
+   `elasticache:AtRestEncryptionEnabled`. `BoolIfExists` against
+   `Resource: '*'` met the parameter group with no key and denied. The deny
+   is now scoped to `replicationgroup:*`.
+
+Every RDS create would have hit neither, so the pattern is per-service:
+**re-run the script after any change to a conditioned statement.**
+
+The script's first run also aborted midway (an unmatched grep under
+pipefail) and left the clone and one EFS behind. It now cleans up on exit,
+and the leftovers were removed by the rerun.
 
 ## B-154 · Nothing stops a dev developer touching a platform secret, if one ever lands there
 
