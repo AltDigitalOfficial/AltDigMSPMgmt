@@ -1654,10 +1654,18 @@ the router was seen delivering it alongside the direct path.
 | Alarm | Phase A: both paths | Phase B: router only |
 |---|---|---|
 | `platform-replication-failed-flow-logs` (Log Archive) | 23:54:31Z: two high-urgency incidents, the direct one ("Sum OperationsFailedReplication…") and the router's ("[prod] platform-replication-failed-flow-logs…"); both resolved on OK | 00:04:43Z: one incident, the router's, on AltDigital Platform; resolved on OK |
+| `platform-backup-copy-deleted` (Security Backup) | Never had an action: before the marker, a deleted copy notified nobody | 01:50:12Z: one incident, the router's, on AltDigital Platform; resolved on a forced OK at 01:50:50Z |
 
 The other two replication alarms (config, log archive) are in the same
 template and the same change; one forced alarm stands for all three.
-`recovery/40-backup-vault.yaml` and `recovery/30-backup-policy.yaml` carry the
-marker but are not yet deployed. 40 holds the undeployed B-112 key-window
-change and shows a conditional replacement of the copy vault, so it waits on
-an explicit go-ahead.
+`recovery/40-backup-vault.yaml` was deployed 2026-10-03 (Jamie ran the change
+set by hand: it was the locked vault). The change set marked the copy vault as a
+conditional replacement only because the vault reads `CopyVaultKey.Arn`. The key
+was modified in place (B-112: `PendingWindowInDays` 7 -> 30, which never
+requires recreation), so nothing was replaced.
+
+`recovery/30-backup-policy.yaml` carries the marker, but its alarm is
+`IsProduction`-only. Sandbox Exercise is dev, so there was no change to deploy.
+The marker takes effect with the first production account to get that stack.
+
+**Group 1 is complete.**
