@@ -164,13 +164,8 @@ Parameters:
       Pass the alerts key. alias/platform-logs is created by the MEMBER
       baseline and does not exist in a platform account.
 
-  AlertTopicArn:
-    Type: String
-    Default: ''
-
 Conditions:
   UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
-  HasAlerting: !Not [!Equals [!Ref AlertTopicArn, '']]
 
 Resources:
 
@@ -494,7 +489,6 @@ Resources:
   # failure mode that destroys an audit".
   ReconcileErrorAlarm:
     Type: AWS::CloudWatch::Alarm
-    Condition: HasAlerting
     Properties:
       AlarmName: platform-change-reconciliation-errors
       AlarmDescription: >-
@@ -514,11 +508,12 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
-      AlarmActions: [!Ref AlertTopicArn]
+      # D-028: no direct action. Delivered by the router (the marker above, and
+      # alerting/60-alarm-forwarding.yaml in this account), which also resolves
+      # the incident on OK -- the direct action never did. Proved 2026-10-03.
 
   CaptureDlqAlarm:
     Type: AWS::CloudWatch::Alarm
-    Condition: HasAlerting
     Properties:
       AlarmName: platform-change-capture-dlq-not-empty
       AlarmDescription: >-
@@ -538,7 +533,9 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
-      AlarmActions: [!Ref AlertTopicArn]
+      # D-028: no direct action. Delivered by the router (the marker above, and
+      # alerting/60-alarm-forwarding.yaml in this account), which also resolves
+      # the incident on OK -- the direct action never did. Proved 2026-10-03.
 
   # The credential expiring is a slow, certain, silent failure: reconciliation
   # keeps running, keeps reporting "change source unavailable", and looks like
@@ -552,7 +549,6 @@ Resources:
   # worth waking someone for, and before D-028 it paged high like the rest.
   JiraTokenExpiringAlarm:
     Type: AWS::CloudWatch::Alarm
-    Condition: HasAlerting
     Properties:
       AlarmName: platform-jira-token-expiring
       AlarmDescription: >-
@@ -575,7 +571,9 @@ Resources:
       # not running at all, which is the ReconcileErrorAlarm's business — two
       # alarms on one symptom is how a rotation gets two tickets.
       TreatMissingData: notBreaching
-      AlarmActions: [!Ref AlertTopicArn]
+      # D-028: no direct action. Delivered by the router (the marker above, and
+      # alerting/60-alarm-forwarding.yaml in this account), which also resolves
+      # the incident on OK -- the direct action never did. Proved 2026-10-03.
 
 Outputs:
   ReconcileFunctionName:
