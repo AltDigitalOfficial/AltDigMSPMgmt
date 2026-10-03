@@ -6818,6 +6818,13 @@ out:
 - the B-028 production-access request, which is the real fix. Submitted
   2026-10-03, review pending.
 
+**Interim, 2026-10-03:** SES email identities created in Tooling for
+Jamie's and Wayne's OEight addresses (tagged `purpose=digest-sandbox-recipient`),
+so the digest can be delivered before production access clears. Each is
+verified only once its owner clicks AWS's link. *Remove them* when production
+access is granted. Verified recipient identities are a sandbox workaround,
+and keeping them would hide which recipients the account can reach on its own.
+
 **Nobody is subscribed to `platform-digest-bounces`.** The template creates
 the topic and the SES event destination, but nothing listens. A bounce is
 published to a topic with zero subscribers, which is design 06's "rotted
