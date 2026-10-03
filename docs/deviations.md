@@ -1669,3 +1669,27 @@ requires recreation), so nothing was replaced.
 The marker takes effect with the first production account to get that stack.
 
 **Group 1 is complete.**
+
+**Step 2, group 2 — change reconciliation and Jira alarms** (Audit,
+`change/10-reconciliation.yaml`, 2026-10-03).
+
+| Alarm | Phase A: both paths | Phase B: router only |
+|---|---|---|
+| `platform-change-reconciliation-errors` | 01:57:11Z: two high-urgency incidents, the direct one and the router's | 02:02:04Z: one high-urgency incident, the router's; resolved on OK |
+| `platform-jira-token-expiring` | 01:57:18Z: a high-urgency direct incident and a low-urgency router incident | 02:02:10Z: one low-urgency incident, the router's; resolved on OK |
+
+`platform-change-capture-dlq-not-empty` was in the same template and the same
+change, and was not forced separately.
+
+**Two behaviour changes, both deliberate:**
+- Token expiry is now `urgency=low`. Its threshold is 30 days out, and before
+  D-028 it paged high like everything else on the alerts topic. The marker can
+  only downgrade, so this needed no exception to the escalation rule.
+- These alarms never had `OKActions`, so every direct page had to be resolved
+  by hand. Through the router they resolve themselves on OK.
+
+The three alarms used to exist only when `AlertTopicArn` was passed
+(`HasAlerting`). They now always exist, since routing no longer depends on a
+topic, and the parameter is gone.
+
+**Group 2 is complete.**
