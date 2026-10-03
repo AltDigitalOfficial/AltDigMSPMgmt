@@ -1646,3 +1646,18 @@ the canary test earlier the same day (B-150).
   catch-all now excludes it; one heartbeat per period since.
 
 **Step 2, removing the direct actions, may now proceed.**
+
+**Step 2, group 1 — data-protection alarms** (2026-10-02/03). Each alarm got
+its routing marker first (phase A). Its direct action was removed only after
+the router was seen delivering it alongside the direct path.
+
+| Alarm | Phase A: both paths | Phase B: router only |
+|---|---|---|
+| `platform-replication-failed-flow-logs` (Log Archive) | 23:54:31Z: two high-urgency incidents, the direct one ("Sum OperationsFailedReplication…") and the router's ("[prod] platform-replication-failed-flow-logs…"); both resolved on OK | 00:04:43Z: one incident, the router's, on AltDigital Platform; resolved on OK |
+
+The other two replication alarms (config, log archive) are in the same
+template and the same change; one forced alarm stands for all three.
+`recovery/40-backup-vault.yaml` and `recovery/30-backup-policy.yaml` carry the
+marker but are not yet deployed. 40 holds the undeployed B-112 key-window
+change and shows a conditional replacement of the copy vault, so it waits on
+an explicit go-ahead.
