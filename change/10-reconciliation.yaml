@@ -501,6 +501,8 @@ Resources:
         Change reconciliation is failing. Deployment events may still be being
         captured, but nothing is being compared against change records — and an
         absence of findings currently looks identical to compliance.
+
+        [platform-routing] routing=pagerduty layer=infrastructure
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -523,6 +525,8 @@ Resources:
         A deployment event never reached the capture function. That deployment
         is now absent from the evidence record and cannot be reconciled — the
         message body in the DLQ is the only remaining trace of it.
+
+        [platform-routing] routing=pagerduty layer=infrastructure
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
@@ -544,6 +548,8 @@ Resources:
   # could not (B-050). Reconciliation runs every six hours, so the metric is
   # dense enough for an ordinary threshold alarm; the restore metric is monthly
   # and no alarm can span that gap.
+  # urgency=low (D-028): the threshold is 30 days out. Nothing about it is
+  # worth waking someone for, and before D-028 it paged high like the rest.
   JiraTokenExpiringAlarm:
     Type: AWS::CloudWatch::Alarm
     Condition: HasAlerting
@@ -556,6 +562,8 @@ Resources:
         behaviour and indistinguishable from a quiet month unless somebody is
         watching. Rotate with scripts/set-jira-token.sh and update
         PLATFORM_JIRA_TOKEN_EXPIRES.
+
+        [platform-routing] routing=pagerduty layer=infrastructure urgency=low
       Namespace: AltDigital/Change
       MetricName: JiraTokenDaysRemaining
       Statistic: Minimum
