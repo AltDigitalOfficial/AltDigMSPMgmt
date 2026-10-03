@@ -6491,6 +6491,26 @@ pipeline.
   rule as well as the group. Rules do not inherit the group's tags, so this
   one action may not be caught. Authorize and Revoke are.
 
+**Status 2026-10-03, 00:01Z — DONE on Sandbox and Members.** SCP 08 is
+attached to Members (9 of the OU's 10 SCPs). Between 15:15Z and 23:52Z on
+10-02, under 08 on Sandbox, `PlatformInstrumentation` created alarms and
+`PlatformHoopScheduler` wrote `/platform/hoop/*` 37 times, with zero denials
+for either. That is the evidence the 15:40Z watch lacked. The platform agent
+association in Arc8 dev `624606539840` and test `904883674541` was tagged
+before the attach. No denials in Arc8 in the first minutes after it. The
+permission sets (TenantReadOnly, DeveloperDev denies) were deployed by Jamie
+the same day.
+
+The harness has not been run in an Arc8 account. It creates roles and trips
+containment, which pages under the tenant's PagerDuty services; run it with
+`--no-kms-fixture` in a planned window if a tenant-side proof is wanted. The
+same policy object is proven on Sandbox.
+
+Unrelated, seen during the watch: `PlatformTelemetryReader` is refused
+`ssm:GetParameter` on `/platform/hoop/state` in Sandbox Canary from 23:44Z,
+33 times, "no identity-based policy allows". An IAM gap in the telemetry
+reader role, not an SCP. Belongs with the B-145 telemetry work.
+
 **Status 2026-10-02, 15:40Z — Sandbox done, Members and permission sets not.**
 
 | Step | State |
