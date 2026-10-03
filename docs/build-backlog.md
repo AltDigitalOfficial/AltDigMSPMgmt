@@ -482,6 +482,16 @@ we asked.
 BOUNCE, COMPLAINT, REJECT, RENDERING_FAILURE), which is part of what the
 request will be judged on.
 
+**Requested 2026-10-03** — `sesv2 put-account-details` from Infra Tooling
+`751479507989`, mail type TRANSACTIONAL, review `PENDING`. The use case says
+what the account is (the tooling account of AltDigital's AWS MSP platform),
+what it sends (B-155's daily digest to named client contacts, under contract),
+the volume, and the bounce path. It also points AWS at Truveon's account
+`852064978666`, which already has SES production access, as the same company
+and the same people, in case reputation is the concern. It does not claim bounce
+routing is finished: B-155 records that nobody subscribes to the topic yet.
+AWS answers through a support case on the Tooling account.
+
 ---
 
 ## B-016 · Terraform state for PagerDuty is local and unlocked
@@ -6805,7 +6815,8 @@ any recipient is unverified. So the first scheduled run (Mon 2026-10-05,
 out:
 - verify the one address: AWS emails a link, and Wayne clicks it. Fast, but it
   does not scale to a client's staff (B-028's own objection);
-- the B-028 production-access request, which is the real fix.
+- the B-028 production-access request, which is the real fix. Submitted
+  2026-10-03, review pending.
 
 **Nobody is subscribed to `platform-digest-bounces`.** The template creates
 the topic and the SES event destination, but nothing listens. A bounce is
