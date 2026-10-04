@@ -375,6 +375,16 @@ rule SSO_PERMISSION_SET_SESSION_DURATION_BOUNDED when %permission_sets !empty {
 # rather than a differing exemption list in the SCP: those files are JSON and
 # cannot carry the reason, and an unexplained asymmetry between two adjacent
 # statements reads as a mistake.
+#
+# WHAT THIS DOES NOT DO: require the tag. It validates a VALUE where a resource
+# declares one, and passes a resource that declares none. B-127 recorded it as
+# enforcing the hard rule, and on 2026-10-04 only two of nine baseline
+# templates set the tag at all (B-157). Presence is enforced where it can be
+# seen: the deploy scripts put platform-layer=infrastructure on every stack and
+# stack set they create or update, and CloudFormation propagates a stack tag to
+# every taggable resource (deploy-stackset.sh, deploy-to-account.sh,
+# lib/common.sh cfn_deploy). A template rule could not see a stack tag, so it
+# would demand the tag twice and still miss a stack deployed by hand.
 
 let layer_tagged_resources = Resources.*[
   Properties.Tags exists

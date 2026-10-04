@@ -296,6 +296,22 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   hr; ok "Dry run complete."; exit 0
 fi
 
+# The stack set's tags, as given to create/update-stack-set. CloudFormation
+# propagates them to every taggable resource in every instance, which is how
+# CLAUDE.md's rule -- everything the platform builds carries platform-layer:
+# infrastructure -- holds without each template carrying it (B-157 phase B).
+#
+# MERGED with what the set already has, because --tags REPLACES the whole set:
+# passing only platform-layer would strip platform-managed from
+# platform-developer-boundary on its next deploy.
+STACKSET_TAGS=(Key=platform-layer,Value=infrastructure)
+if [[ -n "${EXISTS}" ]]; then
+  while read -r k v; do
+    [[ -n "${k}" && "${k}" != "platform-layer" ]] && STACKSET_TAGS+=("Key=${k},Value=${v}")
+  done < <(cfn_ss describe-stack-set --stack-set-name "${NAME}" \
+             --query 'StackSet.Tags[].[Key,Value]' --output text | no_cr)
+fi
+
 if [[ -z "${EXISTS}" ]]; then
   info "Creating stack set ${NAME}"
   cfn_ss create-stack-set \
@@ -305,6 +321,7 @@ if [[ -z "${EXISTS}" ]]; then
     --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
     --capabilities CAPABILITY_NAMED_IAM \
     --description "Platform baseline from ${TEMPLATE}" \
+    --tags "${STACKSET_TAGS[@]}" \
     ${PARAM_JSON:+--parameters "${PARAM_JSON}"} \
     --query 'StackSetId' --output text | no_cr
   ok "stack set created"
@@ -317,6 +334,7 @@ else
     --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
     --capabilities CAPABILITY_NAMED_IAM \
     ${PARAM_JSON:+--parameters "${PARAM_JSON}"} \
+    --tags "${STACKSET_TAGS[@]}" \
     --operation-preferences "MaxConcurrentCount=${MAX_CONCURRENT},FailureToleranceCount=${FAILURE_TOLERANCE},RegionConcurrencyType=SEQUENTIAL" \
     --query 'OperationId' --output text | no_cr
   ok "stack set updated"

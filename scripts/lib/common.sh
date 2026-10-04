@@ -584,7 +584,8 @@ cfn_deploy() {
     --template-file "$(win_path "${template}")"
     --capabilities CAPABILITY_NAMED_IAM
     --no-fail-on-empty-changeset
-    --tags platform-managed=true
+    # platform-layer on every resource via the stack (B-157 phase B).
+    --tags platform-managed=true platform-layer=infrastructure
   )
   if [[ ${#params[@]} -gt 0 ]]; then
     args+=(--parameter-overrides "${params[@]}")

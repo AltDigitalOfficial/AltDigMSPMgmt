@@ -99,7 +99,10 @@ args=(
   --template-file "$(win_path "${REPO_ROOT}/${TEMPLATE}")"
   --capabilities CAPABILITY_NAMED_IAM
   --no-fail-on-empty-changeset
-  --tags platform-managed=true
+  # CLAUDE.md: everything the platform builds carries platform-layer:
+  # infrastructure. As a STACK tag CloudFormation propagates it to every
+  # taggable resource, so no template has to remember it (B-157 phase B).
+  --tags platform-managed=true platform-layer=infrastructure
 )
 [[ ${#PARAMS[@]} -gt 0 ]] && args+=(--parameter-overrides "${PARAMS[@]}")
 
