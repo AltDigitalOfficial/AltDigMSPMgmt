@@ -6951,6 +6951,40 @@ not re-enable itself.**
 **Design consequence:** D-029. Under it, the infrastructure findings that
 failed here go to AltDigital's tenant, whose key exists.
 
+### Progress 2026-10-04 (UTC)
+
+**Item 1 done.** `oeight-oeight` is the correct tenant name. OEight is the
+client and Arc8 an application inside it, so there should be no `oeight-arc8`.
+At 01:50Z Jamie ran the OEight handoff pack: the manifest was applied to
+Truveon tenant `oeight` (3 accounts, 1 application, 1 notification window),
+the key was minted and piped into `platform/truveon/ingest/oeight-oeight`, and
+the read-back matched. Deliveries succeeded within minutes. The
+`TruveonEvidenceUnverified` overrides on `624606539840` and `904883674541`
+were withdrawn the same day.
+
+**Two defects found on the way, both fixed:**
+- The pack ran both AWS identities in one shell. The MSP scripts use an
+  `AWS_PROFILE` that is already set, so with the shell on Truveon's profile,
+  store-key would have refused only after Truveon minted the key, leaving it
+  live and stored nowhere. The MSP half now pins its own profile, and a
+  preflight proves both sides before minting (`0791a2a`).
+- `registry.sh get-client` printed "Account confirmed" ahead of its JSON, so
+  `truveon-tenant-handoff.sh status` reported every linked client as NOT
+  linked (`c5dca79`).
+
+**What the background rate actually was (item 5).** The hourly
+`platform-evidence-replay` re-queued every pending OEight ledger row (about
+690 an hour), and each one failed ten times before dead-lettering. That is
+the steady ~130 per five minutes, and it is how `platform-evidence-dlq`
+reached **20,468 messages**. Those messages are copies, not the record: the
+ledger holds every owed row (`sender.replay_pending`: "the queue is a
+transport, not the record"), and 436 were still pending at 01:55Z, draining.
+DLQ retention is 14 days.
+
+**Open: what to do with the DLQ.** Leave it to expire, or have Jamie purge it
+by hand. It must be empty, or the backlog acknowledged, before the item 3 DLQ
+alarm is built, or that alarm fires on day one.
+
 ## B-157 · Build D-029: evidence destinations by layer, client destination declared
 
 **Open** — 2026-10-03. Design in D-029.
