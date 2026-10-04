@@ -33,7 +33,9 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 > "${BUILD}/.sources"
-for MODULE in record collect sender completeness custody; do
+# reattribute is packaged though no template references it yet: it runs from
+# scripts/reattribute-evidence.sh today, and B-157 makes it automatic.
+for MODULE in record collect sender completeness custody reattribute; do
   cp "${REPO_ROOT}/evidence/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
   printf '%s\n' "$(win_path "${REPO_ROOT}/evidence/src/${MODULE}.py")" \
     >> "${BUILD}/.sources"
@@ -100,14 +102,15 @@ SEQEOF
 ok "sequence allocated on ingest"
 
 info "Checking the ledger is written before the queue"
-"${PY}" - "$(win_path "${REPO_ROOT}/evidence/src/collect.py")"          "$(win_path "${REPO_ROOT}/evidence/src/custody.py")" <<'ORDEREOF'
+"${PY}" - "$(win_path "${REPO_ROOT}/evidence/src/collect.py")"          "$(win_path "${REPO_ROOT}/evidence/src/custody.py")"          "$(win_path "${REPO_ROOT}/evidence/src/reattribute.py")" <<'ORDEREOF'
 import os
 import re
 import sys
 
 nl = chr(10)
 # Every module that creates evidence records, not only the collector. custody.py
-# joined on 2026-09-23 and owes the same ordering for the same reason. Checked
+# joined on 2026-09-23 and reattribute.py on 2026-10-04, and both owe the same
+# ordering for the same reason. Checked
 # inside the function that does the write (custody.py's _write), because
 # custody.py also calls put_item for its done-markers, which come AFTER.
 for path in sys.argv[1:]:

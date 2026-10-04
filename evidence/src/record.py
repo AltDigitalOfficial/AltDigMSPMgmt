@@ -149,13 +149,18 @@ def allocate(tenant, category):
 
 
 def build(tenant, partner, category, source, payload,
-          control_ref=None, occurred_at=None, account_id=None):
+          control_ref=None, occurred_at=None, account_id=None,
+          reattributed_from=None):
     """An evidence record, numbered and ready to buffer.
 
     `occurred_at` is when the EVENT happened; `emitted_at` is when the platform
     saw it. Both, because they differ -- a Config evaluation can arrive minutes
     late and an auditor asking "did this control operate on the 3rd" means the
     first, while anyone debugging the pipeline means the second.
+
+    `reattributed_from` is set only by reattribute.py: the stream, sequence,
+    content hash and emitted_at of the unattributed record this one replaces.
+    Inside the hash, so the link cannot be edited without it showing.
     """
     sequence = allocate(tenant, category)
     emitted = _now()
@@ -175,6 +180,8 @@ def build(tenant, partner, category, source, payload,
         "emitted_at": emitted.isoformat(),
         "payload": payload,
     }
+    if reattributed_from:
+        body["reattributed_from"] = reattributed_from
     # Content hash over everything except the hash itself.
     #
     # Not a security control -- anything that can write the record can

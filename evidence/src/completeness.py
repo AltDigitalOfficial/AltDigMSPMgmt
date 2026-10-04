@@ -80,6 +80,13 @@ INFLIGHT_GRACE_MINUTES = int(
 # raises nothing. This covers the other case: the heartbeat itself stopping.
 SILENCE_HOURS = int(os.environ.get("EVIDENCE_SILENCE_HOURS", "26"))
 
+# Ledger statuses that close a sequence number. `delivered` is Truveon's
+# acknowledgement. `reattributed` (reattribute.py) means the record was moved to
+# the tenant its account maps to and delivered from there, with a pointer both
+# ways. `reattributing` is deliberately NOT here: a move that stopped halfway
+# should surface as a gap until somebody looks.
+ACCOUNTED_FOR = {"delivered", "reattributed"}
+
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -375,7 +382,7 @@ def _missing_sequences(rows, cutoff):
     for seq, row in rows.items():
         if not isinstance(seq, int):
             continue
-        if row.get("status") == "delivered":
+        if row.get("status") in ACCOUNTED_FOR:
             continue
         emitted = _parse(row.get("emitted_at"))
         if emitted is None or emitted > cutoff:
@@ -524,6 +531,11 @@ def _count_ours(stream_id, since, until):
     seqs = []
     for seq, row in rows.items():
         if not isinstance(seq, int):
+            continue
+        # A reattributed record was never sent from this stream; its copy was
+        # sent from the stream it moved to, and is counted there. Counting it
+        # here too would report a mismatch Truveon cannot explain.
+        if row.get("status") == "reattributed":
             continue
         emitted = _parse(row.get("emitted_at"))
         if emitted and since <= emitted <= until:
