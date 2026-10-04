@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - the organization Config aggregator, in the
+  Audit account (Config's delegated administrator). One queryable view of
+  every account's current configuration, tags included.
+
+# ---------------------------------------------------------------------------
+# Why it exists
+# ---------------------------------------------------------------------------
+# Two consumers, one of which assumed it already existed:
+#
+#   * The evidence pipeline (B-157, D-029) files each record by the layer of
+#     the resource it is about: infrastructure evidence to AltDigital's Truveon
+#     tenant, application evidence to the client's destination. Security Hub
+#     findings carry the resource's tags; Config compliance events carry none.
+#     The collector runs here, in Audit, so it needs the resource's tags from
+#     an account it is not in. This is that lookup, with no cross-account role
+#     and no call into a member account on the evidence path.
+#
+#   * security/10-log-archive.yaml accepts a Config archive WITHOUT Object Lock
+#     partly because "the Config aggregator in the Audit account holds
+#     queryable configuration history independently of S3". On 2026-10-04 no
+#     aggregator existed (B-157). This makes that sentence true.
+#
+# ---------------------------------------------------------------------------
+# Organization source, allowed regions only
+# ---------------------------------------------------------------------------
+# An organization source covers every member account, including accounts
+# vested after this is deployed, with nothing to enrol: the B-116 lesson again,
+# a control whose coverage depends on remembering to extend it has holes shaped
+# like the newest account. Allowed regions rather than AllAwsRegions, because
+# SCP 06 denies the others and an aggregator listing seventeen empty regions
+# reports seventeen sources that can never succeed.
+
+Parameters:
+
+  AggregatedRegions:
+    Type: CommaDelimitedList
+    Default: us-east-1,us-east-2,us-west-2
+    Description: >-
+      PLATFORM_ALLOWED_REGIONS from config/platform.env. Pass it at deploy so
+      the two cannot drift.
+
+Resources:
+
+  # The role Config assumes to read the organization's account list. AWS's
+  # managed policy is the documented one for this and grants only
+  # organizations:Describe*/List* plus config aggregation reads. Named
+  # Platform*, so SCP 03 protects it from everyone but the deployment
+  # principals.
+  AggregatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformConfigAggregator
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSConfigRoleForOrganizations'
+
+  Aggregator:
+    Type: AWS::Config::ConfigurationAggregator
+    Properties:
+      ConfigurationAggregatorName: platform-organization
+      OrganizationAggregationSource:
+        RoleArn: !GetAtt AggregatorRole.Arn
+        AllAwsRegions: false
+        AwsRegions: !Ref AggregatedRegions
+
+Outputs:
+
+  AggregatorName:
+    Description: Read by the evidence collector's layer lookup.
+    Value: !Ref Aggregator
