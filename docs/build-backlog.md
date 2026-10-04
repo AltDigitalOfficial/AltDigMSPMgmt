@@ -6981,9 +6981,10 @@ ledger holds every owed row (`sender.replay_pending`: "the queue is a
 transport, not the record"), and 436 were still pending at 01:55Z, draining.
 DLQ retention is 14 days.
 
-**Open: what to do with the DLQ.** Leave it to expire, or have Jamie purge it
-by hand. It must be empty, or the backlog acknowledged, before the item 3 DLQ
-alarm is built, or that alarm fires on day one.
+**The DLQ is left to expire (Jamie, 2026-10-04).** No manual purge, even
+where one would be harmless. Deleting things by hand is a habit worth not
+forming. The 14-day retention empties it by about 2026-10-17. *Item 3's DLQ
+alarm is not deployed before then*, or it fires on day one.
 
 ## B-157 · Build D-029: evidence destinations by layer, client destination declared
 
