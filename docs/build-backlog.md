@@ -7049,6 +7049,23 @@ copies of the moved rows drain to the DLQ within about an hour, and the DLQ
 then stops growing, so the 2026-10-17 expiry estimate holds again. Measure the
 background rate after the 03:00Z replay, then decide the threshold.
 
+**Items 5 and 6 done, 2026-10-04 (Jamie approved).** Measured 02:40-03:25Z:
+47-58 invocations per five minutes account-wide, still including the drain.
+The 03:00Z replay re-queued 4 records. The EventBridge measures run at 23-34
+per five minutes. Expected steady state is about three invocations per piece of
+collected evidence (router, collector, sender): 70-130 routinely, and about
+270 on a vesting day (the collector's 90 peak on 2026-10-01). **The threshold
+stays at 500.** That is about 4x routine and 2x a vesting day, and far below a
+real loop (B-116 ran at about 5,000). Routine is now below the runbook's
+quarter-threshold revisit trigger, so there is nothing to recalibrate. Alarm
+actions on `platform-lambda-invocation-runaway` were re-enabled. All three
+runaway alarms are OK, enabled, at 500, and notify `platform-alerts`.
+
+**B-156 remaining:** item 3 (alarms on the evidence queue and DLQ), parked
+until the DLQ (20,830, no longer growing) expires around 2026-10-18. Item 7
+(the `/org/account` lookup) is answered: the alias is
+`altdig-security-audit`, not `audit`. Nothing to fix.
+
 ## B-157 · Build D-029: evidence destinations by layer, client destination declared
 
 **Open** — 2026-10-03. Design in D-029.
