@@ -408,6 +408,61 @@ def check_dedicated_infrastructure(q):
     return []
 
 
+def declares_exposure(q):
+    """Has the client told us of a regulatory obligation? 2.1, 2.4, 2.5.
+
+    Only what was DECLARED. D-029: an exposure the client does not disclose is
+    not one the platform asks about, infers, or enforces.
+    """
+    c = q["compliance"]
+    return (any(f != "none" for f in c["frameworks"])
+            or c["phi"] or c["cardholder_data"])
+
+
+def check_evidence(q):
+    """Section 17 cross-field rules (D-029). Form errors; the Halt is separate."""
+    e = q.get("evidence") or {}
+    dest = e.get("destination")
+    errors = []
+    if dest == "truveon" and not q.get("truveon"):
+        errors.append(
+            "evidence.destination is truveon but section 16 (truveon) is absent.\n"
+            "    The tenant cannot be prepared or linked without it.")
+    if dest == "external" and not e.get("external_platform"):
+        errors.append(
+            "evidence.destination is external but external_platform (17.2) is empty.\n"
+            "    A connector is built per vendor; the vendor has to be named.")
+    if dest == "archive" and declares_exposure(q) and not e.get("exposure_acceptance"):
+        errors.append(
+            "evidence.destination is archive, and the client declares regulatory\n"
+            "    exposure (section 2), but exposure_acceptance (17.3) is absent.\n"
+            "    Archive is allowed: the client may address its obligations elsewhere,\n"
+            "    or not at all. What is not allowed is the platform knowing of the\n"
+            "    exposure with no dated, owned record that the client chose this.")
+    return errors
+
+
+def check_evidence_destination_built(q):
+    """Only truveon is deliverable until B-157 phase D builds the archive.
+
+    A Halt rather than an error: external and archive are valid answers, and
+    vesting one today would number the client's evidence and leave it pending
+    for a destination the sender cannot reach -- the stranded backlog of B-156,
+    created on purpose.
+    """
+    dest = (q.get("evidence") or {}).get("destination")
+    if dest in ("external", "archive"):
+        raise Halt(
+            f"evidence.destination is {dest} (question 17.1).\n\n"
+            "    Vesting stops here. The answer is valid, but the platform cannot yet\n"
+            "    deliver to it: the archive bucket is B-157 phase D, and an external\n"
+            "    connector is built per vendor when first needed. Vesting now would\n"
+            "    leave this client's application evidence pending with nowhere to go\n"
+            "    (B-156).\n\n"
+            "    Build phase D first, or agree truveon with the client.")
+    return []
+
+
 def check_residency(q):
     if q["compliance"]["non_us_data_subjects"]:
         raise Halt(
@@ -433,10 +488,12 @@ CHECKS = [
     check_maintenance_windows,
     check_ticketing,
     check_dedicated_infrastructure,
+    check_evidence,
     # Halting checks last, so every form error is collected before a Halt ends
     # the run. main() prints both; the operator fixes the form once, not twice.
     check_residency,
     check_cardholder_scope,
+    check_evidence_destination_built,
 ]
 
 
@@ -503,6 +560,10 @@ def derive(q, rules):
     # 3a.9 — not asked. UAT is production-equivalent for data handling because
     # real users bring real data.
     d["uat_compliance_posture"] = "production-equivalent" if q["environments"]["uat_required"] else None
+
+    # 17.1 — D-029. Read by vesting §8 and written to the registry.
+    d["evidence_destination"] = q["evidence"]["destination"]
+    d["declares_regulatory_exposure"] = bool(declares_exposure(q))
 
     # 5.5 — quorum is a platform property, not a customer answer.
     d["key_deletion_quorum"] = "any two of Jamie, Wayne, Art"

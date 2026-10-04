@@ -16,7 +16,8 @@
     "licensing",
     "monitoring",
     "change",
-    "exit"
+    "exit",
+    "evidence"
   ],
   "properties": {
     "schema_version": {
@@ -579,6 +580,34 @@
         "truveon_retention_desired": {
           "type": "boolean",
           "description": "9.3 — billing arrangement."
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["destination"],
+      "description": "Section 17 — where the client's APPLICATION-layer evidence goes (D-029, decided 2026-10-04). Infrastructure evidence (platform-built resources, AltDigital's own actions, account-level findings) goes to AltDigital's Truveon tenant regardless and is not asked about. Required with no 'none' value, so 'this client has no destination' is a form error rather than a state the pipeline has to handle. Cross-field rules are enforced in scripts/derive-vesting.py check_evidence.",
+      "properties": {
+        "destination": {
+          "enum": ["truveon", "external", "archive"],
+          "description": "17.1 — truveon: the client's Truveon tenant (section 16 required), which they may also use for their own governance. external: the client's own compliance platform; a connector is built per vendor when first needed. archive: neither; evidence goes to a low-cost bucket, kept 18 months, then expired. Only truveon is vestable until B-157 phase D builds the archive."
+        },
+        "external_platform": {
+          "type": "string",
+          "minLength": 1,
+          "description": "17.2 — the client's compliance platform by product name (e.g. Vanta, Drata). Required when destination is external."
+        },
+        "exposure_acceptance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["accepted_on", "accepted_by_role", "reference"],
+          "description": "17.3 — required when the client declares regulatory exposure (any framework other than 'none', phi, or cardholder_data) and chooses archive. Not a gap: a dated, owned record that the client knows its obligations and chose not to address them through AltDigital. A role, not a name; the signed document is where the person is.",
+          "properties": {
+            "accepted_on": {"type": "string", "format": "date", "description": "Date of the client's written acceptance."},
+            "accepted_by_role": {"type": "string", "minLength": 1, "description": "The accepting officer's role, e.g. 'CEO'. Not a name."},
+            "reference": {"type": "string", "minLength": 1, "description": "Where the signed acceptance is kept: a document id, not the document."}
+          }
         }
       }
     },

@@ -59,6 +59,14 @@ SEQUENCE_TABLE = os.environ.get("EVIDENCE_SEQUENCE_TABLE", "")
 ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
 TENANT_MAP_PARAM = os.environ.get("EVIDENCE_TENANT_MAP_PARAM",
                                   "/platform/evidence/tenants")
+# collect.py files evidence here when its account is not in the tenant map.
+# Not in the map itself, so it has to be added to the gap scan by name.
+UNATTRIBUTED_TENANT = os.environ.get("EVIDENCE_UNATTRIBUTED_TENANT",
+                                     "altdigital-unattributed")
+# Where a finding ABOUT the unattributed tenant is filed. Never the unattributed
+# tenant itself: it has no key, so the finding would be undeliverable, the next
+# scan would report it as a gap, and each scan would add one more.
+PLATFORM_TENANT = os.environ.get("EVIDENCE_PLATFORM_TENANT", "altdigital-platform")
 
 # How long a record may sit undelivered before its absence counts as a gap.
 #
@@ -291,7 +299,15 @@ def detect_gaps(event=None, context=None):
     findings = []
     scanned = 0
 
-    for tenant, facts in sorted(registry.items()):
+    # The unattributed tenant too. It is not in the map, so it was never
+    # scanned: Arc8's first 181 records sat there for two days, undeliverable,
+    # and neither completeness control saw them (B-156 item 8). A gap here
+    # means an account was vested and its map entry never published, or
+    # published and never re-attributed (scripts/reattribute-evidence.sh).
+    scan = dict(registry)
+    scan.setdefault(UNATTRIBUTED_TENANT, {"partner": None})
+
+    for tenant, facts in sorted(scan.items()):
         partner = (facts or {}).get("partner")
         for category in sorted(record.CATEGORIES):
             stream = record.stream_id(tenant, category)
@@ -320,7 +336,8 @@ def detect_gaps(event=None, context=None):
             # Persisted as evidence, not only alerted. A gap that was found and
             # explained is a passable audit answer; it has to be findable in
             # eight months to be one. D-016.
-            _persist(tenant=tenant, partner=partner, kind="gap-detected",
+            filed_under = PLATFORM_TENANT if tenant == UNATTRIBUTED_TENANT else tenant
+            _persist(tenant=filed_under, partner=partner, kind="gap-detected",
                      control_ref="evidence-pipeline-completeness",
                      payload=finding)
             _emit({

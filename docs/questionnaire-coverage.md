@@ -349,6 +349,14 @@ the rows that are not are marked.
 | 16.4 | Invite now or at walkthrough | `truveon.send_invites` | handoff | P | builds |
 | 16.5 | Truveon roster | Truveon roster sidecar | handoff | P | builds |
 
+### 17. Evidence destination (D-029)
+
+| # | Question | Schema field | Read by | Answered by | Status |
+|---|---|---|---|---|---|
+| 17.1 | Where application evidence goes | `evidence.destination` | `derive-vesting.py`, `vest-client.sh` §2a, `onboard-client.sh` steps 2 and 6, registry `evidence_destination` | P | builds (gate); `external` and `archive` halt until B-157 phase D |
+| 17.2 | External platform | `evidence.external_platform` | `derive-vesting.py` | P | stored |
+| 17.3 | Exposure acceptance | `evidence.exposure_acceptance` | `derive-vesting.py` | P | builds (gate, `archive` with declared exposure) |
+
 Tenant creation itself is a person running Truveon's CLI from a prepared
 pack. That is deliberate (Truveon D-26: no create-tenant API), and at today's
 volume it is not the bottleneck.

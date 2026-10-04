@@ -57,6 +57,7 @@ Clients
   put-client     --partner S --slug S [--state STATE] [--ip-owner WHO]
                  [--tech-contact EMAIL] [--dev-manager EMAIL]
                  [--change-approver EMAIL] [--jira-project KEY] [--jira-site URL]
+                 [--evidence-destination truveon|external|archive]
                  [--breach-contact EMAIL] [--security-contact EMAIL]
                  Updates only the fields passed; never erases the rest.
   get-client     --partner S --slug S
@@ -95,7 +96,7 @@ SLUG=""; PARTNER=""; STATE=""; NOTIFY_HOURS=""; ALTDIG_HOURS=""; OWNER=""
 BAA=""; IP_OWNER=""; ACCOUNT_ID=""; ENVIRONMENT=""; APP=""; VERSION=""
 NAME=""; REASON=""; REVIEW_BY=""; TECH_CONTACT=""; DEV_MANAGER=""
 CHANGE_APPROVER=""; JIRA_PROJECT=""; SERVICE_MODEL=""; COMPLIANCE=""; KIND=""
-BREACH_CONTACT=""; SECURITY_CONTACT=""; JIRA_SITE_URL=""
+BREACH_CONTACT=""; SECURITY_CONTACT=""; JIRA_SITE_URL=""; EVIDENCE_DESTINATION=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -114,6 +115,7 @@ while [[ $# -gt 0 ]]; do
     --change-approver)  CHANGE_APPROVER="$2"; shift 2 ;;
     --jira-project)     JIRA_PROJECT="$2"; shift 2 ;;
     --jira-site)        JIRA_SITE_URL="$2"; shift 2 ;;
+    --evidence-destination) EVIDENCE_DESTINATION="$2"; shift 2 ;;
     --breach-contact)   BREACH_CONTACT="$2"; shift 2 ;;
     --security-contact) SECURITY_CONTACT="$2"; shift 2 ;;
     --account-id)       ACCOUNT_ID="$2"; shift 2 ;;
@@ -373,6 +375,13 @@ cmd_put_client() {
   if [[ -n "${JIRA_SITE_URL}" ]]; then
     [[ "${JIRA_SITE_URL}" =~ ^https://[a-z0-9-]+\.atlassian\.net/?$ ]]       || die "--jira-site must be an Atlassian Cloud site, https://<name>.atlassian.net"
     set+=", jira_site = :js"; vals+=",\":js\":$(ddb_str "${JIRA_SITE_URL%/}")"
+  fi
+  # D-029. Where this client's APPLICATION-layer evidence goes. Infrastructure
+  # evidence goes to AltDigital's tenant regardless, so this is the client's
+  # choice and nothing else. Read by the evidence tenant map (B-157 phase C).
+  if [[ -n "${EVIDENCE_DESTINATION}" ]]; then
+    [[ "${EVIDENCE_DESTINATION}" =~ ^(truveon|external|archive)$ ]]       || die "--evidence-destination must be truveon, external or archive (D-029)."
+    set+=", evidence_destination = :ed"; vals+=",\":ed\":$(ddb_str "${EVIDENCE_DESTINATION}")"
   fi
   # Breach notification of record, and day-to-day security operations. Two
   # fields because they are different people more often than not: the first

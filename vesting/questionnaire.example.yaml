@@ -126,3 +126,10 @@ truveon:
   legal_entities:
     - { ref: OE, legal_name: "OEight Placeholder LLC", entity_kind: parent, jurisdiction: "US-TX" }
   send_invites: false
+
+# Section 17 (D-029). Where APPLICATION-layer evidence goes. AltDigital's own
+# infrastructure evidence goes to AltDigital's tenant regardless. OEight uses
+# its Truveon tenant (section 16). A client choosing `archive` while declaring
+# regulatory exposure must add exposure_acceptance (17.3).
+evidence:
+  destination: truveon

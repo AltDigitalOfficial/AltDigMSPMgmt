@@ -39,6 +39,7 @@ kept and the attribution gap is visible.
 """
 import json
 import os
+import time
 
 import boto3
 
@@ -60,6 +61,12 @@ UNATTRIBUTED_TENANT = os.environ.get("EVIDENCE_UNATTRIBUTED_TENANT",
                                      "altdigital-unattributed")
 
 _MAP = {}
+
+# A miss re-reads the map, at most this often, before filing as unattributed.
+# The router's tier map had the same bug and the same fix (router.py,
+# TIER_MAP_MISS_REFRESH_SECONDS).
+TENANT_MAP_MISS_REFRESH_SECONDS = int(
+    os.environ.get("EVIDENCE_TENANT_MAP_MISS_REFRESH_SECONDS", "60"))
 
 
 # How an event on the alert bus becomes one of design 04's four categories.
@@ -97,8 +104,30 @@ RECOGNISERS = (
 )
 
 
+def _map_age():
+    loaded = _MAP.get("loaded_at")
+    return time.monotonic() - loaded if loaded is not None else float("inf")
+
+
+def attribution_for(account_id):
+    """{tenant, partner} for an account, or None.
+
+    A MISS re-reads the map before concluding the account is unknown. The map
+    used to be cached for the life of the execution environment, so an account
+    published after the container warmed kept filing as unattributed until AWS
+    recycled the container -- and every one of those records was then stranded
+    (B-156 item 8). Rate-limited, because an account that is genuinely
+    unmapped would otherwise cost an SSM read per event.
+    """
+    accounts = tenant_map()
+    if account_id not in accounts and _map_age() >= TENANT_MAP_MISS_REFRESH_SECONDS:
+        _MAP.clear()
+        accounts = tenant_map()
+    return accounts.get(account_id)
+
+
 def tenant_map():
-    """account_id -> {tenant, partner}. Cached per execution environment."""
+    """account_id -> {tenant, partner}. Cached; see attribution_for."""
     if "accounts" not in _MAP:
         raw = ssm.get_parameter(Name=TENANT_MAP_PARAM)["Parameter"]["Value"]
         data = json.loads(raw)
@@ -108,6 +137,7 @@ def tenant_map():
                 accounts[str(account_id)] = {
                     "tenant": tenant, "partner": (facts or {}).get("partner")}
         _MAP["accounts"] = accounts
+        _MAP["loaded_at"] = time.monotonic()
     return _MAP["accounts"]
 
 
@@ -163,7 +193,7 @@ def collect(event, context=None):
         return out
 
     try:
-        attribution = tenant_map().get(account_id)
+        attribution = attribution_for(account_id)
     except Exception as exc:                       # noqa: BLE001
         # The map is unreadable. Everything is unattributed until it is not,
         # and that is said out loud rather than each record being dropped.

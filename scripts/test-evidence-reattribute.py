@@ -215,5 +215,81 @@ class CompletenessAcceptsTheMove(unittest.TestCase):
             completeness._ledger_rows = saved
 
 
+class CollectorSeesANewlyPublishedAccount(unittest.TestCase):
+    """The map was cached per container, so a newly published account kept
+    filing as unattributed until the container recycled."""
+
+    def setUp(self):
+        import collect
+        self.collect = collect
+        self.mapping = {"tenants": {"oeight-oeight": {"partner": "oeight",
+                                                      "accounts": [DEV]}}}
+        outer = self
+
+        class SSM:
+            reads = 0
+
+            def get_parameter(self, Name):
+                SSM.reads += 1
+                return {"Parameter": {"Value": json.dumps(outer.mapping)}}
+        self.SSM = SSM
+        self._ssm, collect.ssm = collect.ssm, SSM()
+        collect._MAP.clear()
+
+    def tearDown(self):
+        self.collect.ssm = self._ssm
+        self.collect._MAP.clear()
+
+    def test_a_miss_rereads_a_map_older_than_the_limit(self):
+        c = self.collect
+        self.assertIsNone(c.attribution_for(TEST))            # not published yet
+        self.mapping["tenants"]["oeight-oeight"]["accounts"].append(TEST)
+        c._MAP["loaded_at"] -= c.TENANT_MAP_MISS_REFRESH_SECONDS  # time passes
+        self.assertEqual(c.attribution_for(TEST)["tenant"], "oeight-oeight")
+
+    def test_misses_are_rate_limited(self):
+        c = self.collect
+        c.attribution_for(STRAY)
+        reads = self.SSM.reads
+        for _ in range(5):
+            self.assertIsNone(c.attribution_for(STRAY))
+        self.assertEqual(self.SSM.reads, reads)
+
+
+class GapScanCoversTheUnattributedTenant(unittest.TestCase):
+
+    def setUp(self):
+        self.saved = (completeness.tenants, completeness._ledger_rows,
+                      completeness._persist, completeness._emit)
+        self.persisted, self.emitted, self.scanned = [], [], []
+        completeness.tenants = lambda: {"oeight-oeight": {"partner": "oeight"}}
+
+        def rows(stream):
+            self.scanned.append(stream)
+            if stream == f"{UNATTRIBUTED}#security-finding":
+                return {1: {"status": "pending",
+                            "emitted_at": "2026-10-01T21:36:00+00:00"},
+                        "_window_start": None, "_window_end": None}
+            return None
+        completeness._ledger_rows = rows
+        completeness._persist = lambda **kw: self.persisted.append(kw)
+        completeness._emit = self.emitted.append
+
+    def tearDown(self):
+        (completeness.tenants, completeness._ledger_rows,
+         completeness._persist, completeness._emit) = self.saved
+
+    def test_stranded_rows_are_a_gap_filed_under_the_platform(self):
+        out = completeness.detect_gaps()
+        self.assertEqual(out["gaps"], 1)
+        self.assertIn(f"{UNATTRIBUTED}#security-finding", self.scanned)
+        (finding,) = self.persisted
+        # Never under the unattributed tenant: undeliverable there, it would be
+        # found as a gap on the next scan, and each scan would add another.
+        self.assertEqual(finding["tenant"], "altdigital-platform")
+        self.assertEqual(self.emitted[0]["alarm"]["resource_id"],
+                         f"{UNATTRIBUTED}#security-finding")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

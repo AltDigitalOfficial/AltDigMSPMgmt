@@ -374,5 +374,93 @@ class MaintenanceWindows(unittest.TestCase):
         self.assertFalse(d["maintenance_windows"]["prod"]["wake_required"])
 
 
+class EvidenceDestination(unittest.TestCase):
+    """Section 17, D-029: where application-layer evidence goes."""
+
+    def setUp(self):
+        self.base = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+
+    def no_exposure(self, q):
+        c = q["compliance"]
+        c.update(frameworks=["none"], phi=False, cardholder_data=False,
+                 baa_window_partner_to_client_hours=None)
+        return q
+
+    def test_section_is_required(self):
+        q = copy.deepcopy(self.base)
+        q.pop("evidence")
+        rc, err = run(q)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("evidence", err)
+
+    def test_there_is_no_none(self):
+        q = copy.deepcopy(self.base)
+        q["evidence"]["destination"] = "none"
+        rc, err = run(q)
+        self.assertEqual(rc, 1, err)
+
+    def test_truveon_needs_section_16(self):
+        q = copy.deepcopy(self.base)
+        q.pop("truveon")
+        rc, err = run(q)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("section 16", err)
+
+    # These two also halt (the destination is not built yet), and a Halt is
+    # exit 2 with the form errors still reported -- the CardholderScope
+    # contract. The form error is what is being tested.
+    def test_external_needs_a_named_platform(self):
+        q = copy.deepcopy(self.base)
+        q["evidence"] = {"destination": "external"}
+        rc, err = run(q)
+        self.assertEqual(rc, 2, err)
+        self.assertIn("external_platform (17.2) is empty", err)
+
+    def test_archive_with_declared_exposure_needs_an_acceptance(self):
+        q = copy.deepcopy(self.base)              # hipaa, soc2, phi
+        q["evidence"] = {"destination": "archive"}
+        rc, err = run(q)
+        self.assertEqual(rc, 2, err)
+        self.assertIn("exposure_acceptance (17.3) is absent", err)
+
+    def test_archive_without_declared_exposure_needs_none(self):
+        # D-029: undisclosed exposure is not asked about, inferred or enforced.
+        # Halts only because the archive is not built yet.
+        q = self.no_exposure(copy.deepcopy(self.base))
+        q["evidence"] = {"destination": "archive"}
+        rc, err = run(q)
+        self.assertEqual(rc, 2, err)
+        self.assertNotIn("exposure_acceptance", err)
+        self.assertIn("phase D", err)
+
+    def test_archive_with_an_acceptance_halts_until_built(self):
+        q = copy.deepcopy(self.base)
+        q["evidence"] = {"destination": "archive", "exposure_acceptance": {
+            "accepted_on": "2026-10-04", "accepted_by_role": "CEO",
+            "reference": "DOC-1"}}
+        rc, err = run(q)
+        self.assertEqual(rc, 2, err)
+        self.assertIn("phase D", err)
+
+    def test_external_with_a_platform_halts_until_built(self):
+        q = copy.deepcopy(self.base)
+        q["evidence"] = {"destination": "external", "external_platform": "Vanta"}
+        rc, err = run(q)
+        self.assertEqual(rc, 2, err)
+
+    def test_destination_is_derived(self):
+        rc, _ = run(self.base)
+        self.assertEqual(rc, 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q.yaml"
+            path.write_text(yaml.safe_dump(self.base, sort_keys=False), encoding="utf-8")
+            out = subprocess.run([sys.executable, str(SCRIPT), "--questionnaire",
+                                  str(path), "--json"], capture_output=True,
+                                 text=True, encoding="utf-8").stdout
+        d = json.loads(out)
+        self.assertEqual(d["evidence_destination"], "truveon")
+        self.assertTrue(d["declares_regulatory_exposure"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

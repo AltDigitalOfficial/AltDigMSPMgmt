@@ -73,7 +73,7 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-QUESTIONNAIRE=""; ROSTER=""; TRUVEON_ROSTER=""; CONFIRM=0; SKIP_TRUVEON=0
+QUESTIONNAIRE=""; ROSTER=""; TRUVEON_ROSTER=""; CONFIRM=0
 DEFER_JIRA=0; FROM_STEP=0; ONLY_ENVS=""
 
 usage() {
@@ -91,9 +91,6 @@ Usage: onboard-client.sh --questionnaire <path> [options]
                     rehearsal reports every problem rather than the first.
   --confirm-onboard Required for a real run. Creates AWS accounts, which
                     cannot be deleted.
-  --skip-truveon    Proceed without a linked Truveon tenant, recording a
-                    declared override against every account. For when
-                    Truveon itself is unavailable, not as the normal path.
   --defer-jira      Proceed past the Jira step, which cannot be automated
                     here. Without this a real run stops at step 4.
   --from N          Resume at step N. Every step is idempotent, so this is a
@@ -144,7 +141,9 @@ while [[ $# -gt 0 ]]; do
     --truveon-roster)  TRUVEON_ROSTER="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=1; shift ;;
     --confirm-onboard) CONFIRM=1; shift ;;
-    --skip-truveon)    SKIP_TRUVEON=1; shift ;;
+    --skip-truveon)
+      die "--skip-truveon was removed by D-029 (2026-10-04). Whether Truveon steps
+      run now follows the questionnaire's evidence destination (section 17)." ;;
     --defer-jira)      DEFER_JIRA=1; shift ;;
     --from)            FROM_STEP="$2"; shift 2 ;;
     --environments)    ONLY_ENVS="$2"; shift 2 ;;
@@ -218,6 +217,11 @@ SECOPS_EMAIL="$(q_get ".get('identity',{}).get('security_contact',{}).get('email
 # 'none'; a site only when the records live on the client's own Atlassian site.
 JIRA_PROJECT="$(q_get "['change']['ticketing'].get('project_key') or ''")"
 JIRA_SITE_URL="$(q_get "['change']['ticketing'].get('site') or ''")"
+# Section 17, D-029. Truveon steps 2 and 6 run only when the client's
+# application evidence goes to its Truveon tenant. derive-vesting.py halts on
+# the other destinations until B-157 phase D, so today this is always truveon.
+EVIDENCE_DESTINATION="$(printf '%s' "${DERIVED}" \
+  | "${PY}" -c "import sys,json;print(json.load(sys.stdin)['evidence_destination'])")"
 ENVS="$(printf '%s' "${DERIVED}" \
   | "${PY}" -c "import sys,json;print(' '.join(json.load(sys.stdin)['environments']))")"
 TENANT_ID="${PARTNER}-${CLIENT}-${APP}"
@@ -227,7 +231,7 @@ log "Onboarding ${CLIENT_NAME}"
 log "  tenant      : ${PARTNER}/${CLIENT}/${APP}"
 log "  environments: ${ENVS}"
 log "  roster      : ${ROSTER:-<none supplied — step 9 will be skipped>}"
-log "  truveon     : $([[ ${SKIP_TRUVEON} -eq 1 ]] && echo 'SKIPPED (override recorded)' || echo "required — one tenant per client")"
+log "  evidence    : ${EVIDENCE_DESTINATION}$([[ "${EVIDENCE_DESTINATION}" == "truveon" ]] && echo " — tenant linked before vesting")"
 log "  mode        : $([[ "${DRY_RUN}" == "1" ]] && echo DRY-RUN || echo EXECUTE)"
 [[ ${FROM_STEP} -gt 0 ]] && log "  resuming at : step ${FROM_STEP}"
 hr
@@ -379,7 +383,8 @@ if should_run 1 registry-client-record; then
         --tech-contact "${TECH_EMAIL}" --dev-manager "${DEV_MGR_EMAIL}" \
         --change-approver "${APPROVER_EMAIL}" --jira-project "${JIRA_PROJECT}" \
         --breach-contact "${BREACH_EMAIL}" --security-contact "${SECOPS_EMAIL}" \
-        --jira-site "${JIRA_SITE_URL}"
+        --jira-site "${JIRA_SITE_URL}" \
+        --evidence-destination "${EVIDENCE_DESTINATION}"
   fi
 fi
 
@@ -401,14 +406,9 @@ fi
 # that would then have to be resumed around it.
 
 if should_run 2 truveon-tenant; then
-  if [[ ${SKIP_TRUVEON} -eq 1 ]]; then
-    record 2 truveon-tenant "skipped" "--skip-truveon; override recorded at step 5"
-    warn "Truveon SKIPPED by --skip-truveon."
-    warn "  vest-client.sh records a declared, owned, dated override against"
-    warn "  every account, so this appears in registry.sh report-overrides"
-    warn "  rather than being forgotten. Evidence for this tenant is buffered"
-    warn "  and pending, and the pipeline names it in a no-credential finding"
-    warn "  every hour until the tenant is linked."
+  if [[ "${EVIDENCE_DESTINATION}" != "truveon" ]]; then
+    record 2 truveon-tenant "not-applicable" "evidence destination ${EVIDENCE_DESTINATION}"
+    skip "Truveon tenant — evidence destination is ${EVIDENCE_DESTINATION} (D-029)"
   elif bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" status \
          --partner "${PARTNER}" --client "${CLIENT}" >/dev/null 2>&1; then
     record 2 truveon-tenant "done" "already linked"
@@ -505,8 +505,7 @@ fi
 # Blocks. Two separate reasons, and both are real.
 
 if should_run 4 jira-tenant-artefacts; then
-  # Blocks by DEFAULT and is deferrable with a flag, the same shape as
-  # --skip-truveon. design 13 puts Jira before the accounts so reconciliation
+  # Blocks by DEFAULT and is deferrable with a flag. design 13 puts Jira before the accounts so reconciliation
   # has a target, and defaulting to "carry on" would quietly discard that
   # ordering. Defaulting to a stop that a flag releases keeps the decision
   # visible and deliberate, which is the same trade vest-client.sh makes.
@@ -569,9 +568,6 @@ if should_run 5 aws-accounts-and-baseline; then
   else
     VEST_ARGS+=(--confirm-vest)
   fi
-  if [[ ${SKIP_TRUVEON} -eq 1 ]]; then
-    VEST_ARGS+=(--defer-truveon)
-  fi
   # Staged vesting. Everything after step 5 reads the accounts from the
   # registry, so a later run without --environments picks up the rest.
   if [[ -n "${ONLY_ENVS}" ]]; then
@@ -595,8 +591,8 @@ fi
 # which holds the key, not from a laptop, which does not.
 
 if should_run 6 truveon-accounts; then
-  if [[ ${SKIP_TRUVEON} -eq 1 ]]; then
-    record 6 truveon-accounts "skipped" "--skip-truveon"
+  if [[ "${EVIDENCE_DESTINATION}" != "truveon" ]]; then
+    record 6 truveon-accounts "not-applicable" "evidence destination ${EVIDENCE_DESTINATION}"
   else
     PACK_OUT="$(mktemp)"
     if bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" prepare \

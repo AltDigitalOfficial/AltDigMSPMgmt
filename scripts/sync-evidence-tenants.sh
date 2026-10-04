@@ -115,9 +115,19 @@ read -r AK SK ST <<<"${CREDS}"
 [[ $? -eq 0 ]] || die "Could not write the parameter into ${AUDIT}."
 ok "published /platform/evidence/tenants"
 
+# Recover what was filed before the map knew these accounts (B-156 item 8).
+# A newly vested account produces evidence before onboarding publishes it here,
+# so its first records are always unattributed; moving them is part of
+# publishing, not a separate step someone has to remember. Additive: it writes
+# new records and closes the old ones with a pointer, and deletes nothing.
 hr
-info "Re-run this after vesting an account, or evidence from it files under"
-log "  the unattributed tenant and raises a finding until it is mapped."
+bash "${REPO_ROOT}/scripts/reattribute-evidence.sh" \
+  || die "The map is published, but re-attribution failed. Run
+      scripts/reattribute-evidence.sh --dry-run to see what is stranded."
+
+hr
+info "Re-run this after vesting an account. Evidence that arrived before the"
+log "  account was mapped is moved to its tenant when this runs."
 log ""
 info "Each tenant above delivers only once its Truveon ingest key is stored:"
 log "  scripts/truveon-tenant-handoff.sh status --partner <p> --client <c>"

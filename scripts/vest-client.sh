@@ -29,12 +29,12 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-QUESTIONNAIRE=""; CONFIRM=0; DEFER_TRUVEON=0; ONLY_ENVS=""
+QUESTIONNAIRE=""; CONFIRM=0; ONLY_ENVS=""
 
 usage() {
   cat <<'USAGE'
 Usage: vest-client.sh --questionnaire <path> [--dry-run] [--confirm-vest]
-                      [--defer-truveon] [--environments dev,test]
+                      [--environments dev,test]
 
   --questionnaire   Completed questionnaire, YAML. Validated and derived by
                     scripts/derive-vesting.py before anything is created.
@@ -42,9 +42,6 @@ Usage: vest-client.sh --questionnaire <path> [--dry-run] [--confirm-vest]
                     created. Creates nothing.
   --confirm-vest    Required for a real run. Creates AWS accounts, which cannot
                     be deleted.
-  --defer-truveon   Proceed without a linked Truveon tenant for the client.
-                    Records a declared override on each account rather than
-                    skipping silently. See the Truveon section below.
   --environments    Vest only these environments, comma-separated, from the
                     set the questionnaire derives. For vesting in stages when
                     the account quota cannot hold the whole set yet. Re-run
@@ -58,7 +55,11 @@ while [[ $# -gt 0 ]]; do
     --questionnaire) QUESTIONNAIRE="$2"; shift 2 ;;
     --dry-run)       DRY_RUN=1; shift ;;
     --confirm-vest)  CONFIRM=1; shift ;;
-    --defer-truveon) DEFER_TRUVEON=1; shift ;;
+    --defer-truveon)
+      die "--defer-truveon was removed by D-029 (2026-10-04). Vesting now checks the
+      questionnaire's evidence destination (section 17). A client whose evidence
+      goes to Truveon links its tenant first; one whose evidence goes elsewhere
+      declares that instead of deferring." ;;
     --environments)  ONLY_ENVS="$2"; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     *) die "Unknown argument: $1" ;;
@@ -124,6 +125,8 @@ SECOPS_EMAIL="$(q_get ".get('identity',{}).get('security_contact',{}).get('email
 JIRA_PROJECT="$(q_get "['change']['ticketing'].get('project_key') or ''")"
 JIRA_SITE_URL="$(q_get "['change']['ticketing'].get('site') or ''")"
 SERVICE_MODEL="$(q_get "['identity']['service_model']")"
+# Section 17, D-029: where the client's application-layer evidence goes.
+EVIDENCE_DESTINATION="$(d_get "['evidence_destination']")"
 COMPLIANCE="$("${PY}" -c "import sys,yaml;d=yaml.safe_load(open(sys.argv[1],encoding='utf-8'));print('_'.join(f for f in d['compliance']['frameworks'] if f!='none') or 'none')" "${QPATH}")"
 RETENTION="$(d_get "['retention_floor_days']")"
 EGRESS="$(d_get "['egress_profile']")"
@@ -172,6 +175,39 @@ if [[ "${PARTNER}" == "direct" ]]; then
 else
   info "Partner precondition"
   bash "${REPO_ROOT}/scripts/registry.sh" check-partner --slug "${PARTNER}"     || die "Partner precondition failed. Nothing was created."
+fi
+
+# ---------------------------------------------------------------------------
+# 2a. Evidence destination precondition (D-029)
+# ---------------------------------------------------------------------------
+# Checked here, before any account exists, because step 6 creates accounts and
+# accounts cannot be deleted. Until 2026-10-04 this was only step 8, after
+# creation, with --defer-truveon as the way past it -- and every Arc8 record
+# from vesting until a runaway page two days later went nowhere (B-156).
+#
+# derive-vesting.py has already halted on external and archive, which are not
+# deliverable until B-157 phase D. What is left to check is truveon: the
+# client's tenant must be LINKED (registry names it, ingest key stored) before
+# its accounts produce a single record. onboard-client.sh links it at step 2,
+# before this; standalone, run truveon-tenant-handoff.sh first.
+info "Evidence destination: ${EVIDENCE_DESTINATION}"
+if [[ "${EVIDENCE_DESTINATION}" == "truveon" ]]; then
+  if bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" status \
+       --partner "${PARTNER}" --client "${CLIENT}" >/dev/null 2>&1; then
+    ok "Truveon tenant linked for ${PARTNER}/${CLIENT}; ingest key stored."
+  elif [[ "${DRY_RUN}" == "1" ]]; then
+    warn "Truveon tenant NOT linked for ${PARTNER}/${CLIENT}. A real run stops here,"
+    warn "before any account is created."
+  else
+    die "Evidence destination is truveon, and the client ${PARTNER}/${CLIENT} has no
+      linked Truveon tenant. Nothing was created.
+
+      Prompt 3.1: a vested account that is not sending evidence is worse than
+      no account. Link the tenant first (one per client):
+        scripts/truveon-tenant-handoff.sh prepare --questionnaire <q> [--truveon-roster <r>]
+        # ...hand the pack to Truveon; its last step stores the key and links...
+        scripts/truveon-tenant-handoff.sh status --partner ${PARTNER} --client ${CLIENT}"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -391,7 +427,7 @@ else
     --tech-contact "${TECH_EMAIL}" --dev-manager "${DEV_MGR_EMAIL}" \
     --change-approver "${APPROVER_EMAIL}" --jira-project "${JIRA_PROJECT}" \
     --breach-contact "${BREACH_EMAIL}" --security-contact "${SECOPS_EMAIL}" \
-    --jira-site "${JIRA_SITE_URL}"
+    --jira-site "${JIRA_SITE_URL}" --evidence-destination "${EVIDENCE_DESTINATION}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -579,61 +615,30 @@ done
 # not confirm first evidence receipt. A vested account that is not sending
 # evidence is worse than no account."
 #
-# What this gate checks is REGISTRATION, not receipt -- D-021. Accounts created
+# What this records is REGISTRATION, not receipt -- D-021. Accounts created
 # seconds ago have emitted nothing, and the evidence tenant map that attributes
-# them is published at onboarding step 8, after this. First receipt cannot be
-# confirmed here by construction; asking for it would make this gate either
-# impossible or a lie. So vesting requires the client's Truveon tenant to be
-# LINKED -- registry names it, ingest key stored -- which means every record
-# these accounts produce has somewhere to go. Receipt is the verification
-# sweep's check 1, before go-live.
+# them is published at onboarding step 8, after this. Receipt is the
+# verification sweep's check 1, before go-live.
 #
-# Unlinked leaves two honest options — fail, or make the deferral explicit and
-# recorded — and exactly one dishonest one, which is to skip the step. The gate
-# fails by default, and --defer-truveon proceeds while writing a declared
-# override against every account, owned and dated, so the gap appears in
-# `registry.sh report-overrides` rather than living in a comment in this file.
+# The GATE is step 2a, before account creation (D-029). This re-reads the link
+# for the evidence record, so the record states what was true after the
+# accounts existed rather than what was true before.
 hr
 TRUVEON_LINKED=0
-if bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" status \
-     --partner "${PARTNER}" --client "${CLIENT}" >/dev/null 2>&1; then
+if [[ "${EVIDENCE_DESTINATION}" == "truveon" ]] \
+   && bash "${REPO_ROOT}/scripts/truveon-tenant-handoff.sh" status \
+        --partner "${PARTNER}" --client "${CLIENT}" >/dev/null 2>&1; then
   TRUVEON_LINKED=1
-fi
-if [[ ${TRUVEON_LINKED} -eq 1 ]]; then
   ok "Truveon tenant linked for ${PARTNER}/${CLIENT}; ingest key stored."
   log "  First-evidence receipt is confirmed by the verification sweep, not here"
   log "  — these accounts have not emitted anything yet. D-021."
-elif [[ ${DEFER_TRUVEON} -eq 1 ]]; then
-  warn "Truveon evidence receipt NOT verified — deferred by --defer-truveon."
-  warn "A declared override is recorded against each account so this appears in"
-  warn "report-overrides rather than being forgotten."
-  for pair in ${CREATED_IDS}; do
-    ENVNAME="${pair%%:*}"; ACCT="${pair##*:}"
-    if [[ "${DRY_RUN}" == "1" ]]; then
-      printf '%s DRY%s  registry put-override %s TruveonEvidenceUnverified\n' \
-        "${C_YELLOW}" "${C_RESET}" "${ACCT}"
-    else
-      bash "${REPO_ROOT}/scripts/registry.sh" put-override \
-        --account-id "${ACCT}" --name TruveonEvidenceUnverified \
-        --reason "Vested without a linked Truveon tenant for the client. Its evidence is buffered and pending and the pipeline raises a no-credential finding hourly, but it is reaching no Truveon tenant. Prompt 3.1 requires this to block; it was deferred deliberately. Link with scripts/truveon-tenant-handoff.sh, then drop this override." \
-        --owner "Jamie Vernon" --review-by "$(date -u -d '+90 days' +%Y-%m-%d)" >/dev/null
-    fi
-  done
+elif [[ "${DRY_RUN}" == "1" ]]; then
+  warn "Truveon tenant not linked (dry run; step 2a stops a real run)."
 else
-  die "The client ${PARTNER}/${CLIENT} has no linked Truveon tenant.
-
-      Prompt 3.1: a vested account that is not sending evidence is worse than
-      no account, so this blocks rather than warns.
-
-      Link it (one tenant per client):
-        scripts/truveon-tenant-handoff.sh prepare --questionnaire <q> --truveon-roster <r>
-        # ...hand the pack to Truveon; its last step stores the key and links...
-        scripts/truveon-tenant-handoff.sh status --partner ${PARTNER} --client ${CLIENT}
-
-      Or pass --defer-truveon, which records a declared, owned, dated override
-      against every account rather than skipping the step silently.
-
-      Note that the accounts above may already exist. Re-running is safe."
+  # Unreachable unless the link was removed between step 2a and here.
+  die "The Truveon link for ${PARTNER}/${CLIENT} was present at step 2a and is
+      not now. The accounts exist; find out what removed the link, restore it
+      with scripts/truveon-tenant-handoff.sh, and re-run. Re-running is safe."
 fi
 
 # ---------------------------------------------------------------------------

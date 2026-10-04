@@ -608,6 +608,8 @@ Unglamorous, and much easier to agree now than during a separation.
 
 ## 16. Truveon — your compliance workspace
 
+**Answer this section only if you chose Truveon in 17.1.**
+
 Truveon is where your compliance evidence lands: control results, security
 findings, change records, and the platform's own proof that nothing was
 dropped on the way. It is also where your compliance team works — frameworks,
@@ -651,6 +653,35 @@ is the people to add.
 
 **When:** Vest · **Change later?** Reversible — people are added and removed
 from within Truveon.
+
+---
+
+## 17. Where your compliance evidence goes
+
+The platform produces compliance evidence about your accounts: control
+results, security findings, change records. Some of it describes **our** work
+(the infrastructure we build and run for you, and what we do in your
+accounts). That evidence supports AltDigital's own audits and stays with us
+whatever you choose here.
+
+The rest describes **your application**. This section decides where that
+goes. Answer it before Section 16: if you choose Truveon, Section 16 sets up
+your workspace.
+
+| # | Question | How to answer | When | Change later? |
+|---|---|---|---|---|
+| 17.1 | Where should your application's compliance evidence go? | **Pick one:** `truveon`: your Truveon workspace (Section 16) / `external`: a compliance platform you already use / `archive`: neither, so we keep it in low-cost storage for 18 months | Vest | Reversible, from the next record onward |
+| 17.2 | If `external`, which platform? | Product name, e.g. Vanta, Drata | Vest | Reversible |
+| 17.3 | If `archive`, and you told us in Section 2 that a framework such as HIPAA or SOC 2 applies to you: a signed acknowledgement that you are meeting those obligations another way, or not through us | The date, the signing officer's **role** (not their name), and your reference for the signed document | Vest | — |
+
+**On 17.1.** Truveon is available now. `external` needs a connector to your
+platform, built the first time a client needs it, and `archive` is being
+built. If you need either, tell us and we will confirm timing before your
+accounts are created.
+
+**On 17.3.** We only ask this when you have told us that a framework applies.
+We don't need it to proceed. We ask for it so there is a record that you know
+what your obligations are and chose where to meet them.
 
 ---
 
