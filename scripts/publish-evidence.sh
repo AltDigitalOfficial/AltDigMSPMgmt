@@ -35,7 +35,7 @@ trap 'rm -rf "${BUILD}"' EXIT
 > "${BUILD}/.sources"
 # reattribute is packaged though no template references it yet: it runs from
 # scripts/reattribute-evidence.sh today, and B-157 makes it automatic.
-for MODULE in record collect sender completeness custody reattribute; do
+for MODULE in record collect sender completeness custody reattribute layer; do
   cp "${REPO_ROOT}/evidence/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
   printf '%s\n' "$(win_path "${REPO_ROOT}/evidence/src/${MODULE}.py")" \
     >> "${BUILD}/.sources"

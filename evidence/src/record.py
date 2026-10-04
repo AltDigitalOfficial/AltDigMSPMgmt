@@ -150,7 +150,7 @@ def allocate(tenant, category):
 
 def build(tenant, partner, category, source, payload,
           control_ref=None, occurred_at=None, account_id=None,
-          reattributed_from=None):
+          reattributed_from=None, layer=None, layer_source=None):
     """An evidence record, numbered and ready to buffer.
 
     `occurred_at` is when the EVENT happened; `emitted_at` is when the platform
@@ -182,6 +182,11 @@ def build(tenant, partner, category, source, payload,
     }
     if reattributed_from:
         body["reattributed_from"] = reattributed_from
+    # D-029: whose evidence this is, and how that was decided (layer.py).
+    # Recorded only, until B-157 phase C routes on it.
+    if layer_source:
+        body["layer"] = layer
+        body["layer_source"] = layer_source
     # Content hash over everything except the hash itself.
     #
     # Not a security control -- anything that can write the record can

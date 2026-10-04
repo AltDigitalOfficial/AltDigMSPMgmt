@@ -332,6 +332,14 @@ Resources:
             Effect: Allow
             Action: sqs:SendMessage
             Resource: !GetAtt EvidenceQueue.Arn
+          # The layer of a Config-evaluated resource: Config compliance events
+          # carry no tags, so they are read from the organization aggregator
+          # (security/40-config-aggregator.yaml). Read-only, and only an
+          # aggregator; its ARN carries a generated id, hence the wildcard.
+          - Sid: LookUpResourceLayer
+            Effect: Allow
+            Action: config:SelectAggregateResourceConfig
+            Resource: !Sub 'arn:${AWS::Partition}:config:${AWS::Region}:${AWS::AccountId}:config-aggregator/*'
           - Sid: ReadTenantMap
             Effect: Allow
             Action: ssm:GetParameter
@@ -372,6 +380,7 @@ Resources:
           EVIDENCE_LEDGER_TABLE: !Ref LedgerTable
           EVIDENCE_QUEUE_URL: !Ref EvidenceQueue
           EVIDENCE_TENANT_MAP_PARAM: !Ref TenantMapParam
+          EVIDENCE_CONFIG_AGGREGATOR: platform-organization
           ALERT_BUS_NAME: !Ref AlertBusName
 
   # design 04's four categories, as they arrive on the bus. Deliberately

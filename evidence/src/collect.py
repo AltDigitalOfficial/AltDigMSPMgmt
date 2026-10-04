@@ -43,6 +43,7 @@ import time
 
 import boto3
 
+import layer
 import record
 
 dynamodb = boto3.client("dynamodb")
@@ -215,6 +216,10 @@ def collect(event, context=None):
               {"account_id": account_id, "category": category})
         attribution = {"tenant": UNATTRIBUTED_TENANT, "partner": None}
 
+    # Recorded, not yet routed on (B-157 phase C, stage one). A failed lookup
+    # costs the record nothing: it is still numbered, kept and sent.
+    which_layer, layer_source = layer.of(event, category)
+
     item = record.build(
         tenant=attribution["tenant"],
         partner=attribution.get("partner"),
@@ -224,6 +229,8 @@ def collect(event, context=None):
         control_ref=control_ref,
         occurred_at=event.get("time"),
         account_id=account_id or None,
+        layer=which_layer,
+        layer_source=layer_source,
     )
 
     # Ledger FIRST. See the module docstring.
