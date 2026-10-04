@@ -102,7 +102,7 @@ SEQEOF
 ok "sequence allocated on ingest"
 
 info "Checking the ledger is written before the queue"
-"${PY}" - "$(win_path "${REPO_ROOT}/evidence/src/collect.py")"          "$(win_path "${REPO_ROOT}/evidence/src/custody.py")"          "$(win_path "${REPO_ROOT}/evidence/src/reattribute.py")" <<'ORDEREOF'
+"${PY}" - "$(win_path "${REPO_ROOT}/evidence/src/collect.py")"          "$(win_path "${REPO_ROOT}/evidence/src/custody.py")"          "$(win_path "${REPO_ROOT}/evidence/src/reattribute.py")"          "$(win_path "${REPO_ROOT}/evidence/src/completeness.py")" <<'ORDEREOF'
 import os
 import re
 import sys

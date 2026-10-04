@@ -52,10 +52,12 @@ import record
 
 dynamodb = boto3.client("dynamodb")
 events_client = boto3.client("events")
+sqs = boto3.client("sqs")
 ssm = boto3.client("ssm")
 
 LEDGER_TABLE = os.environ.get("EVIDENCE_LEDGER_TABLE", "")
 SEQUENCE_TABLE = os.environ.get("EVIDENCE_SEQUENCE_TABLE", "")
+QUEUE_URL = os.environ.get("EVIDENCE_QUEUE_URL", "")
 ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
 TENANT_MAP_PARAM = os.environ.get("EVIDENCE_TENANT_MAP_PARAM",
                                   "/platform/evidence/tenants")
@@ -172,6 +174,13 @@ def _persist(tenant, partner, kind, payload, control_ref):
             TableName=LEDGER_TABLE,
             Item=_to_item(item),
             ConditionExpression="attribute_not_exists(PK)")
+        # Queued now, after the ledger row, as collect.py does. Left for the
+        # replay, it was still pending when the next gap scan ran, so the
+        # pipeline reported its own heartbeat and its own gap findings as
+        # gaps, every hour, each one guaranteeing the next (B-157).
+        if QUEUE_URL:
+            sqs.send_message(QueueUrl=QUEUE_URL,
+                             MessageBody=json.dumps(item, default=str))
     return item
 
 

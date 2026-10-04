@@ -546,6 +546,15 @@ Resources:
               - dynamodb:Query
               - dynamodb:PutItem
             Resource: !GetAtt LedgerTable.Arn
+          # Its own findings are queued as they are written, like the
+          # collector's. Before 2026-10-04 they waited for the hourly replay,
+          # which picks a record up only after the same 60-minute grace the gap
+          # scan uses -- so the scan found them first, every hour, and each
+          # false gap's own record became the next hour's false gap (B-157).
+          - Sid: QueueOwnFindings
+            Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt EvidenceQueue.Arn
           - Sid: ReadTenantMap
             Effect: Allow
             Action: ssm:GetParameter
@@ -589,6 +598,7 @@ Resources:
           EVIDENCE_SEQUENCE_TABLE: !Ref SequenceTable
           EVIDENCE_LEDGER_TABLE: !Ref LedgerTable
           EVIDENCE_TENANT_MAP_PARAM: !Ref TenantMapParam
+          EVIDENCE_QUEUE_URL: !Ref EvidenceQueue
           EVIDENCE_INFLIGHT_GRACE_MINUTES: !Ref InflightGraceMinutes
           TRUVEON_ENDPOINT: !Ref TruveonEndpoint
           TRUVEON_SECRET_PREFIX: !Ref TruveonSecretPrefix

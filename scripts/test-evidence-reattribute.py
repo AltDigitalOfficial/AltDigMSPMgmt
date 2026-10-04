@@ -291,5 +291,40 @@ class GapScanCoversTheUnattributedTenant(unittest.TestCase):
                          f"{UNATTRIBUTED}#security-finding")
 
 
+class CompletenessQueuesItsOwnRecords(unittest.TestCase):
+    """Left for the replay, its own records were still pending at the next gap
+    scan: two false gaps an hour, each one's record the next hour's gap."""
+
+    def test_persist_writes_the_ledger_then_queues(self):
+        calls = []
+
+        class DB:
+            def put_item(self, **kw):
+                calls.append(("ledger", kw["Item"]["PK"]["S"]))
+
+            def update_item(self, **kw):              # sequence allocation
+                return {"Attributes": {"seq": {"N": "7"}}}
+
+        class Q:
+            def send_message(self, QueueUrl, MessageBody):
+                calls.append(("queue", json.loads(MessageBody)["stream_id"]))
+
+        saved = (completeness.dynamodb, record.dynamodb, completeness.sqs,
+                 completeness.LEDGER_TABLE, completeness.QUEUE_URL, record.SEQUENCE_TABLE)
+        completeness.dynamodb = record.dynamodb = DB()
+        completeness.sqs = Q()
+        completeness.LEDGER_TABLE, completeness.QUEUE_URL = "ledger", "queue"
+        record.SEQUENCE_TABLE = "sequence"
+        try:
+            completeness._persist(tenant="oeight-oeight", partner="oeight",
+                                  kind="heartbeat", payload={}, control_ref="x")
+        finally:
+            (completeness.dynamodb, record.dynamodb, completeness.sqs,
+             completeness.LEDGER_TABLE, completeness.QUEUE_URL,
+             record.SEQUENCE_TABLE) = saved
+        self.assertEqual(calls, [("ledger", "oeight-oeight#pipeline-completeness"),
+                                 ("queue", "oeight-oeight#pipeline-completeness")])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
