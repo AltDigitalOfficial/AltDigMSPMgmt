@@ -7143,3 +7143,52 @@ the way the instrumentation Lambda already recognises them.
   the tenant map. Also needs the Truveon session's answer on registering one
   AWS account in two Truveon tenants.
 - **D:** the archive bucket and B-128.
+
+### Phase A done, 2026-10-04 (`5c3a519`, `9e867db`)
+
+- **Questionnaire section 17** (`evidence.destination`: truveon, external or
+  archive; no `none`). Cross-field rules are in `derive-vesting.py`:
+  `external` names its platform, and `archive` with declared exposure needs a
+  dated acceptance (a role, not a name). It **halts** on external and archive
+  until phase D. The destination is written to the registry (`--evidence-destination`);
+  OEight's record says `truveon`, and its questionnaire has the section.
+- **Vesting gates on the destination at step 2a, before any account exists.**
+  Previously it gated at step 8, after creation, with `--defer-truveon` as the
+  way past. `--defer-truveon` and `--skip-truveon` are removed, and refuse
+  with a pointer to D-029. In onboarding, Truveon steps 2 and 6 follow the
+  destination. An OEight dry run passed end to end.
+- **The collector re-reads the tenant map on a miss** (at most once a minute),
+  as the router's tier map does. Publishing the map runs re-attribution.
+- **The gap scan covers the unattributed tenant**, and files those findings
+  under `altdigital-platform`. Filed under the unattributed tenant, each one
+  would be undeliverable and reported as a gap on the next scan.
+- **Found and fixed while verifying: every gap scan reported two false gaps.**
+  The completeness checks wrote their own records (heartbeat, gap findings,
+  reconciliations) to the ledger only, leaving them for the hourly replay,
+  which waits the same 60-minute grace the scan uses. The scan got there
+  first, every hour, and each false gap's record became the next hour's.
+  Since B-156 item 2 each one was a Jira intent, about two an hour since
+  02:15Z, sitting in the stalled Jira queue. **Clear those before the Jira
+  queue is drained tomorrow.** `_persist` now queues after the ledger write,
+  and the function gained `EVIDENCE_QUEUE_URL` and `sqs:SendMessage`.
+  Deployed with the new template via change set `b157-completeness-queue`.
+
+## B-158 · Log custody was built on 2026-09-23 and never deployed
+
+**Open**, 2026-10-04. Found comparing the deployed `platform-evidence` template
+with the repo's. The deployed one predates `8881b3a` ("Log custody: hourly
+evidence that every account's raw logs arrived"). It has no
+`LogArchiveBucketName`, `ConfigArchiveBucketName` or `OrganizationId`
+parameters, so `HasCustody` is false and the custody function, role and
+schedule do not exist. `publish-evidence.sh` prints the deploy line that
+supplies them, and that line was never run. The redeploy for B-157 kept them
+empty on purpose, so it could not turn custody on as a side effect.
+
+So the `log-custody` evidence stream design 04's raw-log position relies on
+("were they there at all?") has never produced a record. The deployed template
+also has its em dashes garbled to `???` from an earlier deploy; cosmetic.
+
+**To close:** deploy with the three parameters, from SSM per the no-hardcoding
+rule, and redeploy `security/10-log-archive.yaml` with `AuditAccountId` so the
+archive buckets grant `PlatformEvidenceCustody` `s3:ListBucket`. Then watch the
+first custody run.
