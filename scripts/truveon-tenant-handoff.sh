@@ -147,7 +147,9 @@ cmd_prepare() {
     --pipeline-account "${audit}" \
     --out "$(win_path "${target}")" \
     --pack-win "$(win_path "${out}")" \
-    --msp-win "$(win_path "${REPO_ROOT}")")" \
+    --msp-win "$(win_path "${REPO_ROOT}")" \
+    --msp-profile "${PLATFORM_AWS_PROFILE}" \
+    --msp-account "${PLATFORM_MGMT_ACCOUNT_ID}")" \
     || die "The Truveon pack could not be built. Nothing was written that should be used."
   [[ "${DRY_RUN}" == "1" ]] && rm -rf "${target}"
 
@@ -210,7 +212,9 @@ cmd_prepare_platform() {
     --pipeline-account "${audit}" \
     --out "$(win_path "${out}")" \
     --pack-win "$(win_path "${REPO_ROOT}/completed_qs/altdigital-platform.truveon")" \
-    --msp-win "$(win_path "${REPO_ROOT}")")" \
+    --msp-win "$(win_path "${REPO_ROOT}")" \
+    --msp-profile "${PLATFORM_AWS_PROFILE}" \
+    --msp-account "${PLATFORM_MGMT_ACCOUNT_ID}")" \
     || die "The platform pack could not be built."
   [[ "${DRY_RUN}" == "1" ]] && rm -rf "${out}"
 
