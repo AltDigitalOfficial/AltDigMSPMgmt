@@ -7195,3 +7195,140 @@ also has its em dashes garbled to `???` from an earlier deploy; cosmetic.
 rule, and redeploy `security/10-log-archive.yaml` with `AuditAccountId` so the
 archive buckets grant `PlatformEvidenceCustody` `s3:ListBucket`. Then watch the
 first custody run.
+
+---
+
+## B-159 · HIPAA eligibility: no source of truth for which services a HIPAA account may use
+
+**Proposed**, 2026-10-04, pending approval of
+[hipaa-eligibility.md](hipaa-eligibility.md). Arc8 is the first HIPAA tenant
+and nothing in the repository says which AWS services may hold PHI. AWS
+publishes the list as a web page with no API.
+
+**To build** — `eligibility/hipaa-eligible-services.tsv`, by hand from the
+page, never from a scrape (§1). Every row has a status: `eligible`,
+`carve-out` (§3), `excluded-feature` or `not-allowlisted`. Each row maps the
+service to IAM prefixes and Config types. Every §2.1 "uncertain" prefix stays
+`not-allowlisted` until there is documented evidence it belongs to the listed
+service. Also: the weekly drift-check Lambda in Platform Tooling, which flags
+and never regenerates, and is loud on parse failure.
+
+**Needs** E1, E2, E3, E4, E6, E11.
+
+---
+
+## B-160 · HIPAA eligibility: the preventive SCP
+
+**Proposed**, 2026-10-04. Depends on B-159.
+
+**To build** — a generator that turns the TSV into
+`policies/scp/09-hipaa-eligible-only.json`:
+- Statement A: deny `NotAction` [eligible + carve-out + platform-only], with
+  no principal exempt.
+- Statement B: deny `Action` [platform-only], exempting named principals in
+  the v2 shape, derived by `derive-scp-exemptions.py`. `TenantAppDeployer-*`
+  must never be exempt (B-136).
+- Feature-level `deny_actions`.
+
+Measure the minified size. Fall back to allow-list mode (§4.1 d) only if it
+overflows.
+
+**Before attach:**
+- 30 days of service-last-accessed on every platform role in Arc8 dev and
+  test, to prove no platform role needs a prefix outside the list.
+- `validate-policies.sh`, cfn-lint and cfn-guard.
+- Harness assertions for proposed V12, on Sandbox Canary attached **directly
+  to the account**, which is the production mechanism.
+
+**Blocks** E1. That is the canary question. If `synthetics` is not eligible,
+prod canaries are a design change.
+
+---
+
+## B-161 · HIPAA eligibility: nothing tells a dev-tier developer they used a non-eligible service
+
+**Proposed**, 2026-10-04. Depends on B-159 only. **Recommended first**, because
+Arc8 developers are working in dev now and prod does not exist yet.
+
+**To build** — the `eligibility/` component in Audit:
+- **Usage sweep (daily):** IAM service-last-accessed per role, through the
+  existing reader role.
+- **Inventory sweep (daily):** Config aggregator advanced query, including
+  `DataClassification=regulated` on non-eligible types.
+- **Attachment check (hourly):** registry against Organizations, through the
+  org reader.
+- An `(account, prefix)` state table for dedupe.
+- A `from_hipaa_eligibility` normaliser in `alerting/src/router.py`. The emitter
+  sets severity and the router routes (§4.4). There is no direct path to
+  PagerDuty.
+
+No member-side stack and no automated remediation.
+
+**Needs** E7, E8, E9.
+
+---
+
+## B-162 · HIPAA eligibility: no exception path for non-PHI use of a non-eligible service
+
+**Proposed**, 2026-10-04. Depends on B-160.
+
+**To build:**
+- `OVERRIDE#hipaa-eligibility:<prefix>` registry records with tenant attestation and
+  AltDigital approval, from three distinct individuals (B12).
+- Per-account generated policy variants. Attach the variant before detaching
+  the base.
+- Expiry warnings at 14 days and a finding at expiry.
+
+**Expiry never regenerates or re-attaches automatically.** Re-imposing a deny
+on a live prod service is an outage, so it stops and pages.
+
+**Needs** E5.
+
+---
+
+## B-163 · HIPAA eligibility: no evidence that the control exists or holds
+
+**Proposed**, 2026-10-04. Depends on B-160 and B-161.
+
+**To build** — the `hipaa-eligibility` evidence stream: list in force, list
+reviewed, attachment state, detections and exceptions.
+- Destination by D-029 layer: control state goes to `altdigital-platform`;
+  application-usage detections go to the client's declared destination.
+- Session names are stripped. Resource ARNs are sent as a digest only. No
+  request parameters.
+
+---
+
+## B-164 · HIPAA eligibility: contractors cannot learn this control from the error
+
+**Proposed**, 2026-10-04. Depends on B-159; ships with B-161.
+
+**To build** — developer guide changes:
+- A new §4.16, with the eligible list generated from the TSV, the
+  alternatives and the exception procedure.
+- A new row in the access-denied table.
+- A §4.15 amendment.
+- The "no PHI in a support case" rule.
+
+Also the digest line wording in §7.
+
+Pre-flight CI check deferred. **Trigger:** a developer asks for it, or the
+digest shows the same prefix recurring across weeks.
+
+---
+
+## B-165 · HIPAA eligibility: vesting would put a HIPAA prod account live without the SCP
+
+**Proposed**, 2026-10-04. Depends on B-160.
+
+**To build:**
+- `deploy-policies.sh` gets a derived target type `hipaa-enforced`, resolved
+  from the registry: `hipaa ∈ compliance_scope` and environment uat or prod,
+  or posture upgraded.
+- `vest-client.sh` attaches and verifies the SCP for such accounts, and
+  **blocks** go-live if it is absent or drifted.
+- The verification sweep gains the check.
+- Design 11's scope-upgrade procedure gains "attach" as a step.
+
+**Timing:** must exist before Arc8 prod is vested, which is waiting on the
+B-140 quota case. Registers D-030 on approval.

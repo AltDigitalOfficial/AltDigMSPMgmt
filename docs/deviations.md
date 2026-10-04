@@ -1796,3 +1796,34 @@ reconciliation) apply to every destination, including the archive.
 **Closes when** — the evidence sender splits destinations by layer, the
 questionnaire carries the destination, vesting checks it, and the archive
 bucket exists. Build in B-157.
+
+---
+
+## D-030 · Per-client compliance SCPs attach to accounts, not OUs
+
+**Decided** — Jamie, 2026-10-04, approving
+[hipaa-eligibility.md](hipaa-eligibility.md) §4.1.
+
+**What the design has** — design 15, "Why partner and client are OUs":
+per-client SCPs, "a client in a regulated niche", applied at OU level.
+
+**What is built** — `PlatformHipaaEligibleOnly` attaches directly to each
+account in the `hipaa-enforced` set, derived from the registry: `hipaa` in
+`compliance_scope`, and environment `uat` or `prod`, or posture upgraded by
+design 11's scope-change procedure.
+
+**Why** — the control varies by tier *within* a client (dev and test warn,
+uat and prod deny), and per account (exception variants, hipaa-eligibility §5).
+The client OU holds every tier, so attaching there blocks dev. A tier-level
+child OU would add a level design 15 does not draw, would make a scope upgrade
+a *move* of a live account rather than an attachment, and would need an OU per
+exception. Account-level attachment derived from the registry needs none of
+that, and compliance scope by tier is an account property, which design 10
+already places in the registry.
+
+**Cost** — the attachment is not visible in the OU tree. It is visible in the
+registry, in `attachments.tsv` as the derived target `hipaa-enforced`, and in
+the hourly attachment check.
+
+**Closes if** — the OU tree gains tier-level OUs for some other reason, at
+which point a child OU costs nothing extra.
