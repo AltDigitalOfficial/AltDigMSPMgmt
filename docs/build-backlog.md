@@ -7094,3 +7094,52 @@ until the DLQ (20,830, no longer growing) expires around 2026-10-18. Item 7
 
 Update design 04's cross-reference when this lands; design/ itself is not
 edited by build work.
+
+### 2026-10-04 — what was found before building, and what was decided
+
+**The layer tag is mostly absent from what the platform built.** Of the nine
+baseline templates, only `50-instrumentation` and `90-verification-reader` set
+`platform-layer`. Arc8's platform VPCs, security groups, KMS keys and DynamoDB
+tables carry `platform-managed` and no layer. The CLAUDE.md hard rule
+(2026-09-22) is not implemented, and B-127's `PLATFORM_LAYER_TAG_VALID` guard,
+recorded as proved, does not catch it. Alarm routing hid this because the
+default is infrastructure. Under D-029 every such resource would be
+"unclassified", with its evidence held and a daily email to the client's dev
+manager about AltDigital's own resources.
+
+**Security Hub findings carry the resource's tags** (`Resources[].Tags`), so
+their layer can be read with no extra call. **Config compliance events carry
+none.**
+
+**There is no Config aggregator in Audit.** `security/10-log-archive.yaml`
+says there is ("The Config aggregator in the Audit account holds queryable
+configuration history"). `describe-configuration-aggregators` there returns
+nothing. That comment is part of the stated reason the Config archive is
+acceptable without Object Lock.
+
+**AWS defaults and account-level findings** (default VPC and security group,
+`AwsAccount`, CloudFormation stacks) are untagged by nature. D-029 sends
+account-level evidence to AltDigital. AWS's pre-made resources are recognised
+the way the instrumentation Lambda already recognises them.
+
+**Decisions (Jamie, 2026-10-04):**
+- **Retrofit by StackSet-level tag.** `platform-layer=infrastructure` goes on
+  each baseline StackSet as a stack tag, which CloudFormation propagates to
+  every taggable resource. Staged rollout, Sandbox first. Fix the guard so it
+  actually catches a missing tag.
+- **Layer lookup through an organization Config aggregator in Audit**, queried
+  per Config event. This is off the paging path, so latency does not matter.
+  It also makes the log-archive comment true.
+- **Archive expiry 18 months** (D-029).
+
+**Build order:**
+- **A, unblocked:**
+  - `evidence.destination` in the questionnaire and registry;
+  - vesting §8 checks the destination, and `--defer-truveon` goes;
+  - the gap detector scans the unattributed tenant;
+  - publishing the tenant map runs re-attribution.
+- **B:** the tag retrofit and the guard fix.
+- **C:** the aggregator, the layer lookup, the sender split, and the layer in
+  the tenant map. Also needs the Truveon session's answer on registering one
+  AWS account in two Truveon tenants.
+- **D:** the archive bucket and B-128.

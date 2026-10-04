@@ -1754,8 +1754,9 @@ cleared.
    archive, **without Object Lock**. The existing archive is locked for
    compliance retention, which is the opposite of forgettable. Its lifecycle
    moves objects to Deep Archive and then expires them. A write there counts
-   as delivered, so design 04's completeness controls still hold. *Expiry
-   period: open (Jamie). One year is suggested.*
+   as delivered, so design 04's completeness controls still hold. **Expiry:
+   18 months** (Jamie, 2026-10-04: "just in case there's a lag", meaning a
+   dispute or a late-disclosed exposure that surfaces after a year).
 
 3. **An untagged or wrongly tagged resource raises its own report** to the
    tenant's dev manager and to Jamie. It is fixed together with the team that
