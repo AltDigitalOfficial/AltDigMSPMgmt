@@ -7032,6 +7032,18 @@ gap-checked. Stranded rows there were invisible to both completeness controls.
 Only the replay touched them. B-157 should scan it, or hold unattributed
 records as D-029 holds unclassified ones.
 
+**Correction, 2026-10-04 03:30Z: the page was not Security Hub waves.**
+"What happened" above says findings arrived in waves of about 380 per five
+minutes. They did not. `platform-evidence-collect` (one invocation per piece of
+evidence) peaked at 90 per five minutes on vesting day (2026-10-01) and has
+stayed between 23 and 42 since, including through the page. The waves were the
+hourly replay re-queueing every stranded row (about 690 by then), retried every
+six minutes (the queue's visibility timeout, 360 s), with each failure also
+raising a router event. The backlog grew from vesting onwards until a cycle
+crossed 500. The Security Hub findings in the router log sample were the
+routine trickle, interleaved with the failures. Root cause: items 1 and 8,
+both now closed.
+
 **Item 5 can now be measured.** No ledger backlog is left to replay. In-flight
 copies of the moved rows drain to the DLQ within about an hour, and the DLQ
 then stops growing, so the 2026-10-17 expiry estimate holds again. Measure the
