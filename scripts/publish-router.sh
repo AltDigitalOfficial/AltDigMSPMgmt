@@ -107,7 +107,7 @@ fi
 
 hr
 info "Deploy the routing layer into the Audit account:"
-log "  scripts/deploy-stack.sh --account audit \\"
+log "  scripts/deploy-to-account.sh --account altdig-security-audit \\"
 log "    --template alerting/20-router.yaml --stack platform-router \\"
 log "    OrganizationId=<o-...> AlertsKeyArn=<key> AlertsTopicArn=<topic> \\"
 log "    LowUrgencyTopicArn=<low> RouterCodeBucket=${BUCKET} RouterCodeKey=${KEY}"

@@ -6992,8 +6992,9 @@ to the dossier normaliser (`497cb62`, tests in
 `b156-evidence-normaliser`, which kept the previous template and every
 parameter except `RouterCodeKey`. Within a minute, live events were routing
 by name with their declared class honoured, and the router had no errors.
-`publish-router.sh` tells the operator to run `scripts/deploy-stack.sh`,
-which does not exist. Router deploys have always been done by hand.
+`publish-router.sh` told the operator to run `scripts/deploy-stack.sh`,
+which never existed. The real script is `deploy-to-account.sh`, and the hint
+now names it.
 
 **Item 8, found by item 2: 181 Arc8 records are stuck under
 `altdigital-unattributed`.** Arc8 dev and test produced Config and Security
@@ -7011,6 +7012,30 @@ The general defect: onboarding necessarily vests accounts before step 8
 publishes the map, so every future client will leave a stranded batch like
 this. D-029's "held as unclassified, replayed when fixed" is the right shape
 for unattributed evidence too. B-157 should cover both.
+
+**Item 8 done, 2026-10-04 02:33Z** (`6bbc21f`). `evidence/src/reattribute.py`,
+run by `scripts/reattribute-evidence.sh`. The dry run listed 181, all mapped,
+none stuck. The run moved all 181: 91 to `oeight-oeight#config-compliance` and
+90 to `oeight-oeight#security-finding`, each with a fresh sequence number and
+`reattributed_from`. The originals are `reattributed` with a forward pointer,
+never `delivered`. Within minutes all 181 copies were delivered, and the whole
+ledger held only 4 pending rows (normal in-flight pipeline-completeness
+records). The gap detector and count reconciliation now treat `reattributed`
+as accounted for and `reattributing` as still missing. Deployed via change set
+`b156-reattribution-2` (ArtifactKey only). A first attempt,
+`b156-reattribution`, named a nonexistent parameter and FAILED with no change.
+It is left in place, in keeping with not deleting things by hand.
+
+**Found while building it:** the gap detector and count reconciliation only
+scan tenants in the tenant map, so the unattributed tenant has never been
+gap-checked. Stranded rows there were invisible to both completeness controls.
+Only the replay touched them. B-157 should scan it, or hold unattributed
+records as D-029 holds unclassified ones.
+
+**Item 5 can now be measured.** No ledger backlog is left to replay. In-flight
+copies of the moved rows drain to the DLQ within about an hour, and the DLQ
+then stops growing, so the 2026-10-17 expiry estimate holds again. Measure the
+background rate after the 03:00Z replay, then decide the threshold.
 
 ## B-157 · Build D-029: evidence destinations by layer, client destination declared
 
