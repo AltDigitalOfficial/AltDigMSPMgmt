@@ -7172,6 +7172,9 @@ the way the instrumentation Lambda already recognises them.
   queue is drained tomorrow.** `_persist` now queues after the ledger write,
   and the function gained `EVIDENCE_QUEUE_URL` and `sqs:SendMessage`.
   Deployed with the new template via change set `b157-completeness-queue`.
+  **Verified:** the 20:22Z scan still found 2, which were the last records
+  written before the fix. The 21:22Z scan found 0, raised no findings, and
+  left no pending rows in the ledger.
 
 ## B-158 · Log custody was built on 2026-09-23 and never deployed
 
