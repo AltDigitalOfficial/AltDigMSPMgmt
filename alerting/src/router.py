@@ -411,6 +411,19 @@ NORMALISERS = {
     "GuardDuty Finding": from_guardduty,
     "Config Rules Compliance Change": from_config,
     "Platform Incident Dossier": from_dossier,
+    # The evidence pipeline's own findings: collect, sender, completeness and
+    # custody all emit this, already in dossier shape (alarm, assessment,
+    # current_state, routing). It had no entry, so every one fell to the
+    # review queue as "unrecognised event shape" -- including "this tenant's
+    # evidence is reaching no Truveon tenant", which sat there unread from
+    # Arc8's vesting until a runaway page found it (B-156).
+    #
+    # Every emitter declares its routing, and none declares one that pages.
+    # The events come from Audit, a prod-tier account, so the dossier default
+    # WOULD page; the declared class is honoured only as a downgrade, as for
+    # any dossier. An emitter that forgets to declare one pages -- loud, and
+    # the right way to fail for a completeness control.
+    "evidence-completeness": from_dossier,
 }
 
 
