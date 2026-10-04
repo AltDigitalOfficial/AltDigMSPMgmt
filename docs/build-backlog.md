@@ -6986,6 +6986,32 @@ where one would be harmless. Deleting things by hand is a habit worth not
 forming. The 14-day retention empties it by about 2026-10-17. *Item 3's DLQ
 alarm is not deployed before then*, or it fires on day one.
 
+**Item 2 done, 2026-10-04 02:15Z.** The router maps `evidence-completeness`
+to the dossier normaliser (`497cb62`, tests in
+`scripts/test-router-evidence.py`). Deployed to Audit through change set
+`b156-evidence-normaliser`, which kept the previous template and every
+parameter except `RouterCodeKey`. Within a minute, live events were routing
+by name with their declared class honoured, and the router had no errors.
+`publish-router.sh` tells the operator to run `scripts/deploy-stack.sh`,
+which does not exist. Router deploys have always been done by hand.
+
+**Item 8, found by item 2: 181 Arc8 records are stuck under
+`altdigital-unattributed`.** Arc8 dev and test produced Config and Security
+Hub evidence from 2026-10-01 21:36Z, before onboarding published them to the
+tenant map. The collector filed it under the unattributed tenant (by design,
+so it is not lost). But attribution is fixed at collection, so those 181 rows
+stay owed to a tenant with no key, permanently. The hourly replay re-queues
+them, and each one fails ten times. That is about 1,800 failed sends an hour:
+7,484 in the six hours to 02:16Z, more than OEight's own failures. It is
+**the larger part of the background rate in item 5**, it continues after the
+OEight key, and it keeps the DLQ filling, so the DLQ will *not* have emptied
+by 2026-10-17 unless this is fixed.
+
+The general defect: onboarding necessarily vests accounts before step 8
+publishes the map, so every future client will leave a stranded batch like
+this. D-029's "held as unclassified, replayed when fixed" is the right shape
+for unattributed evidence too. B-157 should cover both.
+
 ## B-157 · Build D-029: evidence destinations by layer, client destination declared
 
 **Open** — 2026-10-03. Design in D-029.
