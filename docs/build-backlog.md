@@ -5566,6 +5566,54 @@ every resource in the estate is platform-built and carries the tag by the hard
 rule, so the report would have nothing to say and would teach people to ignore
 it.
 
+### Revived 2026-10-03 — design decided with Jamie
+
+The trigger has very likely fired. Commit `5c04761` ("Pipeline provisions most
+resources") means something other than the baseline is creating resources in
+tenant accounts. D-029 now gives the report a second job: an untagged resource's
+evidence is held as `unclassified` until the tag is fixed.
+
+**Scope: "insufficiently tagged", not only the layer tag.** A resource is
+reported when any of the following is missing or invalid:
+- `Owner`, `Application`, `DataClassification` (public / internal /
+  confidential / regulated), from SCP 04;
+- `platform-layer` (`infrastructure` / `application`), from B-127.
+
+**Audience: the tenant's dev manager, CC Jamie.** One email per tenant per
+day, through the router with email as its route, like the digest (B-155).
+Nothing sends directly.
+
+**No email on a day with nothing to report.** An empty daily email trains
+people to ignore it.
+
+**Content.** Three sections:
+- *NEW SINCE YESTERDAY*: account and tier, region, resource type, ARN, created
+  when and by which principal, and each missing tag or invalid value with the
+  allowed values;
+- *STILL OPEN*: with days open;
+- *RESOLVED SINCE YESTERDAY*: noting that held evidence was delivered.
+
+The email opens with the consequence (alarms page AltDigital, not the team;
+evidence is held) and closes with a four-line tag reference. The fix belongs
+in infrastructure code, not the console. The principal appears in the email,
+which goes to the client's own manager, and never in the repository.
+
+**Detection.** A daily query of the organization-wide Config inventory from
+Audit. Not the Resource Groups Tagging API, which (as understood, *to verify*)
+does not return resources that have never been tagged, and those are exactly
+the ones wanted. *Unverified:* whether Config records every resource type an
+application team might create. Check against the resource types actually
+present in Arc8 before relying on it.
+
+**Before switching it on:** count what it would report for Arc8 dev and test
+today. SCP 04 is on Sandbox only, and its layer statement is not deployed
+(drift, B-135), so the first list may be long. A long first list is a one-time
+cleanup with Wayne's team, not a first email. Widening SCP 04 to Members is
+what keeps the list from growing back.
+
+**Not decided here:** whether this is built with B-090's cost reports. Both
+are "generate a document and send it" jobs.
+
 ## B-129 · The layer tag is a claim, and nothing checks it against provenance
 
 **Open** — 2026-09-22. Split out of B-127, which built everything except this.
@@ -6837,3 +6885,97 @@ addresses, and therefore real bounces, begin.
 
 **Unconfirmed:** whether `platform@altdigital.ai` is a mailbox anyone reads.
 Replies to the digest go there.
+
+## B-156 · Runaway page: one finding cost five invocations, and OEight evidence is reaching no tenant
+
+**Open** — 2026-10-03.
+
+**What happened.** `platform-lambda-invocation-runaway` (Audit) paged at
+09:29Z and again at 09:36Z. It was OK by 09:39Z. Security Hub imported
+findings from Arc8 test (`904883674541`) in waves about six minutes apart,
+peaking around 380 per five minutes. Each finding:
+1. went to `platform-router` and was routed to the digest;
+2. went through evidence collection to `platform-evidence-sender`, which
+   failed it: *no Truveon ingest key for tenant 'oeight-oeight'*;
+3. raised a `platform-evidence-no-credential` event on the alerts bus, which
+   ran the router a second time. The router logged *"unrecognised event
+   shape"* for `evidence-completeness` and sent it to the review queue;
+4. was retried by SQS (`maxReceiveCount` 10), repeating steps 2 and 3.
+
+Not a loop: nothing fed back into step 1. Errors stayed at zero, because a
+missing key is "not delivered", not an exception. Cost was negligible, about
+2,600 extra invocations of around 10 ms each.
+
+**Actions taken.** `platform-lambda-invocation-runaway` had its alarm actions
+**disabled** at about 09:45Z (Jamie, at 03:45 local) so this could be worked
+in daylight. The two EventBridge runaway alarms were left enabled. **It does
+not re-enable itself.**
+
+**Items.**
+1. **Ingest key.** Neither `oeight/oeight` nor `oeight/arc8` is linked, and
+   neither key exists. Arc8 dev and test were vested on `--defer-truveon`.
+   OEight does have a Truveon tenant. *First decide* why the evidence tenant
+   map attributes Arc8 test to `oeight-oeight` and not `oeight-arc8`, because
+   the key has to be stored under the name the sender uses. Then
+   `truveon-tenant-handoff.sh store-key`, run by Jamie from a pipe; the key
+   never enters an assistant's context. Then drop the
+   `TruveonEvidenceUnverified` override.
+2. **The router does not recognise the evidence sender's own failure
+   events.** `platform.evidence` / `evidence-completeness`
+   (`record_type: evidence-delivery-finding`) falls through to the review
+   queue as "unrecognised event shape". The fallback did its job and nothing
+   was dropped, but it buried "a tenant's evidence is going nowhere" under a
+   generic reason. Give it a route.
+3. **Nothing alarms on `platform-evidence` or `platform-evidence-dlq`.** The
+   retries were moving to the dead-letter queue silently.
+4. **The vesting override text is wrong.** `TruveonEvidenceUnverified` says
+   the pipeline raises a no-credential finding "hourly". The sender raises
+   one per tenant per *batch*, which on 2026-10-03 meant hundreds in a
+   quarter of an hour. Superseded by D-029, which removes `--defer-truveon`,
+   but correct the text if the flag outlives this item.
+5. **Background rate is past the runaway alarm's revisit trigger.** Normal
+   was measured at 1–6 per five minutes when the alarm was built (2026-09-21);
+   it now runs at about 130, a quarter of the 500 threshold, which is the
+   runbook's trigger. Most of that is the router and evidence sender
+   handling these same failing deliveries. *Fix items 1 and 2 first, then
+   measure the real background, then decide the threshold.*
+6. **Re-enable the alarm** after item 5:
+   `aws cloudwatch enable-alarm-actions --alarm-names platform-lambda-invocation-runaway`
+   in Audit.
+7. `resolve_accounts audit` and `/org/account/*` under `msp-mgmt` returned
+   nothing. `truveon-tenant-handoff.sh` reads
+   `/org/account/altdig-security-audit`, so `audit` may simply be the wrong
+   alias, but the path listing was empty too. Check where account ids
+   are published.
+
+**Design consequence:** D-029. Under it, the infrastructure findings that
+failed here go to AltDigital's tenant, whose key exists.
+
+## B-157 · Build D-029: evidence destinations by layer, client destination declared
+
+**Open** — 2026-10-03. Design in D-029.
+
+1. **Collector and sender:** read `platform-layer` from the Config
+   configuration item, as the instrumentation Lambda already does (B-127
+   piece 3). Infrastructure and account-level evidence go to
+   `altdigital-platform`. Application evidence goes to the client's
+   destination. Anything else is held as `unclassified`, not retried
+   through SQS: the retries are what multiplied B-156.
+2. **Operator-action streams** (elevation, change, containment, restore,
+   alarm handling) go to `altdigital-platform` for every tenant.
+3. **Questionnaire and registry:** `evidence.destination` with
+   `truveon | external | archive`, required. Add the regulatory-exposure
+   declaration and, where exposure is declared but compliance is declined,
+   a dated acceptance.
+4. **Archive bucket** in Log Archive: no Object Lock; lifecycle to Deep
+   Archive, then expiry (period open, D-029). The ledger marks delivery.
+5. **Vesting §8:** check the declared destination; require a key only for
+   `truveon`. Remove `--defer-truveon` and the override it writes.
+6. **Tenant map:** add the layer dimension. Settle B-156 item 1's naming
+   question first, so the map is restructured once.
+7. **Runbook:** what an operator does when operations surface clear evidence
+   of undisclosed regulated data (D-029 caveat). Art reviews.
+8. **`external`:** not built. *Trigger:* the first client who declares it.
+
+Update design 04's cross-reference when this lands; design/ itself is not
+edited by build work.

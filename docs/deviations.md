@@ -1693,3 +1693,105 @@ The three alarms used to exist only when `AlertTopicArn` was passed
 topic, and the parameter is gone.
 
 **Group 2 is complete.**
+
+---
+
+## D-029 · Evidence goes where its layer belongs, and a client's compliance platform is the client's choice
+
+**Decided** — Jamie, 2026-10-03, after the runaway page that B-156 records.
+
+**What the design has** — design 04, "Evidence pipeline to Truveon": every
+member organisation has a separate Truveon tenant, and all evidence for its
+accounts (Config state, Security Hub findings, change events, operational
+evidence) is pushed into it. `vest-client.sh` §8 enforces this, and
+`--defer-truveon` is the only way past it: it records a
+`TruveonEvidenceUnverified` override, an exception that is expected to be
+cleared.
+
+**Why that changes** — two reasons.
+
+1. *A client may already have a compliance platform, or may need none.* Under
+   design 04, either case leaves a permanent override and a no-credential
+   finding on every evidence batch, indefinitely. That is the noise behind
+   B-156, made permanent by design.
+2. *Most of what an account produces is about AltDigital, not the client.*
+   The findings that failed on 2026-10-03 were on `StackSet-platform-*`
+   stacks and `Platform*` roles. They are evidence for AltDigital's own audit.
+   Sending them to a client tenant puts our evidence somewhere we may not
+   control. If the client has no tenant, it goes nowhere.
+
+**Decision** —
+
+1. **Evidence follows `platform-layer`, the same tag that decides who is
+   paged (B-127).**
+
+   | Layer | Destination |
+   |---|---|
+   | `infrastructure`: platform-built resources, and what AltDigital does in the account (elevation, change, containment, restore tests, alarm handling) | AltDigital's Truveon tenant (`altdigital-platform`), always |
+   | Account-level findings with no resource (root use, CloudTrail, CIS account checks) | AltDigital's tenant. The account baseline is ours |
+   | `application` | The client's declared destination (item 2) |
+   | Missing or invalid layer | Held in the ledger as `unclassified` and reported (item 3). Never guessed |
+
+   Entity-blind, as B-127 is: the tag names the layer, and the tenant's
+   registry record maps the layer to a destination.
+
+2. **Each client declares one destination for application evidence at
+   onboarding:**
+   - `truveon`: the client's own Truveon tenant, which they may also use for
+     their wider corporate governance;
+   - `external`: the client's own compliance platform. A connector is built
+     per vendor, and only when a client needs it. Until then the archive
+     (below) is the pickup point;
+   - `archive`: the client uses neither. Events go to a cheap bucket that
+     is meant to be forgotten.
+
+   There is no `none`. The declaration is required, so "this client has no
+   destination" is an onboarding defect, not a state the sender has to
+   handle. **The rule stays single:** application evidence goes to the
+   client's declared destination.
+
+   **The archive bucket** is in Log Archive, separate from the existing
+   archive, **without Object Lock**. The existing archive is locked for
+   compliance retention, which is the opposite of forgettable. Its lifecycle
+   moves objects to Deep Archive and then expires them. A write there counts
+   as delivered, so design 04's completeness controls still hold. *Expiry
+   period: open (Jamie). One year is suggested.*
+
+3. **An untagged or wrongly tagged resource raises its own report** to the
+   tenant's dev manager and to Jamie. It is fixed together with the team that
+   created the resource, and the held evidence replays when the tag is
+   corrected. Design in B-128, revived the same day.
+
+4. **Vesting §8 checks the declared destination, not "Truveon linked".**
+   It requires a key only where the destination is `truveon`.
+   `--defer-truveon` is removed.
+
+**What AltDigital does not take on** (Jamie) — a compliance obligation for a
+standard the client has not disclosed. If a client has regulatory exposure
+(HIPAA, PCI or similar) but does not declare it at onboarding and does not
+ask for a BAA, the platform does not ask, does not infer, and does not
+enforce it.
+
+*Caveat for Art or counsel to confirm.* Business-associate status under HIPAA
+depends on what a provider actually does with health data, not on whether a
+BAA was signed. HHS's cloud guidance protects a provider that lacks *actual
+or constructive* knowledge that it is handling a client's health data.
+"Constructive" (should have known) is the exposure: if the platform's own
+tooling (a finding, a Macie hit, a resource name) makes health data obvious
+and nothing happens, the defence weakens, and once we know there is a short
+window to comply or return the data. **Open:** a runbook step for what an
+operator does when operations surface clear evidence of undisclosed
+regulated data. The duty is to act on what we see, not to go looking.
+
+A client who **declares** exposure and declines to address it with us gets a
+dated, owned acceptance recorded at onboarding, not a gap.
+
+**Unchanged** — Security Hub, Config and the alarm estate run in every
+account regardless of destination. They are how AltDigital operates the
+client's security. Only where their evidence goes changes. Design 04's
+completeness controls (sequence numbers, heartbeat, buffering,
+reconciliation) apply to every destination, including the archive.
+
+**Closes when** — the evidence sender splits destinations by layer, the
+questionnaire carries the destination, vesting checks it, and the archive
+bucket exists. Build in B-157.
