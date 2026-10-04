@@ -420,7 +420,10 @@ cmd_put_client() {
 cmd_get_client() {
   [[ -n "${PARTNER}" ]] || die "--partner is required."
   [[ -n "${SLUG}" ]]    || die "--slug is required."
-  ddb_init
+  # stdout is the item and nothing else: callers parse it as JSON. ddb_init's
+  # "Account confirmed" line used to precede it, the parse failed, and
+  # truveon-tenant-handoff.sh status reported every linked client as NOT linked.
+  ddb_init >&2
   ddb get-item --table-name "${TABLE}" \
     --key "{\"PK\":{\"S\":\"PARTNER#${PARTNER}\"},\"SK\":{\"S\":\"CLIENT#${SLUG}\"}}" \
     --query 'Item' --output json
