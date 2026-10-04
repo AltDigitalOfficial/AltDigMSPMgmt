@@ -142,6 +142,13 @@ TIER_DEFAULT_ROUTING = {
     "uat": "jira_and_commercial", "prod": "pagerduty",
 }
 
+# Urgency order of the routing classes, for refusing an emitter's escalation.
+# review_queue ranks lowest: it reaches nobody until a human looks.
+ROUTING_RANK = {
+    "review_queue": 0, "digest": 1, "digest_and_jira": 2,
+    "jira_and_commercial": 3, "pagerduty": 4,
+}
+
 # Finding severities that page in a production account. Below this they are
 # tickets, because design/06 is explicit that nothing pages which a human
 # cannot act on right now, and a MEDIUM GuardDuty finding at 3am is not that.
@@ -405,6 +412,34 @@ def match_event_spec(event):
     return None
 
 
+def from_hipaa_eligibility(event):
+    """A HIPAA eligibility detection, upstream change or attachment check.
+
+    docs/hipaa-eligibility.md §4.4. The emitters (eligibility/src/sweep.py,
+    upstream.py) state a SEVERITY, which is a fact about the event, and never a
+    destination. The account the detection is about is in the detail, not in
+    the envelope: the sweep runs in Audit, and routing by the envelope account
+    would treat every dev-account detection as production.
+    """
+    d = event.get("detail") or {}
+    return {
+        "kind": "eligibility",
+        "source": event.get("source") or "platform.eligibility",
+        "account_id": d.get("account_id") or event.get("account"),
+        "region": event.get("region"),
+        # Stable per (account, check, subject), so a detection repeated by the
+        # next day's sweep updates one incident or ticket instead of opening a
+        # second. dedup_key() hashes account, resource and title.
+        "title": f"HIPAA eligibility: {d.get('check') or 'detection'} — {d.get('subject') or 'unknown'}",
+        "resource": d.get("subject") or "unknown",
+        "severity": d.get("severity"),
+        "reason": d.get("summary"),
+        "occurred_at": d.get("detected_at") or event.get("time"),
+        "dossier": d,
+        "routing": d.get("routing"),
+    }
+
+
 NORMALISERS = {
     "CloudWatch Alarm State Change": from_alarm,
     "Security Hub Findings - Imported": from_security_hub,
@@ -424,6 +459,10 @@ NORMALISERS = {
     # any dossier. An emitter that forgets to declare one pages -- loud, and
     # the right way to fail for a completeness control.
     "evidence-completeness": from_dossier,
+    # docs/hipaa-eligibility.md. Only HIPAA tenants' accounts produce these;
+    # tenants without HIPAA exposure are never swept, so nothing arrives here
+    # about them.
+    "hipaa-eligibility": from_hipaa_eligibility,
 }
 
 
@@ -601,6 +640,39 @@ def decide(norm):
         # a security containment to the response engine sends whoever is reading
         # it to the wrong component.
         return default, f"{norm.get('source') or 'dossier'} escalation, tier {tier}"
+
+    if norm["kind"] == "eligibility":
+        # Routed exactly as a finding is — tier default, and production pages
+        # only at HIGH or CRITICAL — with one addition: the emitter may
+        # DOWNGRADE. The upstream-list check runs in Platform Tooling, a prod
+        # account, and an AWS page edit is a review item, not a 3am page; only
+        # the emitter knows that, so it says so. It may never escalate (B-041,
+        # B-117): a declared class that pages where the tier default would not
+        # is refused.
+        tier, note = account_tier(norm.get("account_id"))
+        norm["environment_tier"] = tier
+        default = TIER_DEFAULT_ROUTING.get(tier, "digest")
+        sev = (norm.get("severity") or "").upper()
+        suffix = f". {note}" if note else ""
+        why = f"hipaa-eligibility, tier default for {tier}, severity {sev or 'UNRATED'}"
+        if default == "pagerduty" and sev not in FINDING_PAGES_AT:
+            default, why = "digest_and_jira", (
+                f"{tier} defaults to pagerduty, but a {sev or 'UNRATED'} eligibility "
+                "detection is not actionable right now — ticketed instead")
+        declared = norm.get("routing")
+        if declared and declared != default:
+            spec = DESTINATIONS.get(declared)
+            if spec is None:
+                return default, (f"{why}. Emitter declared unknown class '{declared}'; "
+                                  "ignored" + suffix)
+            # Stricter than the dossier rule above, which only refuses a class
+            # that pages. Here any class ranked above the default is refused,
+            # so a digest line cannot become a commercial ticket either.
+            if ROUTING_RANK.get(declared, 99) > ROUTING_RANK.get(default, 0):
+                return default, (f"{why}. Emitter declared '{declared}', above the tier "
+                                 "default; REFUSED — an emitter may not escalate (B-041)" + suffix)
+            return declared, f"{why}. Emitter declared '{declared}'; honoured as a downgrade{suffix}"
+        return default, why + suffix
 
     # Findings. No routing decision travels with them, so the tier default
     # applies — and the tier is now LOOKED UP rather than assumed. It used to

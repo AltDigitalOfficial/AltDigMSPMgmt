@@ -1,0 +1,256 @@
+# HIPAA eligible services — the source of truth for hipaa-eligibility.
+#
+# Read docs/hipaa-eligibility.md before editing. Short version:
+#   - Rows with on_aws_list=yes mirror the AWS HIPAA Eligible Services
+#     Reference VERBATIM in the service column. The weekly upstream check diffs
+#     on that column, so do not paraphrase it.
+#   - status: eligible | carve-out | pending | not-allowlisted | platform-only
+#       eligible         on the AWS list; prefixes allowlisted
+#       carve-out        NOT on the list, holds no PHI; prefixes allowlisted
+#       pending          plausibly a feature of a listed service, unconfirmed;
+#                        treated as not-allowlisted until decided (fails closed)
+#       not-allowlisted  denied in uat/prod, flagged in dev/test
+#       platform-only    allowlisted for named platform principals only
+#   - iam_prefixes, config_namespaces: comma-separated. A config entry may be a
+#     namespace (AWS::EC2) or a full type (AWS::ECR::PublicRepository); the most
+#     specific match wins.
+#   - deny_actions: semicolon-separated entries, each
+#       action[,action...][@condition-key=value[,value...]]
+#   - reviewed_by: opaque id of the human who checked the row against the page.
+#     "pending" until someone has. Never a name (CLAUDE.md, personal data).
+#
+# Nothing regenerates this file from a scrape. Edit it by hand, in a PR.
+#
+list_version: 2026-09-03/1
+service	on_aws_list	status	iam_prefixes	config_namespaces	deny_actions	alternative	date_added	reviewed_by	notes
+Alexa for Business [for healthcare skills only - requires Alexa Skills BAA. See HIPAA whitepaper for details]	yes	not-allowlisted	a4b				2026-10-04	pending	Needs an Alexa Skills BAA AltDigital does not hold; service discontinued
+AWS Amplify Console	yes	eligible	amplify	AWS::Amplify			2026-10-04	pending	amplify is the Hosting (formerly Console) API; amplifybackend and amplifyuibuilder held pending (E2)
+Amazon API Gateway	yes	eligible	apigateway,execute-api	AWS::ApiGateway,AWS::ApiGatewayV2			2026-10-04	pending	
+AWS App Mesh	yes	eligible	appmesh	AWS::AppMesh			2026-10-04	pending	
+AWS AppFabric	yes	eligible	appfabric	AWS::AppFabric			2026-10-04	pending	
+Amazon AppFlow	yes	eligible	appflow	AWS::AppFlow			2026-10-04	pending	
+AWS Application Migration Service	yes	eligible	mgn	AWS::MGN			2026-10-04	pending	
+Amazon Application Recovery Controller	yes	eligible	route53-recovery-control-config,route53-recovery-readiness,route53-recovery-cluster,arc-zonal-shift	AWS::Route53RecoveryControl,AWS::Route53RecoveryReadiness			2026-10-04	pending	
+AWS AppSync	yes	eligible	appsync	AWS::AppSync			2026-10-04	pending	
+Amazon Athena	yes	eligible	athena	AWS::Athena			2026-10-04	pending	
+AWS Audit Manager	yes	eligible	auditmanager	AWS::AuditManager			2026-10-04	pending	
+Amazon Augmented AI [excludes Public Workforce and Vendor Workforce for all features]	yes	eligible	sagemaker		sagemaker:CreateFlowDefinition,sagemaker:CreateLabelingJob@sagemaker:WorkteamType=public-crowd,vendor-crowd		2026-10-04	pending	A2I actions live under sagemaker; the workforce exclusion is enforceable by condition key
+Amazon Aurora	yes	eligible	rds,rds-data,rds-db	AWS::RDS			2026-10-04	pending	
+AWS B2B Data Interchange	yes	eligible	b2bi	AWS::B2BI			2026-10-04	pending	
+AWS Backup	yes	eligible	backup,backup-storage	AWS::Backup			2026-10-04	pending	backup-gateway and backup-search held pending
+AWS Batch	yes	eligible	batch	AWS::Batch			2026-10-04	pending	
+Amazon Bedrock	yes	eligible	bedrock	AWS::Bedrock			2026-10-04	pending	
+Amazon Bedrock AgentCore	yes	eligible	bedrock-agentcore	AWS::BedrockAgentCore			2026-10-04	pending	
+AWS Certificate Manager	yes	eligible	acm	AWS::CertificateManager			2026-10-04	pending	
+Amazon Chime	yes	eligible	chime	AWS::Chime			2026-10-04	pending	
+Amazon Chime SDK	yes	eligible	chime				2026-10-04	pending	Same prefix as Amazon Chime
+AWS Clean Rooms	yes	eligible	cleanrooms	AWS::CleanRooms			2026-10-04	pending	cleanrooms-ml held pending
+AWS Cloud 9	yes	eligible	cloud9	AWS::Cloud9			2026-10-04	pending	Closed to new customers
+Amazon Cloud Directory	yes	eligible	clouddirectory				2026-10-04	pending	
+AWS Cloud Map	yes	eligible	servicediscovery	AWS::ServiceDiscovery			2026-10-04	pending	
+AWS CloudEndure	yes	eligible					2026-10-04	pending	No IAM prefix in the account; retired in favour of Elastic Disaster Recovery
+AWS CloudFormation	yes	eligible	cloudformation	AWS::CloudFormation			2026-10-04	pending	
+Amazon CloudFront [excludes content delivery through Amazon CloudFront Embedded Point of Presences]	yes	eligible	cloudfront,cloudfront-keyvaluestore	AWS::CloudFront			2026-10-04	pending	Embedded PoP exclusion is not enforceable by SCP; recorded only
+AWS CloudHSM	yes	eligible	cloudhsm	AWS::CloudHSM			2026-10-04	pending	
+AWS CloudShell	yes	eligible	cloudshell				2026-10-04	pending	
+AWS CloudTrail	yes	eligible	cloudtrail,cloudtrail-data	AWS::CloudTrail			2026-10-04	pending	
+Amazon CloudWatch	yes	eligible	cloudwatch	AWS::CloudWatch			2026-10-04	pending	synthetics, rum, application-signals, internetmonitor, networkmonitor, oam held pending (E1)
+Amazon CloudWatch Logs	yes	eligible	logs	AWS::Logs			2026-10-04	pending	
+Amazon CloudWatch SDK Metrics	yes	eligible					2026-10-04	pending	Client-side feature; no IAM prefix of its own
+AWS CodeBuild	yes	eligible	codebuild	AWS::CodeBuild			2026-10-04	pending	
+AWS CodeCommit	yes	eligible	codecommit	AWS::CodeCommit			2026-10-04	pending	
+AWS CodeDeploy	yes	eligible	codedeploy	AWS::CodeDeploy			2026-10-04	pending	
+AWS CodePipeline	yes	eligible	codepipeline	AWS::CodePipeline			2026-10-04	pending	
+Amazon Cognito	yes	eligible	cognito-idp,cognito-identity,cognito-sync	AWS::Cognito			2026-10-04	pending	
+Amazon Comprehend	yes	eligible	comprehend	AWS::Comprehend			2026-10-04	pending	
+Amazon Comprehend Medical	yes	eligible	comprehendmedical				2026-10-04	pending	
+AWS Config	yes	eligible	config	AWS::Config			2026-10-04	pending	
+Amazon Connect	yes	eligible	connect	AWS::Connect			2026-10-04	pending	Adjacent prefixes (profile, wisdom, cases, voiceid, connect-campaigns) not included
+Amazon Connect Health [a HCLS Service- Healthcare and Life Sciences Addendum applies]	yes	not-allowlisted					2026-10-04	pending	Needs the HCLS Addendum. IAM prefix unknown (E3); if it is connect, the addendum question reaches Amazon Connect itself
+AWS Control Tower	yes	eligible	controltower				2026-10-04	pending	Not used: the platform is plain Organizations
+AWS Data Exchange	yes	eligible	dataexchange	AWS::DataExchange			2026-10-04	pending	
+AWS Database Migration Service (DMS)	yes	eligible	dms	AWS::DMS			2026-10-04	pending	
+AWS DataSync	yes	eligible	datasync	AWS::DataSync			2026-10-04	pending	
+Amazon DataZone	yes	eligible	datazone	AWS::DataZone			2026-10-04	pending	
+Amazon Detective	yes	eligible	detective	AWS::Detective			2026-10-04	pending	
+AWS DevOps Agent	yes	eligible					2026-10-04	pending	Prefix not confirmed; aidevops held pending
+Amazon DevOps Guru	yes	eligible	devops-guru	AWS::DevOpsGuru			2026-10-04	pending	
+AWS Direct Connect	yes	eligible	directconnect	AWS::DirectConnect			2026-10-04	pending	
+AWS Directory Service [excludes Simple AD]	yes	eligible	ds,ds-data	AWS::DirectoryService	ds:CreateDirectory		2026-10-04	pending	CreateDirectory creates Simple AD; CreateMicrosoftAD and ConnectDirectory are separate actions
+Amazon DocumentDB [with MongoDB compatibility]	yes	eligible	rds,docdb-elastic	AWS::DocDB,AWS::DocDBElastic			2026-10-04	pending	Instance-based management APIs share the rds prefix
+Amazon DynamoDB	yes	eligible	dynamodb	AWS::DynamoDB			2026-10-04	pending	dax held pending
+Amazon EC2 Auto Scaling	yes	eligible	autoscaling	AWS::AutoScaling			2026-10-04	pending	
+Amazon ElastiCache	yes	eligible	elasticache	AWS::ElastiCache			2026-10-04	pending	
+AWS Elastic Beanstalk	yes	eligible	elasticbeanstalk	AWS::ElasticBeanstalk			2026-10-04	pending	
+Amazon Elastic Block Store (Amazon EBS)	yes	eligible	ec2,ebs	AWS::EC2			2026-10-04	pending	ebs is the EBS direct API
+Amazon Elastic Compute Cloud (Amazon EC2)	yes	eligible	ec2	AWS::EC2,AWS::ImageBuilder			2026-10-04	pending	ec2-instance-connect is a separate prefix and is not allowlisted
+Amazon Elastic Container Registry (ECR)	yes	eligible	ecr	AWS::ECR			2026-10-04	pending	ecr-public is not allowlisted
+Amazon Elastic Container Service (ECS)	yes	eligible	ecs	AWS::ECS			2026-10-04	pending	
+AWS Elastic Disaster Recovery	yes	eligible	drs				2026-10-04	pending	
+Amazon Elastic File System (EFS)	yes	eligible	elasticfilesystem	AWS::EFS			2026-10-04	pending	
+Amazon Elastic Kubernetes Service (EKS)	yes	eligible	eks,eks-auth	AWS::EKS			2026-10-04	pending	
+Elastic Load Balancing	yes	eligible	elasticloadbalancing	AWS::ElasticLoadBalancing,AWS::ElasticLoadBalancingV2			2026-10-04	pending	
+Amazon Elastic MapReduce (EMR)	yes	eligible	elasticmapreduce	AWS::EMR			2026-10-04	pending	emr-serverless and emr-containers held pending
+AWS Elemental MediaConnect	yes	eligible	mediaconnect	AWS::MediaConnect			2026-10-04	pending	
+AWS Elemental MediaConvert	yes	eligible	mediaconvert	AWS::MediaConvert			2026-10-04	pending	
+AWS Elemental MediaLive	yes	eligible	medialive	AWS::MediaLive			2026-10-04	pending	
+AWS Entity Resolution	yes	eligible	entityresolution	AWS::EntityResolution			2026-10-04	pending	
+Amazon EventBridge [formerly Amazon Cloudwatch Events]	yes	eligible	events	AWS::Events			2026-10-04	pending	scheduler, pipes, schemas held pending
+AWS Fargate [ECS and EKS engines only]	yes	eligible					2026-10-04	pending	No prefix of its own: ecs and eks. Those are the only engines
+AWS Fault Injection Simulator	yes	eligible	fis	AWS::FIS			2026-10-04	pending	
+AWS Firewall Manager	yes	eligible	fms	AWS::FMS			2026-10-04	pending	
+Amazon Forecast	yes	eligible	forecast				2026-10-04	pending	
+Amazon FreeRTOS	yes	eligible	freertos				2026-10-04	pending	
+Amazon FSx	yes	eligible	fsx	AWS::FSx			2026-10-04	pending	
+AWS Global Accelerator	yes	eligible	globalaccelerator	AWS::GlobalAccelerator			2026-10-04	pending	
+AWS Glue	yes	eligible	glue	AWS::Glue			2026-10-04	pending	
+AWS Glue DataBrew	yes	eligible	databrew	AWS::DataBrew			2026-10-04	pending	
+Amazon GuardDuty	yes	eligible	guardduty	AWS::GuardDuty			2026-10-04	pending	
+AWS HealthLake	yes	eligible	healthlake	AWS::HealthLake			2026-10-04	pending	
+AWS HealthOmics	yes	eligible	omics	AWS::Omics			2026-10-04	pending	
+AWS HealthImaging	yes	eligible	medical-imaging	AWS::HealthImaging			2026-10-04	pending	
+AWS IAM Identity Center	yes	eligible	sso,sso-directory,sso-oauth,identitystore,identitystore-auth	AWS::SSO			2026-10-04	pending	
+Amazon Inspector	yes	eligible	inspector2,inspector,inspector-scan	AWS::InspectorV2,AWS::Inspector			2026-10-04	pending	
+AWS IoT Core	yes	eligible	iot	AWS::IoT			2026-10-04	pending	
+AWS IoT Device Management	yes	eligible	iot				2026-10-04	pending	Shares iot; iotfleethub and iotjobsdata held pending
+AWS IoT Events	yes	eligible					2026-10-04	pending	Retired; AWS no longer publishes the iotevents prefix in the Service Authorization Reference
+AWS IoT Greengrass	yes	eligible	greengrass	AWS::Greengrass,AWS::GreengrassV2			2026-10-04	pending	
+AWS IoT SiteWise	yes	eligible	iotsitewise	AWS::IoTSiteWise			2026-10-04	pending	
+Amazon Kendra	yes	eligible	kendra	AWS::Kendra			2026-10-04	pending	
+AWS Key Management Service (KMS)	yes	eligible	kms	AWS::KMS			2026-10-04	pending	
+Amazon Managed Service for Apache Flink	yes	eligible	kinesisanalytics	AWS::KinesisAnalytics,AWS::KinesisAnalyticsV2			2026-10-04	pending	
+Amazon Keyspaces [For Apache Cassandra]	yes	eligible	cassandra	AWS::Cassandra			2026-10-04	pending	
+Amazon Kinesis Data Streams	yes	eligible	kinesis	AWS::Kinesis			2026-10-04	pending	
+Amazon Kinesis Data Firehose	yes	eligible	firehose	AWS::KinesisFirehose			2026-10-04	pending	
+Amazon Kinesis Video Streams	yes	eligible	kinesisvideo	AWS::KinesisVideo			2026-10-04	pending	
+AWS Lake Formation	yes	eligible	lakeformation	AWS::LakeFormation			2026-10-04	pending	
+AWS Lambda	yes	eligible	lambda	AWS::Lambda			2026-10-04	pending	
+Amazon Lex	yes	eligible	lex	AWS::Lex			2026-10-04	pending	V1 and V2 share the prefix
+Amazon Location Service	yes	eligible	geo,geo-maps,geo-places,geo-routes	AWS::Location			2026-10-04	pending	
+Amazon Macie	yes	eligible	macie2	AWS::Macie			2026-10-04	pending	
+AWS Mainframe Modernization	yes	eligible	m2	AWS::M2			2026-10-04	pending	
+AWS Managed Services [excluding Operations on Demand Services, except for the RFC Expedite feature]	yes	eligible					2026-10-04	pending	An AWS-operated service; no tenant prefix. Not used
+Amazon Managed Service for Prometheus	yes	eligible	aps	AWS::APS			2026-10-04	pending	
+Amazon Managed Workflow for Apache Airflow	yes	eligible	airflow	AWS::MWAA			2026-10-04	pending	
+Amazon Managed Streaming for Apache Kafka	yes	eligible	kafka,kafka-cluster	AWS::MSK			2026-10-04	pending	kafkaconnect (MSK Connect) not included
+AWS MCP Server	yes	eligible					2026-10-04	pending	Prefix not confirmed (E3)
+Amazon MemoryDB	yes	eligible	memorydb	AWS::MemoryDB			2026-10-04	pending	
+Amazon MQ	yes	eligible	mq	AWS::AmazonMQ			2026-10-04	pending	
+Amazon Neptune	yes	eligible	rds,neptune-db	AWS::Neptune			2026-10-04	pending	Management APIs share rds; neptune-graph (Analytics) held pending
+AWS Network Firewall	yes	eligible	network-firewall	AWS::NetworkFirewall			2026-10-04	pending	
+Amazon Nova Act	yes	eligible	nova-act				2026-10-04	pending	
+Amazon OpenSearch Service	yes	eligible	es	AWS::OpenSearchService,AWS::Elasticsearch			2026-10-04	pending	aoss (Serverless) held pending
+AWS OpsWorks for Chef Automate	yes	eligible	opsworks-cm				2026-10-04	pending	Retired
+AWS OpsWorks for Puppet Enterprise	yes	eligible	opsworks-cm				2026-10-04	pending	Retired
+AWS OpsWorks Stacks	yes	eligible	opsworks	AWS::OpsWorks			2026-10-04	pending	Retired
+AWS Organizations	yes	eligible	organizations				2026-10-04	pending	
+AWS Outposts	yes	eligible	outposts				2026-10-04	pending	
+AWS Parallel Computing Service (PCS)	yes	eligible	pcs	AWS::PCS			2026-10-04	pending	
+Amazon Personalize	yes	eligible	personalize				2026-10-04	pending	
+Amazon Pinpoint and End User Messaging (formerly Amazon Pinpoint) [excluding Voice Message capabilities and WhatsApp Channel]	yes	eligible	mobiletargeting,sms-voice	AWS::Pinpoint,AWS::SMSVOICE	sms-voice:SendVoiceMessage,sms-voice:SendNotifyVoiceMessage,mobiletargeting:UpdateVoiceChannel		2026-10-04	pending	WhatsApp is social-messaging, which is not allowlisted
+Amazon Polly	yes	eligible	polly				2026-10-04	pending	
+AWS Private Certificate Authority	yes	eligible	acm-pca	AWS::ACMPCA			2026-10-04	pending	
+Amazon Q Business	yes	eligible	qbusiness	AWS::QBusiness			2026-10-04	pending	qapps held pending; Q Developer (q, codewhisperer) is not allowlisted
+Amazon Quantum Ledger Database (QLDB)	yes	eligible	qldb	AWS::QLDB			2026-10-04	pending	Retired
+Amazon Quick [formerly Amazon QuickSight, web only]	yes	eligible	quicksight	AWS::QuickSight			2026-10-04	pending	Web-only qualification is not enforceable by SCP
+Amazon Rekognition	yes	eligible	rekognition	AWS::Rekognition			2026-10-04	pending	
+Amazon Redshift	yes	eligible	redshift,redshift-data	AWS::Redshift			2026-10-04	pending	redshift-serverless held pending
+Amazon Relational Database Service (Amazon RDS) [SQL Server, MySQL, Oracle, PostgreSQL, Db2 and MariaDB engines only]	yes	eligible	rds,rds-data,rds-db	AWS::RDS			2026-10-04	pending	Every RDS engine is listed; rds:DatabaseEngine can split one out if that changes
+AWS Resilience Hub	yes	eligible	resiliencehub	AWS::ResilienceHub			2026-10-04	pending	
+AWS Resource Access Manager (RAM)	yes	eligible	ram	AWS::RAM			2026-10-04	pending	
+AWS Resource Explorer	yes	eligible	resource-explorer-2	AWS::ResourceExplorer2			2026-10-04	pending	
+Amazon Route 53	yes	eligible	route53,route53resolver	AWS::Route53,AWS::Route53Resolver			2026-10-04	pending	route53domains and route53profiles held pending
+Amazon S3 Glacier	yes	eligible	glacier				2026-10-04	pending	
+Amazon SageMaker AI [formerly Amazon Sagemaker, excludes Studio Lab, Ground Truth Plus, Public Workforce and Vendor Workforce for all features]	yes	eligible	sagemaker	AWS::SageMaker	sagemaker:CreateFlowDefinition,sagemaker:CreateLabelingJob@sagemaker:WorkteamType=public-crowd,vendor-crowd		2026-10-04	pending	Studio Lab has no IAM surface in the account. Ground Truth Plus prefix unconfirmed (E3)
+AWS Secrets Manager	yes	eligible	secretsmanager	AWS::SecretsManager			2026-10-04	pending	
+AWS Security Hub CSPM (formerly AWS Security Hub)	yes	eligible	securityhub	AWS::SecurityHub			2026-10-04	pending	
+AWS Service Catalog	yes	eligible	servicecatalog	AWS::ServiceCatalog			2026-10-04	pending	
+AWS Serverless Application Repository	yes	eligible	serverlessrepo				2026-10-04	pending	
+AWS Shield [Standard and Advanced]	yes	eligible	shield	AWS::Shield			2026-10-04	pending	
+Amazon Simple Email Service (Amazon SES)	yes	eligible	ses	AWS::SES			2026-10-04	pending	
+Amazon Simple Notification Service (SNS)	yes	eligible	sns	AWS::SNS			2026-10-04	pending	
+Amazon Simple Queue Service (SQS)	yes	eligible	sqs	AWS::SQS			2026-10-04	pending	
+Amazon Simple Storage Service (S3)	yes	eligible	s3	AWS::S3			2026-10-04	pending	s3express, s3tables, s3-object-lambda, s3vectors held pending
+Amazon Simple Workflow Service (SWF)	yes	eligible	swf				2026-10-04	pending	
+AWS Snowball	yes	eligible	snowball				2026-10-04	pending	
+AWS Snowball Edge	yes	eligible	snowball				2026-10-04	pending	Same prefix as AWS Snowball
+AWS Step Functions	yes	eligible	states	AWS::StepFunctions			2026-10-04	pending	
+AWS Storage Gateway	yes	eligible	storagegateway	AWS::StorageGateway			2026-10-04	pending	
+AWS Systems Manager	yes	eligible	ssm,ssmmessages,ec2messages	AWS::SSM			2026-10-04	pending	ssm-incidents, ssm-contacts, ssm-quicksetup, ssm-guiconnect held pending
+Amazon Textract	yes	eligible	textract				2026-10-04	pending	
+Amazon Timestream	yes	eligible	timestream	AWS::Timestream			2026-10-04	pending	timestream-influxdb held pending
+AWS Transcribe [Includes Healthscribe]	yes	eligible	transcribe	AWS::Transcribe			2026-10-04	pending	
+AWS Transfer Family	yes	eligible	transfer	AWS::Transfer			2026-10-04	pending	
+AWS Transform	yes	eligible	transform				2026-10-04	pending	transform-custom not included
+Amazon Translate	yes	eligible	translate				2026-10-04	pending	
+AWS Verified Access	yes	eligible	ec2	AWS::EC2			2026-10-04	pending	Verified Access actions are ec2:*VerifiedAccess*
+Amazon Verified Permissions	yes	eligible	verifiedpermissions	AWS::VerifiedPermissions			2026-10-04	pending	
+Amazon Virtual Private Cloud (VPC)	yes	eligible	ec2	AWS::EC2			2026-10-04	pending	
+AWS Web Application Firewall (WAF)	yes	eligible	wafv2,waf,waf-regional	AWS::WAFv2,AWS::WAF,AWS::WAFRegional			2026-10-04	pending	
+AWS Wickr	yes	eligible	wickr				2026-10-04	pending	
+Amazon WorkDocs [Excluding Adding Controls for Deleting Previous File Version Feature]	yes	eligible	workdocs				2026-10-04	pending	Retired. Exclusion not enforceable by SCP; recorded only
+Amazon WorkLink	yes	eligible	worklink				2026-10-04	pending	Retired
+Amazon WorkSpaces	yes	eligible	workspaces	AWS::WorkSpaces			2026-10-04	pending	
+Amazon WorkSpaces Applications [formerly known as Amazon AppStream 2.0]	yes	eligible	appstream	AWS::AppStream			2026-10-04	pending	
+Amazon WorkSpaces Thin Client	yes	eligible	thinclient	AWS::WorkSpacesThinClient			2026-10-04	pending	
+Amazon WorkSpaces Secure Browser	yes	eligible	workspaces-web	AWS::WorkSpacesWeb			2026-10-04	pending	
+AWS X-Ray	yes	eligible	xray	AWS::XRay			2026-10-04	pending	
+Kiro [excluding Kiro Web]	yes	eligible					2026-10-04	pending	Developer IDE; no prefix confirmed and not needed in uat/prod
+VM Import/Export	yes	eligible					2026-10-04	pending	Uses ec2:Import* actions; no prefix of its own
+IAM	no	carve-out	iam	AWS::IAM			2026-10-04	pending	Identities and policies; every account needs it
+STS	no	carve-out	sts				2026-10-04	pending	Credential issuance
+Console sign-in	no	carve-out	signin				2026-10-04	pending	
+IAM Access Analyzer	no	carve-out	access-analyzer	AWS::AccessAnalyzer			2026-10-04	pending	Analyses policies, not data
+Account management	no	carve-out	account				2026-10-04	pending	Contacts and region settings (B-139)
+AWS Health	no	carve-out	health				2026-10-04	pending	Service health events
+AWS Support	no	carve-out	support				2026-10-04	pending	E4: no PHI in a support case is a rule the developer guide states and nothing enforces
+Trusted Advisor	no	carve-out	trustedadvisor				2026-10-04	pending	Configuration checks
+Service Quotas	no	carve-out	servicequotas				2026-10-04	pending	B-140, B-151
+Resource Groups Tagging API	no	carve-out	tag				2026-10-04	pending	Tags must never carry PHI (design 10)
+Resource Groups	no	carve-out	resource-groups	AWS::ResourceGroups			2026-10-04	pending	
+Application Auto Scaling	no	carve-out	application-autoscaling	AWS::ApplicationAutoScaling			2026-10-04	pending	Scales ECS services; moves capacity numbers, not data
+Cost and billing	no	carve-out	ce,cur,budgets,billing,aws-portal,payments,invoicing,tax,pricing,freetier,bcm-data-exports,cost-optimization-hub,savingsplans	AWS::Budgets,AWS::CE			2026-10-04	pending	Design 10 budgets and the commercial view
+Compute Optimizer	no	carve-out	compute-optimizer				2026-10-04	pending	Sizing recommendations
+AWS User Notifications	no	carve-out	notifications				2026-10-04	pending	
+Console settings	no	carve-out	uxc				2026-10-04	pending	
+CloudWatch Synthetics	no	pending	synthetics	AWS::Synthetics			2026-10-04	pending	E1. Platform canaries use it in uat/prod (design 14)
+CloudWatch RUM	no	pending	rum	AWS::RUM			2026-10-04	pending	E1. Collects browser telemetry from real user sessions
+CloudWatch Application Signals	no	pending	application-signals	AWS::ApplicationSignals			2026-10-04	pending	E1. Design 11 production visibility
+CloudWatch Internet Monitor	no	pending	internetmonitor	AWS::InternetMonitor			2026-10-04	pending	E1
+CloudWatch Network Monitor	no	pending	networkmonitor	AWS::NetworkMonitor			2026-10-04	pending	E1
+CloudWatch cross-account observability	no	pending	oam	AWS::Oam			2026-10-04	pending	E1
+EventBridge Scheduler	no	pending	scheduler	AWS::Scheduler			2026-10-04	pending	E1
+EventBridge Pipes	no	pending	pipes	AWS::Pipes			2026-10-04	pending	E1
+EventBridge Schema Registry	no	pending	schemas	AWS::EventSchemas			2026-10-04	pending	E1
+Systems Manager Incident Manager	no	pending	ssm-incidents,ssm-contacts	AWS::SSMIncidents,AWS::SSMContacts			2026-10-04	pending	E1
+Systems Manager Quick Setup	no	pending	ssm-quicksetup	AWS::SSMQuickSetup			2026-10-04	pending	E1
+Systems Manager GUI Connect	no	pending	ssm-guiconnect				2026-10-04	pending	E1. RDP through Fleet Manager
+S3 Express One Zone	no	pending	s3express	AWS::S3Express			2026-10-04	pending	E1
+S3 Tables	no	pending	s3tables	AWS::S3Tables			2026-10-04	pending	E1
+S3 Object Lambda	no	pending	s3-object-lambda	AWS::S3ObjectLambda			2026-10-04	pending	E1
+S3 Vectors	no	pending	s3vectors	AWS::S3Vectors			2026-10-04	pending	E1
+OpenSearch Serverless	no	pending	aoss	AWS::OpenSearchServerless			2026-10-04	pending	E1
+EMR Serverless	no	pending	emr-serverless	AWS::EMRServerless			2026-10-04	pending	E1
+EMR on EKS	no	pending	emr-containers	AWS::EMRContainers			2026-10-04	pending	E1
+Redshift Serverless	no	pending	redshift-serverless	AWS::RedshiftServerless			2026-10-04	pending	E1
+Timestream for InfluxDB	no	pending	timestream-influxdb	AWS::InfluxDB			2026-10-04	pending	E1
+Route 53 Domains	no	pending	route53domains				2026-10-04	pending	E1
+Route 53 Profiles	no	pending	route53profiles	AWS::Route53Profiles			2026-10-04	pending	E1
+Backup gateway	no	pending	backup-gateway				2026-10-04	pending	E1
+Backup search	no	pending	backup-search				2026-10-04	pending	E1
+DynamoDB Accelerator (DAX)	no	pending	dax	AWS::DAX			2026-10-04	pending	E1
+Neptune Analytics	no	pending	neptune-graph	AWS::NeptuneGraph			2026-10-04	pending	E1
+IoT Device Management Fleet Hub	no	pending	iotfleethub	AWS::IoTFleetHub			2026-10-04	pending	E1
+IoT Jobs data plane	no	pending	iotjobsdata				2026-10-04	pending	E1
+Q Apps	no	pending	qapps				2026-10-04	pending	E1. Feature of Q Business?
+Amplify backend and UI builder	no	pending	amplifybackend,amplifyuibuilder				2026-10-04	pending	E2. The list names Amplify Console only
+Clean Rooms ML	no	pending	cleanrooms-ml				2026-10-04	pending	E1
+DevOps Agent (candidate prefix)	no	pending	aidevops				2026-10-04	pending	E3. Likely AWS DevOps Agent; unconfirmed
+App Runner	no	not-allowlisted	apprunner	AWS::AppRunner		ECS on Fargate	2026-10-04	pending	
+Lightsail	no	not-allowlisted	lightsail	AWS::Lightsail		EC2 or ECS on Fargate	2026-10-04	pending	
+EC2 Instance Connect	no	not-allowlisted	ec2-instance-connect	AWS::EC2::InstanceConnectEndpoint		Session Manager	2026-10-04	pending	An SSH path; design 11 has none
+CodeArtifact	no	not-allowlisted	codeartifact	AWS::CodeArtifact		ECR (OCI artifacts) or S3	2026-10-04	pending	
+CodeStar Connections / CodeConnections	no	not-allowlisted	codestar-connections,codeconnections	AWS::CodeStarConnections		GitHub OIDC to the deploy role (developer guide 3.2)	2026-10-04	pending	
+Amazon Q Developer	no	not-allowlisted	q,codewhisperer			Use in dev only; not needed in uat/prod	2026-10-04	pending	
+ECR Public	no	not-allowlisted	ecr-public	AWS::ECR::PublicRepository		ECR pull-through cache	2026-10-04	pending	
+End User Messaging Social (WhatsApp)	no	not-allowlisted	social-messaging			End User Messaging SMS	2026-10-04	pending	The page excludes the WhatsApp channel
