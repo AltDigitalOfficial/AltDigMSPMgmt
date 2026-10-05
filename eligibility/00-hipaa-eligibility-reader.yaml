@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — a read-only role the HIPAA eligibility sweep
+  assumes to learn which AWS services an account's roles have used.
+  docs/hipaa-eligibility.md §4.2. Deployed as the StackSet
+  platform-hipaa-eligibility-reader to HIPAA clients' OUs only.
+
+# ---------------------------------------------------------------------------
+# Only HIPAA clients get this
+# ---------------------------------------------------------------------------
+# The StackSet targets client OUs whose registry compliance_scope contains
+# hipaa, never Members. A tenant with no HIPAA exposure carries no trace of
+# this control, by decision (docs/hipaa-eligibility.md, "Scope"). Every tier of
+# a HIPAA client gets it: dev and test are where the sweep teaches, before the
+# SCP denies anything in uat and prod.
+#
+# ---------------------------------------------------------------------------
+# Why a role of its own
+# ---------------------------------------------------------------------------
+# Same reasoning as PlatformTelemetryReader. The sweep needs three IAM calls
+# and nothing else; borrowing a reader built for another purpose would either
+# fail or widen that role into a general observation grant. Minimal, and named
+# for what it does.
+#
+# The three calls reveal which SERVICES each role has touched and when — no
+# resource names, no data, no policy contents. GenerateServiceLastAccessedDetails
+# is technically a write (it starts a report job), but it changes nothing in the
+# account and has no other effect.
+
+Parameters:
+
+  AuditAccountId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]{12}$'
+    Description: >-
+      The Audit account, where the sweep runs. Empty creates nothing — a role
+      trusting an account with no caller in it is a standing grant nobody uses.
+
+Conditions:
+  HasAudit: !Not [!Equals [!Ref AuditAccountId, '']]
+
+Resources:
+
+  ReaderRole:
+    Type: AWS::IAM::Role
+    Condition: HasAudit
+    Properties:
+      RoleName: PlatformHipaaEligibilityReader
+      Description: >-
+        Read-only. Assumed by the HIPAA eligibility sweep in Audit to read
+        IAM service-last-accessed data. docs/hipaa-eligibility.md.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              # Exactly the sweep's role. Not a prefix: B-135 is what a
+              # name-pattern trust turns into.
+              ArnEquals:
+                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:role/PlatformHipaaEligibilitySweep'
+      Policies:
+        - PolicyName: ServiceLastAccessed
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListRoles
+                Effect: Allow
+                Action: iam:ListRoles
+                Resource: '*'
+              - Sid: StartLastAccessedReport
+                Effect: Allow
+                Action: iam:GenerateServiceLastAccessedDetails
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
+              - Sid: ReadLastAccessedReport
+                Effect: Allow
+                # Takes a job id, not a resource ARN.
+                Action: iam:GetServiceLastAccessedDetails
+                Resource: '*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+Outputs:
+  ReaderRoleArn:
+    Condition: HasAudit
+    Value: !GetAtt ReaderRole.Arn

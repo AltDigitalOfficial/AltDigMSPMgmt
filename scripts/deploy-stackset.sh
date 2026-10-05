@@ -71,7 +71,12 @@ Usage: deploy-stackset.sh --name <stackset> --template <path> --ou <target>
        deploy-stackset.sh --name <stackset> --ou <target> --add-ou
                           [--regions r1,r2] [--dry-run] [--confirm-production]
 
-  --ou              sandbox | members | security | infra
+  --ou              sandbox | members | security | infra | client:<partner>/<client>
+                    client: targets one client OU, read from
+                    /platform/org/ou/members/<partner>/<client>. For controls
+                    that belong to some clients and not others (HIPAA
+                    eligibility). Requires --confirm-production: a client OU
+                    holds that client's production accounts.
   --regions         Comma-separated. Defaults to the home region; with
                     --add-ou, defaults to the regions the existing instances use.
   --max-concurrent  Accounts updated in parallel. Default 1 — a bad baseline
@@ -123,7 +128,13 @@ case "${OU}" in
   members)  confirm_production; TARGET_OU="$(get_param /org/ou/members)" ;;
   security) TARGET_OU="$(get_param /org/ou/security)" ;;
   infra)    TARGET_OU="$(get_param /org/ou/infrastructure)" ;;
-  *) die "Unknown --ou '${OU}'. Expected sandbox, members, security or infra." ;;
+  client:*/*)
+    confirm_production
+    CLIENT_PATH="${OU#client:}"
+    validate_slug partner "${CLIENT_PATH%%/*}"
+    validate_slug client "${CLIENT_PATH##*/}"
+    TARGET_OU="$(get_param "/org/ou/members/${CLIENT_PATH}")" ;;
+  *) die "Unknown --ou '${OU}'. Expected sandbox, members, security, infra or client:<partner>/<client>." ;;
 esac
 [[ -n "${TARGET_OU}" && "${TARGET_OU}" != "None" ]] || die "Could not resolve the ${OU} OU."
 

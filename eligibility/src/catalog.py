@@ -235,6 +235,65 @@ def _one_status(matches):
     return sorted(sts)[0]
 
 
+class PageError(ValueError):
+    """The page could not be read as a service list. Never 'no change'."""
+
+
+def parse_page(text):
+    """(last_updated, [service names]) from the AWS reference page's HTML.
+
+    The page renders its list twice and is followed by the site footer, whose
+    first list item is "What Is AWS?". Every assumption that sentence makes is
+    checked, because each one failing would otherwise produce a short list that
+    reads as "AWS removed services" or an empty one that reads as nothing to
+    compare.
+    """
+    import html as _html
+    m = re.search(r"Last Updated:\s*([A-Z][a-z]+ \d{1,2}, \d{4})", text)
+    if not m:
+        raise PageError("no 'Last Updated: <date>' marker; the page layout has changed")
+    names, footer_seen = [], False
+    for raw in re.findall(r"<li[^>]*>(.*?)</li>", text[m.start():], re.S):
+        name = normalise_service(_html.unescape(re.sub(r"<[^>]+>", "", raw)))
+        if name == "What Is AWS?":
+            footer_seen = True
+            break
+        if name and name not in names:
+            names.append(name)
+    if not footer_seen:
+        raise PageError("footer marker 'What Is AWS?' not found; cannot tell where the list ends")
+    if len(names) < 100:
+        raise PageError(f"only {len(names)} services parsed; expected well over 100")
+    return m.group(1), names
+
+
+def diff_page(rows, page_names):
+    """Compare the page with the catalog's on_aws_list rows.
+
+    Returns {"added": [...], "removed": [...], "requalified": [(old, new)]}.
+    A service whose name before its bracket is unchanged but whose bracket text
+    changed is reported as requalified, not as one removal plus one addition:
+    a narrowed qualification ("excludes X" gaining a clause) is the change most
+    likely to make existing use non-compliant, and it must read as such.
+    """
+    mine = page_services(rows)
+    page = set(page_names)
+    added = sorted(page - mine)
+    removed = sorted(mine - page)
+
+    def base(n):
+        return n.split("[", 1)[0].strip()
+    requalified = []
+    for old in list(removed):
+        for new in list(added):
+            if base(old) == base(new):
+                requalified.append((old, new))
+                removed.remove(old)
+                added.remove(new)
+                break
+    return {"added": added, "removed": removed, "requalified": requalified}
+
+
 def page_services(rows):
     """Normalised service names of the rows that mirror the AWS page."""
     return {normalise_service(r["service"]) for r in rows if r["on_aws_list"] == "yes"}

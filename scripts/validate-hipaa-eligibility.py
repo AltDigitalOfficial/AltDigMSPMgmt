@@ -25,9 +25,7 @@ skip: "could not check" must not read as "checked and fine".
 """
 
 import argparse
-import html
 import json
-import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -55,22 +53,12 @@ def known_prefixes():
 def page_list(path):
     """Service names from a saved copy of the AWS page.
 
-    Kept in step with eligibility/src/upstream.py, which parses the live page
-    the same way. The page renders its list twice and is followed by the site
-    footer, whose first item is "What Is AWS?".
+    The same parser the weekly upstream check uses on the live page
+    (catalog.parse_page), so a parity pass here means the check will agree.
     """
     text = Path(path).read_text(encoding="utf-8", errors="replace")
-    start = text.find("Last Updated")
-    if start < 0:
-        raise RuntimeError("no 'Last Updated' marker; the page layout has changed")
-    seen = []
-    for raw in re.findall(r"<li[^>]*>(.*?)</li>", text[start:], re.S):
-        name = catalog.normalise_service(html.unescape(re.sub(r"<[^>]+>", "", raw)))
-        if name == "What Is AWS?":
-            break
-        if name and name not in seen:
-            seen.append(name)
-    return seen
+    _, names = catalog.parse_page(text)
+    return names
 
 
 def main():

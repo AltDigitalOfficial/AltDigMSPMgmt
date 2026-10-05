@@ -94,10 +94,10 @@ would give those four consumers a way to disagree.
 | Column | Example | Why it exists |
 |---|---|---|
 | `service` | `Amazon Simple Queue Service (SQS)` | **Verbatim** AWS page name, bracket qualification included. The drift check diffs on this column, so it must match the page exactly. |
-| `qualification` | `excludes Simple AD` | The page's bracket text, split out so it can be reviewed separately. Empty if none. |
-| `status` | `eligible` / `carve-out` / `excluded-feature` / `not-allowlisted` | Keeps "eligible" and "not eligible, holds no PHI" as different values, never one list (§3). |
+| `on_aws_list` | `yes` / `no` | Whether the row mirrors the page. Only `yes` rows take part in the drift diff. *(As built: the bracket qualification stays inside `service`, verbatim, rather than in a column of its own. Splitting it would have meant re-joining it for every diff; the diff reports a changed bracket as `requalified` instead.)* |
+| `status` | `eligible` / `carve-out` / `pending` / `not-allowlisted` / `platform-only` | Keeps "eligible" and "not eligible, holds no PHI" as different values, never one list (§3). |
 | `iam_prefixes` | `sqs` | What the SCP's `NotAction` is built from. One row may carry several. |
-| `config_types` | `AWS::SQS::Queue` | What the inventory sweep matches (§4.2). This is a different vocabulary from IAM prefixes. |
+| `config_namespaces` | `AWS::SQS`, or a full type such as `AWS::ECR::PublicRepository` (most specific wins) | What the inventory sweep matches (§4.2). This is a different vocabulary from IAM prefixes. |
 | `deny_actions` | `ds:CreateDirectory` | Action-level denies for an excluded feature that maps to distinct actions (§2.3). |
 | `alternative` | `ECS on Fargate` | What the developer is told to use instead (§7). Only on non-eligible rows. |
 | `date_added` | `2026-10-xx` | When the row entered *this file*. AWS publishes no per-service date, so this is not the date AWS added the service. |
@@ -119,7 +119,7 @@ eligibility claim gets re-checked when the file is built.
 
 ### Review cadence
 
-- **Weekly, automated:** a drift check (below).
+- **Daily, automated:** a drift check (below). *As built: daily, not weekly, because an alarm cannot look back more than seven days and the check's own silence must be alarmable. Repeats are suppressed to one report a week until fixed.*
 - **Quarterly, human:** a reviewer re-reads the page against the file, even
   with no diff, and records a `list-reviewed` evidence record (§6). An
   auditor will ask how you know the list is current. "The scraper said
@@ -128,13 +128,12 @@ eligibility claim gets re-checked when the file is built.
 
 ### Drift check — flags, never regenerates
 
-A scheduled Lambda in Platform Tooling. It runs outside a VPC, so it has
-internet access with no new egress path. Each week it:
+A scheduled Lambda (`eligibility/src/upstream.py`). *As built: in Audit, not Platform Tooling — beside the router's bus, so nothing crosses an account on the reporting path; Audit Lambdas already reach the internet for Truveon and PagerDuty.* Each day it:
 
 1. Fetches the page and parses the service list and the "Last Updated" date
-2. Stores the parsed snapshot in a versioned S3 bucket, so the next diff has a
-   stable base
-3. Diffs the snapshot against the file's `service` column, verbatim
+2. Diffs the parsed list against the `on_aws_list=yes` rows of the catalog it was packaged with, after normalisation (dashes, whitespace, the page's literal `
+`). *As built: no snapshot bucket. The catalog in the package is the stable base; a snapshot would only have recorded the page, which the Wayback Machine and the page itself already do.*
+3. Treats a parse with no footer marker, fewer than 100 services, or a swing of more than 10% against the catalog as **blind**, never as a diff
 4. Emits one event to the router per outcome:
 
 | Outcome | Severity | Meaning |
@@ -228,7 +227,7 @@ it fails closed, and the cost is an exception request.
 | Directory Service: Simple AD | **Yes** | `ds:CreateDirectory` is the Simple AD call (`CreateMicrosoftAD` is separate). Goes in `deny_actions`. |
 | Pinpoint/End User Messaging: WhatsApp | **Yes** | WhatsApp is its own prefix (`social-messaging`). Left off the allowlist. |
 | Pinpoint/End User Messaging: voice messages | Probably | `sms-voice:SendVoiceMessage` and the voice-channel actions. Confirm the action list (E3). |
-| SageMaker / A2I: public and vendor workforce | **Uncertain** | Workforce *type* is a request parameter. No condition key known. Detective via Config if a type exists. E3. |
+| SageMaker / A2I: public and vendor workforce | **Yes** (as built) | `sagemaker:WorkteamType` is a condition key on `CreateFlowDefinition` and `CreateLabelingJob` (Service Authorization Reference, 2026-10-04). Conditional deny on `public-crowd`, `vendor-crowd`. |
 | SageMaker: Studio Lab, Ground Truth Plus | Partly | Studio Lab is a separate product with no IAM surface in the account. Ground Truth Plus may be `sagemaker-groundtruth-synthetic`; confirm. |
 | Fargate: ECS and EKS engines only | n/a | Those are the only engines |
 | RDS: six engines only | n/a | All RDS engines are listed (§2.2) |
@@ -425,7 +424,7 @@ prefixes. **I recommend against a real-time rule, for three reasons:**
 
 | Sweep | Source | Catches | Why this source |
 |---|---|---|---|
-| **Usage** | IAM service-last-accessed (`GenerateServiceLastAccessedDetails`) for every role in each HIPAA account, via the existing read-only verification reader role | Any principal touching a non-allowlisted prefix: read, write, console spillover | Reports in **IAM namespaces**, the same vocabulary as the SCP, so no mapping table and no drift between them. Covers read-only calls, which EventBridge does not reliably receive. |
+| **Usage** | IAM service-last-accessed (`GenerateServiceLastAccessedDetails`) for every role in each HIPAA account, via `PlatformHipaaEligibilityReader` (see Deployment) | Any principal touching a non-allowlisted prefix: read, write, console spillover | Reports in **IAM namespaces**, the same vocabulary as the SCP, so no mapping table and no drift between them. Covers read-only calls, which EventBridge does not reliably receive. |
 | **Inventory** | The organization Config aggregator in Audit (B-157 phase C), advanced query by account and resource type, with tags | Existing resources of non-eligible types, and **`DataClassification=regulated` on a non-eligible type** | Already deployed. Sees resources created before the sweep existed, which a call-based detector never would. |
 
 **Known limits, stated:**
@@ -441,8 +440,9 @@ prefixes. **I recommend against a real-time rule, for three reasons:**
 (design 06) is "what must be monitored", per resource. This is a compliance
 judgement across an account. Not `telemetry/`, which is about agent silence.
 
-**Deployment:** Audit only, plus the existing reader role. **No new
-member-side stack**, so nothing is deployed Members-wide.
+**Deployment:** `eligibility/10-hipaa-eligibility.yaml` in Audit, and the StackSet `platform-hipaa-eligibility-reader` (`eligibility/00-hipaa-eligibility-reader.yaml`) targeted at **HIPAA client OUs only** (`deploy-stackset.sh --ou client:<partner>/<client>`). *As built: the design said "no new member-side stack" and assumed an existing reader. None fits: the verification reader holds synthetics and backup reads for another purpose, and widening it is what PlatformTelemetryReader's header warns against. A hand-deployed role would be drift (B-143). So a minimal role of its own, by StackSet, scoped to HIPAA clients — never Members-wide.*
+
+**Scope source:** `scripts/sync-hipaa-accounts.sh` publishes `/platform/eligibility/hipaa-accounts` in Audit: scope from the registry, `enforced` from the **live** SCP attachment, never from registry intent.
 
 ### 4.3 Attachment check, hourly
 
@@ -651,7 +651,7 @@ design 11 when it is next revised.
 | # | Item | Blocks | Owner |
 |---|---|---|---|
 | **E1** | **Are `synthetics` and `application-signals` (and the other §2.1 "uncertain" prefixes) covered as CloudWatch features?** If Synthetics is not eligible, prod canaries must avoid PHI-rendering pages: a canary design change, not an exception. | B-160 attach | Jamie, with Art |
-| E2 | `amplify`: the list names "Amplify Console" and the prefix covers all of Amplify. Allowlist or not? | B-159 | Jamie |
+| E2 | ~~`amplify`~~ **Narrowed (as built):** `amplify` is the Hosting (formerly Console) API, so it is eligible. `amplifybackend` and `amplifyuibuilder` are separate prefixes, held `pending`. Remaining question: allowlist those two? | — | Jamie |
 | E3 | Action lists for the §2.3 exclusions (voice messages, SageMaker workforce types, Ground Truth Plus) and Connect Health's prefix | B-159 | Build, verify against AWS docs |
 | E4 | `support` as a carve-out depends on a "no PHI in support cases" rule that only the guide enforces. Accept? | B-159 | Art |
 | E5 | Exception approver (Art or delegate), default and maximum expiry (90/180 proposed) | B-162 | Jamie, Art |

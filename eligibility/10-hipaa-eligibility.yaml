@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — HIPAA eligibility detection. A daily sweep of
+  HIPAA-scoped accounts for non-eligible service use, and a daily check of the
+  AWS HIPAA Eligible Services Reference against the catalog. Deploys to the
+  Audit account. docs/hipaa-eligibility.md, B-159 and B-161.
+
+# ---------------------------------------------------------------------------
+# Why Audit
+# ---------------------------------------------------------------------------
+# The design first put the upstream check in Platform Tooling. Audit is better
+# for both functions: the router's bus, the organization Config aggregator and
+# the account-tier map are all here, so nothing crosses an account boundary on
+# the reporting path. Audit Lambdas already reach the internet (the evidence
+# sender to Truveon, the router to PagerDuty), so fetching one AWS web page
+# adds no new kind of egress.
+#
+# ---------------------------------------------------------------------------
+# What this stack cannot do
+# ---------------------------------------------------------------------------
+# Change anything in a member account. The sweep assumes a reader that can
+# list roles and read service-last-accessed reports, and nothing else. It does
+# not stop, tag, delete or re-route anything: it reports through the router,
+# which decides who hears about it. Remediation is a human's call (CLAUDE.md
+# hard rule; design 11's scope-change procedure).
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+
+  ArtifactKey:
+    Type: String
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  AggregatorName:
+    Type: String
+    Default: platform-organization
+
+  SweepSchedule:
+    Type: String
+    Default: 'cron(30 11 * * ? *)'
+    Description: >-
+      Daily, 11:30 UTC — early morning in the US, so a finding is in the digest
+      and the queue before the working day. Daily rather than real time because
+      every destination in dev and test is a digest, and in uat and prod the SCP
+      is the real-time control (§4.2).
+
+  UpstreamSchedule:
+    Type: String
+    Default: 'cron(0 11 * * ? *)'
+    Description: >-
+      Daily, so the completion alarm below can notice it stopping. Repeats are
+      suppressed by the state table; a diff is re-reported weekly until fixed.
+
+  LookbackDays:
+    Type: Number
+    Default: 30
+    Description: >-
+      How far back service-last-accessed counts as use. The first sweep of a
+      newly scoped account surfaces the last month; after that, the state table
+      decides what is new.
+
+  RemindDays:
+    Type: Number
+    Default: 7
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Repetition state
+  # -------------------------------------------------------------------------
+  # Holds "<account>#<subject>" -> first_seen, last_seen, last_emitted. No
+  # resource ids beyond what the subject carries, no data. Losing it costs one
+  # round of repeated reports, which is why it is not retained on delete and
+  # carries no PITR.
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    # Stated rather than defaulted: losing this costs one round of repeats.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: platform-hipaa-eligibility-state
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  # -------------------------------------------------------------------------
+  # The sweep
+  # -------------------------------------------------------------------------
+  SweepRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Named exactly: PlatformHipaaEligibilityReader trusts this ARN and no
+      # pattern.
+      RoleName: PlatformHipaaEligibilitySweep
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  SweepPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SweepHipaaAccounts
+      Roles: [!Ref SweepRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadMemberAccounts
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/PlatformHipaaEligibilityReader'
+          - Sid: ReadScopeAndTiers
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/*'
+          - Sid: QueryInventory
+            Effect: Allow
+            Action: config:SelectAggregateResourceConfig
+            Resource: !Sub 'arn:${AWS::Partition}:config:${AWS::Region}:${AWS::AccountId}:config-aggregator/*'
+          - Sid: State
+            Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+            Resource: !GetAtt StateTable.Arn
+          - Sid: Report
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+          - Sid: Heartbeat
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: '*'
+            Condition:
+              StringEquals: { 'cloudwatch:namespace': Platform/HipaaEligibility }
+
+  SweepLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-hipaa-eligibility-sweep
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  SweepFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SweepLogGroup
+    Properties:
+      FunctionName: platform-hipaa-eligibility-sweep
+      Runtime: python3.12
+      Handler: sweep.handler
+      Role: !GetAtt SweepRole.Arn
+      # Service-last-accessed jobs are asynchronous, one per role. A few
+      # accounts of a few dozen roles each finish in a minute or two.
+      Timeout: 900
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          CATALOG_PATH: hipaa-eligible-services.tsv
+          ACCOUNTS_PARAM: /platform/eligibility/hipaa-accounts
+          READ_ROLE: PlatformHipaaEligibilityReader
+          AGGREGATOR: !Ref AggregatorName
+          ALERT_BUS_NAME: !Ref AlertBusName
+          STATE_TABLE: !Ref StateTable
+          LOOKBACK_DAYS: !Ref LookbackDays
+          REMIND_DAYS: !Ref RemindDays
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+          PLATFORM_PRINCIPALS: ''
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  SweepScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-hipaa-eligibility-sweep
+      Description: Daily HIPAA eligibility sweep. docs/hipaa-eligibility.md §4.2.
+      ScheduleExpression: !Ref SweepSchedule
+      State: ENABLED
+      Targets:
+        - Id: sweep
+          Arn: !GetAtt SweepFunction.Arn
+
+  SweepScheduleRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SweepFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SweepScheduleRule.Arn
+
+  # -------------------------------------------------------------------------
+  # The upstream check
+  # -------------------------------------------------------------------------
+  UpstreamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformHipaaEligibilityUpstream
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: ReportUpstreamChanges
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: State
+                Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+                Resource: !GetAtt StateTable.Arn
+              - Sid: Report
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+              - Sid: Heartbeat
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals: { 'cloudwatch:namespace': Platform/HipaaEligibility }
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  UpstreamLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-hipaa-eligibility-upstream
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  UpstreamFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: UpstreamLogGroup
+    Properties:
+      FunctionName: platform-hipaa-eligibility-upstream
+      Runtime: python3.12
+      Handler: upstream.handler
+      Role: !GetAtt UpstreamRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          CATALOG_PATH: hipaa-eligible-services.tsv
+          ALERT_BUS_NAME: !Ref AlertBusName
+          STATE_TABLE: !Ref StateTable
+          REMIND_DAYS: !Ref RemindDays
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  UpstreamScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-hipaa-eligibility-upstream
+      Description: Daily diff of the AWS HIPAA eligible services page against the catalog.
+      ScheduleExpression: !Ref UpstreamSchedule
+      State: ENABLED
+      Targets:
+        - Id: upstream
+          Arn: !GetAtt UpstreamFunction.Arn
+
+  UpstreamScheduleRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt UpstreamFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UpstreamScheduleRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Silence is not "nothing found"
+  # -------------------------------------------------------------------------
+  # Each function writes a completion metric only when it ran AND could see
+  # everything. These alarm on its absence: a sweep that has stopped, or that
+  # cannot read an account, looks exactly like a clean estate otherwise.
+  # Ticketed, not paged — two days without a sweep is a business-hours repair.
+  # Delivered by the router (alerting/60-alarm-forwarding.yaml in this account).
+  SweepSilentAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-hipaa-eligibility-sweep-silent
+      AlarmDescription: >-
+        The HIPAA eligibility sweep has not completed cleanly for two days.
+        Non-eligible service use in HIPAA-scoped accounts is going unreported.
+        Check the function's log: an account it could not read, or a failure.
+
+        [platform-routing] routing=digest_and_jira layer=infrastructure
+      Namespace: Platform/HipaaEligibility
+      MetricName: SweepCompleted
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  UpstreamSilentAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-hipaa-eligibility-upstream-silent
+      AlarmDescription: >-
+        The AWS HIPAA eligible services page has not been checked successfully
+        for three days. A change to the list would go unnoticed.
+
+        [platform-routing] routing=digest_and_jira layer=infrastructure
+      Namespace: Platform/HipaaEligibility
+      MetricName: UpstreamCheckCompleted
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+Outputs:
+  SweepFunctionName:
+    Value: !Ref SweepFunction
+  UpstreamFunctionName:
+    Value: !Ref UpstreamFunction
+  SweepRoleArn:
+    Description: Trusted by PlatformHipaaEligibilityReader in each HIPAA account.
+    Value: !GetAtt SweepRole.Arn
