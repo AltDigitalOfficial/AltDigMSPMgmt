@@ -63,6 +63,17 @@ SELF_ACCOUNT = os.environ.get("AWS_ACCOUNT_ID", "")
 # Named platform principals allowed the platform-only prefixes (Statement B).
 # Empty today: no prefix is platform-only until E1 is decided.
 PLATFORM_PRINCIPALS = {p for p in os.environ.get("PLATFORM_PRINCIPALS", "").split(",") if p}
+# Roles whose service-last-accessed record is enumeration, not use.
+#
+# The Config recorder (baseline/10-config-recorder.yaml) calls a describe on
+# every resource type Config supports, so its last-accessed list names App
+# Runner, Lightsail, CodeArtifact and dozens more in an account where nobody has
+# touched them. Proved on the first live sweep, 2026-10-04: every non-eligible
+# usage hit in Arc8 dev came from this one role. What Config enumerates is
+# exactly what the inventory sweep reads, so excluding it here loses nothing.
+# Named exactly, never by pattern.
+USAGE_EXCLUDED_ROLES = {p for p in os.environ.get(
+    "USAGE_EXCLUDED_ROLES", "PlatformConfigRecorderRole").split(",") if p}
 
 ssm = boto3.client("ssm")
 sts = boto3.client("sts")
@@ -104,6 +115,8 @@ def roles(iam):
             # Reporting their use would be reporting AWS operating its own
             # service, which nobody can act on.
             if r.get("Path", "/").startswith("/aws-service-role/"):
+                continue
+            if r["RoleName"] in USAGE_EXCLUDED_ROLES:
                 continue
             out.append(r)
     return out

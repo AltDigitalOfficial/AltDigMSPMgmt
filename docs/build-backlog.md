@@ -7267,6 +7267,16 @@ and never regenerates, and is loud on parse failure.
 
 **Needs** E1, E2, E3, E4, E6, E11.
 
+**Built 2026-10-04.** `eligibility/hipaa-eligible-services.tsv`: 174 page
+services in exact parity with the page as of its 2026-09-03 update, parsed from raw
+HTML. Every prefix is checked against the Service Authorization Reference by
+`scripts/validate-hipaa-eligibility.py`: 213 allowlisted, 46 denied (pending fails
+closed). Two prefixes AWS no longer publishes (`iotevents`, `evidently`, both
+retired) are recorded as such. Every row is still `reviewed_by=pending`: a human
+check against the page is the remaining step. The upstream check is daily in
+Audit (not weekly in Tooling — see the design note) and was live-verified: page
+parsed, no diff.
+
 ---
 
 ## B-160 · HIPAA eligibility: the preventive SCP
@@ -7295,6 +7305,16 @@ overflows.
 **Blocks** E1. That is the canary question. If `synthetics` is not eligible,
 prod canaries are a design change.
 
+**Also before attach: the Config recorder.** The first live sweep (2026-10-04)
+showed `PlatformConfigRecorderRole` calling describes on every resource type Config
+supports, App Runner, Lightsail and CodeArtifact among them. Under Statement A
+those calls are denied in uat and prod. Two ways to handle it, to choose at
+build: scope the recorder in HIPAA uat/prod accounts to eligible resource types
+(the recorder records nothing that can exist there anyway), or exempt the
+recorder from Statement A for read-only actions only. The first keeps Statement A
+exemption-free. Either way the harness must show Config recording without
+errors after attach.
+
 ---
 
 ## B-161 · HIPAA eligibility: nothing tells a dev-tier developer they used a non-eligible service
@@ -7317,6 +7337,20 @@ Arc8 developers are working in dev now and prod does not exist yet.
 No member-side stack and no automated remediation.
 
 **Needs** E7, E8, E9.
+
+**Built and live 2026-10-04** (`6c4687c` and later). `platform-hipaa-eligibility`
+in Audit; the `platform-hipaa-eligibility-reader` StackSet on `client:oeight/oeight`
+(Arc8 dev and test, CURRENT); `/platform/eligibility/hipaa-accounts` published;
+router redeployed with the `hipaa-eligibility` normaliser.
+- *A member-side role was needed after all.* The design assumed an existing reader;
+  none fits without widening it, and a hand-deployed role would be drift (B-143).
+  Now a StackSet scoped to HIPAA client OUs, never Members.
+- **First sweep emitted 45 events, nearly all false.** The Config recorder's
+  enumeration read as usage. Fixed by excluding that one role by name. The
+  digest received those lines once, on 2026-10-04. They will not recur.
+
+The attachment check (§4.3) is not built: there is nothing to check until B-160
+attaches a policy.
 
 ---
 
@@ -7384,3 +7418,23 @@ digest shows the same prefix recurring across weeks.
 
 **Timing:** must exist before Arc8 prod is vested, which is waiting on the
 B-140 quota case. Registers D-030 on approval.
+
+---
+
+## B-166 · The router's tier map calls Arc8 test `dev`
+
+**Open**, 2026-10-04. Found while reading the first HIPAA eligibility sweep's
+routing decisions. `/platform/routing/account-tiers` maps both `624606539840`
+(dev) and `904883674541` (**test**) to `dev`. So every finding, alarm-less event
+and dossier from Arc8 test is routed at dev's default (digest), not test's
+(digest and Jira). It is not specific to eligibility.
+
+**Likely cause, not yet confirmed:** `scripts/sync-account-tiers.sh` reads
+`EnvironmentTier` from the stack set's own parameters (one value per stack set)
+and applies it to every instance. If Arc8 test's tier is a per-instance parameter
+override, the script cannot see it.
+
+**To close:** read the per-instance overrides (`describe-stack-instance`), or take
+the tier from the registry's `environment`, which is what the registry is for.
+Then re-run the sync and confirm Arc8 test routes as test.
+

@@ -199,6 +199,18 @@ class SweepDecisions(unittest.TestCase):
                "tags": [{"key": "DataClassification", "value": "regulated"}]}
         self.assertIsNone(sweep.classify_resource(self.rows, self.prod, res))
 
+    def test_config_recorder_is_not_usage(self):
+        class IAM:
+            def get_paginator(self, _):
+                class P:
+                    def paginate(self):
+                        return [{"Roles": [
+                            {"RoleName": "PlatformConfigRecorderRole", "Path": "/", "Arn": "a"},
+                            {"RoleName": "AWSServiceRoleForConfig", "Path": "/aws-service-role/config.amazonaws.com/", "Arn": "b"},
+                            {"RoleName": "AWSReservedSSO_Developer_x", "Path": "/aws-reserved/sso.amazonaws.com/", "Arn": "c"}]}]
+                return P()
+        self.assertEqual([r["RoleName"] for r in sweep.roles(IAM())], ["AWSReservedSSO_Developer_x"])
+
     def test_message_names_the_alternative_and_the_consequence(self):
         _, row = catalog.classify_prefix(self.rows, "apprunner")
         msg = sweep.message(row, "not-allowlisted", "`apprunner`", self.dev, "used")

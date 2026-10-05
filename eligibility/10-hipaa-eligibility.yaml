@@ -198,6 +198,8 @@ Resources:
           REMIND_DAYS: !Ref RemindDays
           AWS_ACCOUNT_ID: !Ref AWS::AccountId
           PLATFORM_PRINCIPALS: ''
+          # Enumeration, not use: see sweep.py.
+          USAGE_EXCLUDED_ROLES: PlatformConfigRecorderRole
       Tags:
         - { Key: platform-managed, Value: 'true' }
         - { Key: platform-layer, Value: infrastructure }
