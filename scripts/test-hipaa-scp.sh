@@ -84,6 +84,23 @@ as_subject() { AWS_ACCESS_KEY_ID="${S_KEY}" AWS_SECRET_ACCESS_KEY="${S_SECRET}" 
 
 denied() { printf '%s' "$1" | grep -qiE 'AccessDenied|UnauthorizedOperation|not authorized|explicit deny'; }
 
+# --- fixture: a Pinpoint application -----------------------------------------
+# Pinpoint resolves the application before it evaluates authorization, so a
+# made-up id answers NotFoundException with or without the SCP and proves
+# nothing (observed 2026-10-04) — the KMS and Backup lesson again. A real,
+# empty application is free; it is kept between runs like the harness's other
+# fixtures. Its voice channel is only ever set to DISABLED.
+PINPOINT_APP="$(as_subject aws pinpoint get-apps \
+  --query "ApplicationsResponse.Item[?Name=='hipaa-scp-test-fixture'].Id | [0]" \
+  --output text 2>/dev/null | no_cr)"
+if [[ -z "${PINPOINT_APP}" || "${PINPOINT_APP}" == "None" ]]; then
+  PINPOINT_APP="$(as_subject aws pinpoint create-app --create-application-request \
+    '{"Name":"hipaa-scp-test-fixture","tags":{"Owner":"platform","Application":"hipaa-scp-test","DataClassification":"internal"}}' \
+    --query 'ApplicationResponse.Id' --output text | no_cr)" \
+    || die "Could not create the Pinpoint fixture."
+  ok "created Pinpoint fixture ${PINPOINT_APP}"
+fi
+
 # --- the calls --------------------------------------------------------------
 # label | expectation (deny|allow) | command
 CALLS=(
@@ -93,7 +110,12 @@ CALLS=(
   "synthetics:DescribeCanaries (pending, E1)|deny|aws synthetics describe-canaries"
   "aoss:ListCollections (pending, E1)|deny|aws opensearchserverless list-collections"
   "ds:CreateDirectory, Simple AD (excluded feature)|deny|aws ds create-directory --name hipaa-scp-test.invalid --password Zz1!aaaaaaaa --size Small"
-  "sms-voice:SendVoiceMessage (excluded feature)|deny|aws pinpoint-sms-voice-v2 send-voice-message --destination-phone-number +15005550006 --origination-identity none --message-body x"
+  # Voice messages: the voice CHANNEL on the fixture, set to disabled, not
+  # sms-voice:SendVoiceMessage. That service validates input before
+  # authorization (ValidationException SENDER_ID_NOT_SUPPORTED with or without
+  # the SCP, 2026-10-04), so an inert send proves nothing, and a valid one would
+  # send a message. Same statement; Access Analyzer validates the action names.
+  "mobiletargeting:UpdateVoiceChannel (excluded feature)|deny|aws pinpoint update-voice-channel --application-id ${PINPOINT_APP} --voice-channel-request Enabled=false"
   "s3:ListAllMyBuckets (eligible)|allow|aws s3api list-buckets"
   "ecs:ListClusters (eligible)|allow|aws ecs list-clusters"
   "lambda:ListFunctions (eligible)|allow|aws lambda list-functions --max-items 1"
@@ -142,9 +164,21 @@ PASS=0; FAIL=0; AMBIG=0
 hr
 for c in "${CALLS[@]}"; do
   IFS='|' read -r label expect cmd <<<"${c}"
-  # shellcheck disable=SC2086
-  out="$(as_subject ${cmd} 2>&1)" && rc=0 || rc=$?
-  is_denied=0; [[ ${rc} -ne 0 ]] && denied "${out}" && is_denied=1
+  # An attachment does not reach every service at the same moment. Seen
+  # 2026-10-04: App Runner denied within five seconds while Lightsail, on the
+  # same run, still answered. So a deny-expected call is retried for up to two
+  # minutes before it counts as absent; an allow-expected call is not, because
+  # retrying a permit only gives an over-broad policy time to look correct.
+  for attempt in $(seq 1 12); do
+    # shellcheck disable=SC2086
+    out="$(as_subject ${cmd} 2>&1)" && rc=0 || rc=$?
+    is_denied=0; [[ ${rc} -ne 0 ]] && denied "${out}" && is_denied=1
+    [[ "${expect}" == "allow" || ${is_denied} -eq 1 ]] && break
+    sleep 10
+  done
+  if [[ ${is_denied} -eq 0 && "${expect}" == "deny" ]]; then
+    printf '        last response: %s\n' "$(printf '%s' "${out}" | tr -d '\n' | cut -c1-160)"
+  fi
   if [[ "${expect}" == "allow" ]]; then
     if [[ ${is_denied} -eq 0 ]]; then
       printf '%s  PASS%s  %-52s permitted\n' "${C_GREEN}" "${C_RESET}" "${label}"; PASS=$((PASS+1))

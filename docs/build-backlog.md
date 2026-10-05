@@ -7315,6 +7315,27 @@ recorder from Statement A for read-only actions only. The first keeps Statement 
 exemption-free. Either way the harness must show Config recording without
 errors after attach.
 
+**Built and proven in Sandbox, 2026-10-04.** `PlatformHipaaEligibleOnly`
+(`p-49hf4eqx`) exists and is attached **nowhere**. `hipaa-enforced` resolves to
+`none` until Arc8 has a uat or prod account. `scripts/test-hipaa-scp.sh` on
+Sandbox Exercise passed **14 of 14**: App Runner, Lightsail, CodeArtifact,
+Synthetics, OpenSearch Serverless, Simple AD and the Pinpoint voice channel were
+denied, each with the SCP named. S3, ECS, Lambda, Directory Service reads, IAM,
+Service Quotas and STS were permitted. The subject was
+OrganizationAccountAccessRole, which proves the break-glass role is bound too.
+Detached on exit, verified.
+
+What the runs taught:
+- **Propagation is per service.** App Runner denied within 5 s while Lightsail
+  still answered. The script retries each deny-expected call for up to two minutes.
+- **Two services check something else before authorization.** `sms-voice` returns
+  `ValidationException` first, and Pinpoint returns `NotFoundException` first. A
+  probe with fake input proves nothing there. The voice check uses a real, empty
+  Pinpoint application kept as a fixture in Sandbox Exercise.
+- **Config recorder:** status stayed `SUCCESS` across a few minutes of attachment.
+  That is not proof. A recording pass may not have run. It stays the open
+  pre-attach question above.
+
 ---
 
 ## B-161 · HIPAA eligibility: nothing tells a dev-tier developer they used a non-eligible service
