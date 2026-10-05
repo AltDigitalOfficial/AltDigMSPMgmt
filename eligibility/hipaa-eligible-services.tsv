@@ -225,6 +225,7 @@ EventBridge Schema Registry	no	pending	schemas	AWS::EventSchemas			2026-10-04	pe
 Systems Manager Incident Manager	no	pending	ssm-incidents,ssm-contacts	AWS::SSMIncidents,AWS::SSMContacts			2026-10-04	pending	E1
 Systems Manager Quick Setup	no	pending	ssm-quicksetup	AWS::SSMQuickSetup			2026-10-04	pending	E1
 Systems Manager GUI Connect	no	pending	ssm-guiconnect				2026-10-04	pending	E1. RDP through Fleet Manager
+AWS AppConfig	no	pending	appconfig	AWS::AppConfig			2026-10-04	pending	E1. Documented as a capability of Systems Manager. AWS predefines deployment strategies in every account, so Config records some in all of them
 S3 Express One Zone	no	pending	s3express	AWS::S3Express			2026-10-04	pending	E1
 S3 Tables	no	pending	s3tables	AWS::S3Tables			2026-10-04	pending	E1
 S3 Object Lambda	no	pending	s3-object-lambda	AWS::S3ObjectLambda			2026-10-04	pending	E1
