@@ -205,8 +205,12 @@ def message(row, status, subject, account, verb):
     env = account.get("environment", "?")
     alias = account.get("alias") or "the account"
     if status == "pending":
-        return (f"{subject} {verb} in {alias} ({env}). Its HIPAA eligibility is unconfirmed, so "
-                "it is treated as not eligible until reviewed: denied in uat and prod.")
+        # E1 (2026-10-05): AltDigital has asked AWS. Honest about the interim —
+        # blocked in uat and prod until confirmed — and asks for the one thing
+        # that helps, rather than telling the developer to stop.
+        return (f"{subject} {verb} in {alias} ({env}). AltDigital is confirming its HIPAA "
+                "eligibility with AWS; until confirmed it is blocked in uat and prod. If your "
+                "design depends on it, tell AltDigital now so it is answered before go-live.")
     if status == "unlisted":
         return (f"{subject} {verb} in {alias} ({env}) is not in the HIPAA eligibility catalog at "
                 "all. The catalog is incomplete; AltDigital will classify it.")

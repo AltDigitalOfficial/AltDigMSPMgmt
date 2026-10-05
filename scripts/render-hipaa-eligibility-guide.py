@@ -49,9 +49,12 @@ def render(version, rows):
         out.append(f"| {name(r)} | `{'`, `'.join(r['prefixes'])}` | {r['alternative'] or '—'} |")
     out.append("")
 
-    out += ["**Eligibility not yet confirmed: treated as not eligible until reviewed.** "
+    out += ["**Eligibility being confirmed: blocked in uat and prod until it is.** "
             "Mostly features AWS documents under an eligible service but gives an IAM "
-            "prefix of their own. Ask AltDigital before designing around one.", ""]
+            "prefix of their own. AltDigital has asked AWS about the most likely ones "
+            "(Synthetics, Application Signals, RUM, EventBridge Scheduler and Pipes, "
+            "OpenSearch Serverless, S3 Express One Zone, S3 Tables). If your design "
+            "depends on any of these, tell AltDigital now.", ""]
     out.append(", ".join(f"{name(r)} (`{'`, `'.join(r['prefixes'])}`)" for r in pending))
     out.append("")
 

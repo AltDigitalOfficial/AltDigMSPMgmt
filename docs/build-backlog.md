@@ -7336,6 +7336,11 @@ What the runs taught:
   That is not proof. A recording pass may not have run. It stays the open
   pre-attach question above.
 
+**Config recorder: option A decided** (Jamie, 2026-10-05). In HIPAA uat and prod
+accounts, the recorder records eligible resource types only, through a per-account
+parameter override on the Config recorder StackSet. Statement A stays
+exemption-free. Must be in place before the policy attaches to Arc8 prod.
+
 ---
 
 ## B-161 · HIPAA eligibility: nothing tells a dev-tier developer they used a non-eligible service
