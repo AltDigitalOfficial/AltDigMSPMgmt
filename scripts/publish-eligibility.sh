@@ -39,6 +39,11 @@ info "Validating the catalog"
 "${PY}" "$(win_path "${REPO_ROOT}/scripts/validate-hipaa-eligibility.py")" \
   || die "The HIPAA eligibility catalog does not validate. Nothing packaged."
 
+# The developer guide carries the same lists, generated. A catalog change that
+# reached the sweep without the guide would tell developers one thing and deny
+# them another.
+"${PY}" "$(win_path "${REPO_ROOT}/scripts/render-hipaa-eligibility-guide.py")" --check   || die "docs/developer-guide.md is stale. Run scripts/render-hipaa-eligibility-guide.py and commit."
+
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 

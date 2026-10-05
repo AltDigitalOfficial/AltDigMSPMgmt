@@ -7401,6 +7401,11 @@ Also the digest line wording in §7.
 Pre-flight CI check deferred. **Trigger:** a developer asks for it, or the
 digest shows the same prefix recurring across weeks.
 
+**Built 2026-10-04.** Developer guide §4.16, a short-version bullet, a row in the
+access-denied table, the §4.15 amendment and a "Getting help" row. The lists in
+§4.16 are generated from the catalog by `scripts/render-hipaa-eligibility-guide.py`.
+`publish-eligibility.sh` refuses to publish while the guide is stale.
+
 ---
 
 ## B-165 · HIPAA eligibility: vesting would put a HIPAA prod account live without the SCP
