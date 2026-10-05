@@ -7176,6 +7176,58 @@ the way the instrumentation Lambda already recognises them.
   written before the fix. The 21:22Z scan found 0, raised no findings, and
   left no pending rows in the ledger.
 
+### Phase B done, 2026-10-04 (`76a08e6`)
+
+**Retrofit.** `platform-layer=infrastructure` is now a stack tag on all 11
+baseline StackSets (existing tags kept: `platform-developer-boundary` still
+has `platform-managed`), rolled out Sandbox first, then Members, then
+`members/oeight/oeight`. All 42 instances are `CURRENT`. It is also on all 36
+plain stacks in the seven platform accounts but one (below), next to
+`platform-managed=true`.
+
+Before the rollout, CloudFormation's registry schemas were checked for every
+resource type in these stacks. No type is replaced by a tag change, and the
+untaggable ones (routes, policies, aliases, permissions) are not touched.
+Every tag-denying SCP exempts `stacksets-exec-*` and
+`OrganizationAccountAccessRole`. Verified afterwards: the tag is present on
+VPCs, subnets, security groups, endpoints, KMS keys, Lambdas, log groups,
+alarms, rules and parameters in all four member accounts, and stack events
+show no deletions or replacements.
+
+**Not done, for Jamie: `platform-backup-vault` (Security Backup).** It is the
+locked vault, whose last change set was run by hand (B-028). Same change: keep
+the template, parameters and `platform-managed=true`, and add
+`platform-layer=infrastructure`.
+
+**Kept tagged.** The deploy scripts add the tag on every create and update
+(`deploy-stackset.sh` merges it with the set's existing tags; `deploy-to-account.sh`
+and `cfn_deploy` put it beside `platform-managed`). `PLATFORM_LAYER_TAG_VALID`
+validates the value only, and now says so.
+
+*The rollout script's own failure, for the next one:* a stack with no
+parameters returns the literal `None` from `--output text`, which became
+`ParameterKey=None`. The update failed, and `set -euo pipefail` from
+`lib/common.sh` aborted the loop before it printed anything, twice, once with
+exit 0. The run that completed printed `listed=35 succeeded=35`. A batch
+script should end with a count, not just an exit status.
+
+### Phase C, 2026-10-04 (`cd0b5dd`, `793cea3`)
+
+- **Organization Config aggregator** `platform-organization` in Audit, over
+  the allowed regions (`security/40-config-aggregator.yaml`). Queried live:
+  Arc8 test's VPC came back with `platform-layer=infrastructure`.
+- **Stage one: every record carries `layer` and `layer_source`**
+  (`evidence/src/layer.py`). The sources are operator, account, tag, untagged,
+  tag-invalid, not-found, lookup-failed and no-resource. Recorded only; routing
+  is unchanged.
+- **Stage two, not started:** the sender splits destinations on the layer, and
+  the tenant map gains the layer. **Blocked on two things:**
+  1. a day of stage-one records, to see how often each source resolves
+     (especially untagged AWS defaults and GuardDuty `no-resource`) before the
+     unresolved remainder is held rather than delivered;
+  2. the Truveon session's answer on registering one AWS account in two
+     tenants (`altdigital` for infrastructure, `oeight` for application).
+
 ## B-158 · Log custody was built on 2026-09-23 and never deployed
 
 **Open**, 2026-10-04. Found comparing the deployed `platform-evidence` template
