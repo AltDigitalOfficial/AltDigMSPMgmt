@@ -7378,6 +7378,20 @@ router redeployed with the `hipaa-eligibility` normaliser.
 The attachment check (§4.3) is not built: there is nothing to check until B-160
 attaches a policy.
 
+**E8 built 2026-10-05.** A CRITICAL finding in dev or test is decided in the
+router (`digest_and_jira`, plus a tenant alert, never a page) and published to
+`platform-hipaa-eligibility-tenant-alerts`:
+- the tenant contact gets an email through an SNS subscription filtered to their
+  tenant;
+- `tenant_jira.py` files a ticket in the tenant's Jira.
+
+The contacts and the Jira target are in gitignored `config/hipaa-contacts.env`,
+published by `scripts/sync-hipaa-alerts.sh`. A ticket that cannot be filed is
+reported to AltDigital. Pending-status catalog rows now carry an
+alternative that is already confirmed eligible, shown in the digest and the
+guide. Rows were chosen from Arc8's Azure source (AI Search, Container Apps Jobs,
+App Insights).
+
 ---
 
 ## B-162 · HIPAA eligibility: no exception path for non-PHI use of a non-eligible service
@@ -7469,3 +7483,21 @@ override, the script cannot see it.
 the tier from the registry's `environment`, which is what the registry is for.
 Then re-run the sync and confirm Arc8 test routes as test.
 
+
+---
+
+## B-167 · The router could never read the tenant map, so tenant pages always fell back to AltDigital
+
+**Found 2026-10-05**, while wiring HIPAA eligibility E8. `router.py` has read
+`/platform/change/tenant-facts` since B-127 to choose a tenant's PagerDuty
+service. The router role in `alerting/20-router.yaml` only grants
+`/platform/routing/*`. Every lookup failed, was cached as an error, and every
+tenant-layer page went to AltDigital's own service, with a note in the routing
+log. It was invisible because the fallback is the safe direction, and because
+today every PagerDuty service reaches the same person.
+
+**Fixed in the template** with an exact grant on the one parameter. It takes
+effect at the next router deploy. Arc8's PagerDuty services are not yet applied
+(open on the Arc8 onboarding list), and a missing tenant routing key still
+falls back to the platform service. So the deploy changes nothing that pages
+today. It only makes the tenant lookup work for when those services exist.

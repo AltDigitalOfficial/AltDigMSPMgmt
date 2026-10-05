@@ -55,7 +55,13 @@ def render(version, rows):
             "(Synthetics, Application Signals, RUM, EventBridge Scheduler and Pipes, "
             "OpenSearch Serverless, S3 Express One Zone, S3 Tables). If your design "
             "depends on any of these, tell AltDigital now.", ""]
-    out.append(", ".join(f"{name(r)} (`{'`, `'.join(r['prefixes'])}`)" for r in pending))
+    with_alt = [r for r in pending if r["alternative"]]
+    out += ["| Service | IAM prefix | Confirmed-eligible alternative available today |",
+            "|---|---|---|"]
+    for r in with_alt:
+        out.append(f"| {name(r)} | `{'`, `'.join(r['prefixes'])}` | {r['alternative']} |")
+    out += ["", "Also pending, less likely to come up: " + ", ".join(
+        f"{name(r)} (`{'`, `'.join(r['prefixes'])}`)" for r in pending if not r["alternative"]) + "."]
     out.append("")
 
     out += ["**Also allowed: running the account.** These are not on AWS's list, but "

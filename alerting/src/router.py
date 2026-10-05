@@ -71,6 +71,12 @@ PD_SECRET_NAME_LOW = os.environ.get("PAGERDUTY_SECRET_NAME_LOW", "")
 JIRA_QUEUE_URL = os.environ.get("JIRA_QUEUE_URL", "")
 REVIEW_QUEUE_URL = os.environ.get("REVIEW_QUEUE_URL", "")
 COMMERCIAL_QUEUE_URL = os.environ.get("COMMERCIAL_QUEUE_URL", "")
+# docs/hipaa-eligibility.md E8. A CRITICAL eligibility finding in a HIPAA
+# tenant's dev or test reaches that tenant's named contact and a ticket in the
+# tenant's own Jira, now rather than in the next digest. The topic's
+# subscribers (eligibility/10-hipaa-eligibility.yaml) do the delivering; the
+# DECISION that it goes there is made here, like every other routing decision.
+TENANT_ALERT_TOPIC_ARN = os.environ.get("TENANT_ALERT_TOPIC_ARN", "")
 ROUTING_LOG_GROUP = os.environ.get("ROUTING_LOG_GROUP", "/aws/platform/routing")
 
 PD_ENQUEUE = "https://events.pagerduty.com/v2/enqueue"
@@ -655,6 +661,18 @@ def decide(norm):
         sev = (norm.get("severity") or "").upper()
         suffix = f". {note}" if note else ""
         why = f"hipaa-eligibility, tier default for {tier}, severity {sev or 'UNRATED'}"
+        # E8 (Jamie, 2026-10-05). The one place this router raises an
+        # eligibility event above its tier default, and it is the router doing
+        # it, not the emitter. A regulated-tagged resource on a non-eligible
+        # service in dev means a design that will put patient data where the
+        # BAA does not reach: a certain go-live blocker that should not wait
+        # for a digest. It is ticketed and sent to the tenant's contact. It
+        # never pages: dev is not production.
+        if sev == "CRITICAL" and tier in ("dev", "test"):
+            default = "digest_and_jira"
+            norm["tenant_alert"] = True
+            why = (f"hipaa-eligibility CRITICAL in {tier}: ticketed and sent to the tenant "
+                   "contact immediately (E8), not left for the digest")
         if default == "pagerduty" and sev not in FINDING_PAGES_AT:
             default, why = "digest_and_jira", (
                 f"{tier} defaults to pagerduty, but a {sev or 'UNRATED'} eligibility "
@@ -909,6 +927,51 @@ def page(norm, routing, why):
                 "event_action": body["event_action"]}
 
 
+_sns = None
+
+
+def tenant_alert(norm, why):
+    """Publish to the tenant alert topic, addressed by tenant. E8.
+
+    The tenant is an SNS message attribute, and each contact's subscription
+    filters on it, so one topic serves every HIPAA tenant and nobody receives
+    another tenant's findings. An account with no tenant record is not
+    guessed at: it is reported as not sent, and the Jira queue and the digest
+    still carry it.
+    """
+    global _sns
+    if not TENANT_ALERT_TOPIC_ARN:
+        return {"sent": False, "reason": "tenant alert topic not configured"}
+    facts = tenant_facts(norm.get("account_id")) or {}
+    if not facts.get("partner") or not facts.get("client"):
+        return {"sent": False, "reason": f"no tenant record for {norm.get('account_id')}"}
+    tenant = f"{facts['partner']}-{facts['client']}"
+    d = norm.get("dossier") or {}
+    text = "\n\n".join(x for x in [
+        norm.get("reason") or norm.get("title"),
+        f"Account {norm.get('account_id')} ({norm.get('environment_tier')}). "
+        f"Resource: {norm.get('resource')}.",
+        "A resource tagged DataClassification=regulated is on an AWS service that is "
+        "not HIPAA-eligible. In dev or test this is not an incident: it means the "
+        "design would put patient data where AltDigital's agreement with AWS does not "
+        "cover it, and it cannot go to uat or prod as built. Change the service, or "
+        "the classification if the resource will never hold patient data.",
+        "Developer guide section 4.16 has the alternatives. A Jira ticket has been "
+        "raised in your project.",
+    ] if x)
+    payload = {"tenant": tenant, "routing_why": why, "norm": norm, "detail": d}
+    if _sns is None:
+        _sns = boto3.client("sns")
+    _sns.publish(
+        TopicArn=TENANT_ALERT_TOPIC_ARN,
+        Subject=f"HIPAA eligibility: action needed in {d.get('environment') or norm.get('environment_tier')}"[:100],
+        MessageStructure="json",
+        Message=json.dumps({"default": text, "email": text,
+                            "lambda": json.dumps(payload, default=str)}),
+        MessageAttributes={"tenant": {"DataType": "String", "StringValue": tenant}})
+    return {"sent": True, "tenant": tenant}
+
+
 def enqueue(url, norm, routing, why, destination):
     if not url:
         return {"sent": False, "reason": f"{destination} queue not configured"}
@@ -1049,6 +1112,8 @@ def deliver(norm, detail_type):
     if not spec["pages"] and not spec.get("ticket"):
         delivered["review"] = enqueue(
             REVIEW_QUEUE_URL, norm, routing, why, "review")
+    if norm.get("tenant_alert"):
+        delivered["tenant_alert"] = tenant_alert(norm, why)
 
     # Every decision is recorded, including the ones that deliberately did
     # nothing. "Why was I not paged about this" is the question this log exists

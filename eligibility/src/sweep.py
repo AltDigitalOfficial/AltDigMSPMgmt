@@ -210,7 +210,9 @@ def message(row, status, subject, account, verb):
         # that helps, rather than telling the developer to stop.
         return (f"{subject} {verb} in {alias} ({env}). AltDigital is confirming its HIPAA "
                 "eligibility with AWS; until confirmed it is blocked in uat and prod. If your "
-                "design depends on it, tell AltDigital now so it is answered before go-live.")
+                "design depends on it, tell AltDigital now so it is answered before go-live."
+                + (f" Confirmed-eligible alternative available today: {row['alternative']}."
+                   if row and row.get("alternative") else ""))
     if status == "unlisted":
         return (f"{subject} {verb} in {alias} ({env}) is not in the HIPAA eligibility catalog at "
                 "all. The catalog is incomplete; AltDigital will classify it.")

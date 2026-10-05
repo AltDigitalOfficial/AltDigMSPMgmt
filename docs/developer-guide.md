@@ -757,7 +757,22 @@ resource tagged `regulated`.
 
 **Eligibility being confirmed: blocked in uat and prod until it is.** Mostly features AWS documents under an eligible service but gives an IAM prefix of their own. AltDigital has asked AWS about the most likely ones (Synthetics, Application Signals, RUM, EventBridge Scheduler and Pipes, OpenSearch Serverless, S3 Express One Zone, S3 Tables). If your design depends on any of these, tell AltDigital now.
 
-Amplify backend and UI builder (`amplifybackend`, `amplifyuibuilder`), AWS AppConfig (`appconfig`), Backup gateway (`backup-gateway`), Backup search (`backup-search`), Clean Rooms ML (`cleanrooms-ml`), CloudWatch Application Signals (`application-signals`), CloudWatch cross-account observability (`oam`), CloudWatch Internet Monitor (`internetmonitor`), CloudWatch Network Monitor (`networkmonitor`), CloudWatch RUM (`rum`), CloudWatch Synthetics (`synthetics`), DevOps Agent (candidate prefix) (`aidevops`), DynamoDB Accelerator (DAX) (`dax`), EMR on EKS (`emr-containers`), EMR Serverless (`emr-serverless`), EventBridge Pipes (`pipes`), EventBridge Scheduler (`scheduler`), EventBridge Schema Registry (`schemas`), IoT Device Management Fleet Hub (`iotfleethub`), IoT Jobs data plane (`iotjobsdata`), Neptune Analytics (`neptune-graph`), OpenSearch Serverless (`aoss`), Q Apps (`qapps`), Redshift Serverless (`redshift-serverless`), Route 53 Domains (`route53domains`), Route 53 Profiles (`route53profiles`), S3 Express One Zone (`s3express`), S3 Object Lambda (`s3-object-lambda`), S3 Tables (`s3tables`), S3 Vectors (`s3vectors`), Systems Manager GUI Connect (`ssm-guiconnect`), Systems Manager Incident Manager (`ssm-incidents`, `ssm-contacts`), Systems Manager Quick Setup (`ssm-quicksetup`), Timestream for InfluxDB (`timestream-influxdb`)
+| Service | IAM prefix | Confirmed-eligible alternative available today |
+|---|---|---|
+| CloudWatch Application Signals | `application-signals` | X-Ray traces and CloudWatch metrics |
+| CloudWatch RUM | `rum` | Server-side logging to CloudWatch Logs |
+| CloudWatch Synthetics | `synthetics` | A scheduled Lambda health check (events + lambda) |
+| DynamoDB Accelerator (DAX) | `dax` | ElastiCache |
+| EMR Serverless | `emr-serverless` | EMR on EC2, or Glue |
+| EventBridge Pipes | `pipes` | EventBridge rules, SQS and Lambda |
+| EventBridge Scheduler | `scheduler` | EventBridge rules with a schedule expression (events), targeting ECS tasks, Lambda or Step Functions |
+| OpenSearch Serverless | `aoss` | OpenSearch Service managed domains (es) |
+| Redshift Serverless | `redshift-serverless` | Redshift provisioned clusters |
+| S3 Express One Zone | `s3express` | S3 standard buckets |
+| S3 Tables | `s3tables` | S3 with Glue and Athena |
+| S3 Vectors | `s3vectors` | OpenSearch Service managed domains (vector search) |
+
+Also pending, less likely to come up: Amplify backend and UI builder (`amplifybackend`, `amplifyuibuilder`), AWS AppConfig (`appconfig`), Backup gateway (`backup-gateway`), Backup search (`backup-search`), Clean Rooms ML (`cleanrooms-ml`), CloudWatch cross-account observability (`oam`), CloudWatch Internet Monitor (`internetmonitor`), CloudWatch Network Monitor (`networkmonitor`), DevOps Agent (candidate prefix) (`aidevops`), EMR on EKS (`emr-containers`), EventBridge Schema Registry (`schemas`), IoT Device Management Fleet Hub (`iotfleethub`), IoT Jobs data plane (`iotjobsdata`), Neptune Analytics (`neptune-graph`), Q Apps (`qapps`), Route 53 Domains (`route53domains`), Route 53 Profiles (`route53profiles`), S3 Object Lambda (`s3-object-lambda`), Systems Manager GUI Connect (`ssm-guiconnect`), Systems Manager Incident Manager (`ssm-incidents`, `ssm-contacts`), Systems Manager Quick Setup (`ssm-quicksetup`), Timestream for InfluxDB (`timestream-influxdb`).
 
 **Also allowed: running the account.** These are not on AWS's list, but they hold no patient data: identity, billing, quotas, support, tagging. **Never put patient data in a support case or a tag.**
 

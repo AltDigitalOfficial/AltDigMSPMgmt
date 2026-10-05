@@ -213,33 +213,33 @@ Cost and billing	no	carve-out	ce,cur,budgets,billing,aws-portal,payments,invoici
 Compute Optimizer	no	carve-out	compute-optimizer				2026-10-04	pending	Sizing recommendations
 AWS User Notifications	no	carve-out	notifications				2026-10-04	pending	
 Console settings	no	carve-out	uxc				2026-10-04	pending	
-CloudWatch Synthetics	no	pending	synthetics	AWS::Synthetics			2026-10-04	pending	E1. Platform canaries use it in uat/prod (design 14)
-CloudWatch RUM	no	pending	rum	AWS::RUM			2026-10-04	pending	E1. Collects browser telemetry from real user sessions
-CloudWatch Application Signals	no	pending	application-signals	AWS::ApplicationSignals			2026-10-04	pending	E1. Design 11 production visibility
+CloudWatch Synthetics	no	pending	synthetics	AWS::Synthetics		A scheduled Lambda health check (events + lambda)	2026-10-04	pending	E1. Platform canaries use it in uat/prod (design 14)
+CloudWatch RUM	no	pending	rum	AWS::RUM		Server-side logging to CloudWatch Logs	2026-10-04	pending	E1. Collects browser telemetry from real user sessions
+CloudWatch Application Signals	no	pending	application-signals	AWS::ApplicationSignals		X-Ray traces and CloudWatch metrics	2026-10-04	pending	E1. Design 11 production visibility
 CloudWatch Internet Monitor	no	pending	internetmonitor	AWS::InternetMonitor			2026-10-04	pending	E1
 CloudWatch Network Monitor	no	pending	networkmonitor	AWS::NetworkMonitor			2026-10-04	pending	E1
 CloudWatch cross-account observability	no	pending	oam	AWS::Oam			2026-10-04	pending	E1
-EventBridge Scheduler	no	pending	scheduler	AWS::Scheduler			2026-10-04	pending	E1
-EventBridge Pipes	no	pending	pipes	AWS::Pipes			2026-10-04	pending	E1
+EventBridge Scheduler	no	pending	scheduler	AWS::Scheduler		EventBridge rules with a schedule expression (events), targeting ECS tasks, Lambda or Step Functions	2026-10-04	pending	E1
+EventBridge Pipes	no	pending	pipes	AWS::Pipes		EventBridge rules, SQS and Lambda	2026-10-04	pending	E1
 EventBridge Schema Registry	no	pending	schemas	AWS::EventSchemas			2026-10-04	pending	E1
 Systems Manager Incident Manager	no	pending	ssm-incidents,ssm-contacts	AWS::SSMIncidents,AWS::SSMContacts			2026-10-04	pending	E1
 Systems Manager Quick Setup	no	pending	ssm-quicksetup	AWS::SSMQuickSetup			2026-10-04	pending	E1
 Systems Manager GUI Connect	no	pending	ssm-guiconnect				2026-10-04	pending	E1. RDP through Fleet Manager
 AWS AppConfig	no	pending	appconfig	AWS::AppConfig			2026-10-04	pending	E1. Documented as a capability of Systems Manager. AWS predefines deployment strategies in every account, so Config records some in all of them
-S3 Express One Zone	no	pending	s3express	AWS::S3Express			2026-10-04	pending	E1
-S3 Tables	no	pending	s3tables	AWS::S3Tables			2026-10-04	pending	E1
+S3 Express One Zone	no	pending	s3express	AWS::S3Express		S3 standard buckets	2026-10-04	pending	E1
+S3 Tables	no	pending	s3tables	AWS::S3Tables		S3 with Glue and Athena	2026-10-04	pending	E1
 S3 Object Lambda	no	pending	s3-object-lambda	AWS::S3ObjectLambda			2026-10-04	pending	E1
-S3 Vectors	no	pending	s3vectors	AWS::S3Vectors			2026-10-04	pending	E1
-OpenSearch Serverless	no	pending	aoss	AWS::OpenSearchServerless			2026-10-04	pending	E1
-EMR Serverless	no	pending	emr-serverless	AWS::EMRServerless			2026-10-04	pending	E1
+S3 Vectors	no	pending	s3vectors	AWS::S3Vectors		OpenSearch Service managed domains (vector search)	2026-10-04	pending	E1
+OpenSearch Serverless	no	pending	aoss	AWS::OpenSearchServerless		OpenSearch Service managed domains (es)	2026-10-04	pending	E1
+EMR Serverless	no	pending	emr-serverless	AWS::EMRServerless		EMR on EC2, or Glue	2026-10-04	pending	E1
 EMR on EKS	no	pending	emr-containers	AWS::EMRContainers			2026-10-04	pending	E1
-Redshift Serverless	no	pending	redshift-serverless	AWS::RedshiftServerless			2026-10-04	pending	E1
+Redshift Serverless	no	pending	redshift-serverless	AWS::RedshiftServerless		Redshift provisioned clusters	2026-10-04	pending	E1
 Timestream for InfluxDB	no	pending	timestream-influxdb	AWS::InfluxDB			2026-10-04	pending	E1
 Route 53 Domains	no	pending	route53domains				2026-10-04	pending	E1
 Route 53 Profiles	no	pending	route53profiles	AWS::Route53Profiles			2026-10-04	pending	E1
 Backup gateway	no	pending	backup-gateway				2026-10-04	pending	E1
 Backup search	no	pending	backup-search				2026-10-04	pending	E1
-DynamoDB Accelerator (DAX)	no	pending	dax	AWS::DAX			2026-10-04	pending	E1
+DynamoDB Accelerator (DAX)	no	pending	dax	AWS::DAX		ElastiCache	2026-10-04	pending	E1
 Neptune Analytics	no	pending	neptune-graph	AWS::NeptuneGraph			2026-10-04	pending	E1
 IoT Device Management Fleet Hub	no	pending	iotfleethub	AWS::IoTFleetHub			2026-10-04	pending	E1
 IoT Jobs data plane	no	pending	iotjobsdata				2026-10-04	pending	E1

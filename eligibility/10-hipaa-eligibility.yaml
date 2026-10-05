@@ -317,6 +317,109 @@ Resources:
       SourceArn: !GetAtt UpstreamScheduleRule.Arn
 
   # -------------------------------------------------------------------------
+  # E8: tenant alerts for CRITICAL findings in dev and test
+  # -------------------------------------------------------------------------
+  # The router publishes here when it decides a finding goes to the tenant now
+  # (alerting/src/router.py, tenant_alert). Two kinds of subscriber:
+  #   - each tenant contact's email, filtered to their tenant, created by
+  #     scripts/sync-hipaa-alerts.sh (the address is never in a template);
+  #   - TenantJiraFunction, below, which files the ticket in the tenant's Jira.
+  # The AWS-managed SNS key: SNS email delivery and a same-account Lambda both
+  # work with it, and a customer key would add a key policy for no gain here.
+  TenantAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: platform-hipaa-eligibility-tenant-alerts
+      DisplayName: AltDigital HIPAA eligibility
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  TenantJiraRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformHipaaEligibilityTenantJira
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: FileTenantTickets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Targets
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/eligibility/tenant-alerts'
+              - Sid: TenantJiraCredential
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:platform/jira/tenant/*'
+              - Sid: ReportFailure
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  TenantJiraLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-hipaa-eligibility-tenant-jira
+      RetentionInDays: 2557
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  TenantJiraFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TenantJiraLogGroup
+    Properties:
+      FunctionName: platform-hipaa-eligibility-tenant-jira
+      Runtime: python3.12
+      Handler: tenant_jira.handler
+      Role: !GetAtt TenantJiraRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          TARGETS_PARAM: /platform/eligibility/tenant-alerts
+          SECRET_PREFIX: platform/jira/tenant
+          ALERT_BUS_NAME: !Ref AlertBusName
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  TenantJiraSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref TenantAlertTopic
+      Protocol: lambda
+      Endpoint: !GetAtt TenantJiraFunction.Arn
+
+  TenantJiraPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt TenantJiraFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref TenantAlertTopic
+
+  # -------------------------------------------------------------------------
   # Silence is not "nothing found"
   # -------------------------------------------------------------------------
   # Each function writes a completion metric only when it ran AND could see
@@ -366,6 +469,11 @@ Outputs:
     Value: !Ref SweepFunction
   UpstreamFunctionName:
     Value: !Ref UpstreamFunction
+  TenantAlertTopicArn:
+    Description: >-
+      E8. Passed to the router stack as TenantAlertTopicArn; contacts are
+      subscribed by scripts/sync-hipaa-alerts.sh.
+    Value: !Ref TenantAlertTopic
   SweepRoleArn:
     Description: Trusted by PlatformHipaaEligibilityReader in each HIPAA account.
     Value: !GetAtt SweepRole.Arn

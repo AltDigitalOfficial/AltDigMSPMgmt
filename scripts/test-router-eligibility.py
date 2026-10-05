@@ -117,6 +117,46 @@ class EligibilityRouting(unittest.TestCase):
         self.assertEqual(out["routing"], "digest_and_jira")
         self.assertEqual(self.paged, [])
 
+    def test_e8_critical_in_dev_or_test_is_ticketed_and_sent_to_the_tenant(self):
+        for acct in (DEV, TEST):
+            n = router.NORMALISERS["hipaa-eligibility"](event(acct, "CRITICAL"))
+            self.assertEqual(router.decide(n)[0], "digest_and_jira")
+            self.assertTrue(n.get("tenant_alert"))
+        self.assertEqual(self.paged, [])
+
+    def test_e8_does_not_apply_below_critical_or_in_prod(self):
+        n = router.NORMALISERS["hipaa-eligibility"](event(DEV, "HIGH"))
+        self.assertEqual(router.decide(n)[0], "digest")
+        self.assertFalse(n.get("tenant_alert"))
+        n = router.NORMALISERS["hipaa-eligibility"](event(PROD, "CRITICAL"))
+        self.assertEqual(router.decide(n)[0], "pagerduty")
+        self.assertFalse(n.get("tenant_alert"))
+
+    def test_e8_publishes_addressed_by_tenant(self):
+        published = []
+
+        class SNS:
+            def publish(self, **kw):
+                published.append(kw)
+        saved = (router._sns, router.TENANT_ALERT_TOPIC_ARN, router.tenant_facts)
+        try:
+            router._sns, router.TENANT_ALERT_TOPIC_ARN = SNS(), "arn:aws:sns:us-east-2:1:t"
+            router.tenant_facts = lambda a: {"partner": "oeight", "client": "oeight"}
+            out = router.handler(event(DEV, "CRITICAL", check="inventory",
+                                       subject="AWS::AppRunner::Service/x"), None)
+            self.assertEqual(out["delivered"]["tenant_alert"], {"sent": True, "tenant": "oeight-oeight"})
+            (msg,) = published
+            self.assertEqual(msg["MessageAttributes"]["tenant"]["StringValue"], "oeight-oeight")
+            body = json.loads(msg["Message"])
+            self.assertIn("not HIPAA-eligible", body["email"])
+            self.assertEqual(json.loads(body["lambda"])["tenant"], "oeight-oeight")
+            # No tenant record: not guessed at, and said so.
+            router.tenant_facts = lambda a: None
+            out = router.handler(event(DEV, "CRITICAL"), None)
+            self.assertFalse(out["delivered"]["tenant_alert"]["sent"])
+        finally:
+            router._sns, router.TENANT_ALERT_TOPIC_ARN, router.tenant_facts = saved
+
     def test_one_incident_per_account_and_subject(self):
         a = router.NORMALISERS["hipaa-eligibility"](event(PROD, "HIGH"))
         b = router.NORMALISERS["hipaa-eligibility"](event(PROD, "HIGH"))

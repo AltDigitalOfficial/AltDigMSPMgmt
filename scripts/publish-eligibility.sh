@@ -48,7 +48,7 @@ BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 
 > "${BUILD}/.sources"
-for MODULE in catalog state sweep upstream; do
+for MODULE in catalog state sweep upstream tenant_jira; do
   cp "${REPO_ROOT}/eligibility/src/${MODULE}.py" "${BUILD}/${MODULE}.py"
   printf '%s\n' "$(win_path "${REPO_ROOT}/eligibility/src/${MODULE}.py")" >> "${BUILD}/.sources"
 done

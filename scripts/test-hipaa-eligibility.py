@@ -22,6 +22,7 @@ The properties guarded, and why each would fail quietly:
 """
 
 import datetime
+import json
 import os
 import sys
 import tempfile
@@ -34,6 +35,7 @@ sys.path.insert(0, str(ROOT / "eligibility" / "src"))
 
 import catalog  # noqa: E402
 import sweep  # noqa: E402
+import tenant_jira  # noqa: E402
 import upstream  # noqa: E402
 
 CATALOG = ROOT / "eligibility" / "hipaa-eligible-services.tsv"
@@ -217,6 +219,45 @@ class SweepDecisions(unittest.TestCase):
         self.assertIn("ECS on Fargate", msg)
         self.assertIn("will be denied in uat and prod", msg)
         self.assertIn("§4.16", msg)
+
+
+class TenantJira(unittest.TestCase):
+
+    PAYLOAD = {"tenant": "oeight-oeight", "routing_why": "E8",
+               "norm": {"account_id": "624606539840", "environment_tier": "dev",
+                        "resource": "AWS::AppRunner::Service/x"},
+               "detail": {"environment": "dev", "subject": "AWS::AppRunner::Service/x",
+                          "summary": "s"}}
+
+    def test_issue_body(self):
+        body = tenant_jira.build_issue({"jira_project": "ARC8", "issue_type": "Task"}, self.PAYLOAD)
+        f = body["fields"]
+        self.assertEqual(f["project"], {"key": "ARC8"})
+        self.assertEqual(f["issuetype"], {"name": "Task"})
+        self.assertIn("hipaa-eligibility", f["labels"])
+        self.assertEqual(f["description"]["type"], "doc")
+        self.assertLessEqual(len(f["summary"]), 250)
+
+    def test_missing_target_is_reported_not_swallowed(self):
+        sent = []
+
+        class SSM:
+            def get_parameter(self, Name):
+                return {"Parameter": {"Value": "{}"}}
+
+        class EV:
+            def put_events(self, Entries):
+                sent.extend(Entries)
+        saved = (tenant_jira.ssm, tenant_jira.events)
+        try:
+            tenant_jira.ssm, tenant_jira.events = SSM(), EV()
+            tenant_jira.file_one(self.PAYLOAD)
+        finally:
+            tenant_jira.ssm, tenant_jira.events = saved
+        (e,) = sent
+        d = json.loads(e["Detail"])
+        self.assertEqual((d["severity"], d["routing"]), ("HIGH", "digest_and_jira"))
+        self.assertIn("no Jira site", d["summary"])
 
 
 if __name__ == "__main__":

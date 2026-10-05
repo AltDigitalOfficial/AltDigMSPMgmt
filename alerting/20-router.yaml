@@ -82,6 +82,14 @@ Parameters:
     Default: ''
     Description: 'Backlog warnings that are not incidents.'
 
+  TenantAlertTopicArn:
+    Type: String
+    Default: ''
+    Description: >-
+      docs/hipaa-eligibility.md E8. The HIPAA eligibility tenant alert topic,
+      from the platform-hipaa-eligibility stack. Empty: no tenant alerts, and
+      the decision is still recorded with the reason.
+
   RouterCodeBucket:
     Type: String
 
@@ -90,6 +98,7 @@ Parameters:
 
 Conditions:
   HasLowUrgency: !Not [!Equals [!Ref LowUrgencyTopicArn, '']]
+  HasTenantAlerts: !Not [!Equals [!Ref TenantAlertTopicArn, '']]
 
 Resources:
 
@@ -273,7 +282,20 @@ Resources:
                 # finding in a dev sandbox would have paged as production.
                 # Written by scripts/sync-account-tiers.sh.
                 Action: 'ssm:GetParameter'
-                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/routing/*'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/routing/*'
+                  # B-167. The account -> tenant map, which router.py has read
+                  # since B-127 to pick a tenant's PagerDuty service. This grant
+                  # was never written, so every lookup failed and every tenant
+                  # page fell back to AltDigital's own service, with a note in a
+                  # log. Found 2026-10-05 wiring E8, which needs the same map.
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/platform/change/tenant-facts'
+              - !If
+                - HasTenantAlerts
+                - Effect: Allow
+                  Action: 'sns:Publish'
+                  Resource: !Ref TenantAlertTopicArn
+                - !Ref AWS::NoValue
               - Effect: Allow
                 # D-028: the heartbeat metric the dead man's switch reads.
                 # PutMetricData takes no resource, so the namespace condition
@@ -332,6 +354,7 @@ Resources:
           JIRA_QUEUE_URL: !Ref JiraQueue
           REVIEW_QUEUE_URL: !Ref ReviewQueue
           COMMERCIAL_QUEUE_URL: !Ref CommercialQueue
+          TENANT_ALERT_TOPIC_ARN: !Ref TenantAlertTopicArn
 
   RouterLogGroup:
     Type: AWS::Logs::LogGroup

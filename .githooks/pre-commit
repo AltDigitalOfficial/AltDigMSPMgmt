@@ -38,7 +38,7 @@ source "${REPO_ROOT}/scripts/lib/common.sh"
 # enumerating directories by name: a list that has to be remembered eventually
 # will not be.
 BLOCKED="$(git diff --cached --name-only \
-  | grep -Ei '(^|/)(contacts|identity|quorum|rates|change-approvers)\.env($|\.)|\.tfvars(\.json)?$|\.tfstate($|\.)|(^|/)\.env$|\.questionnaire\.(ya?ml|json)$|\.roster\.(ya?ml|json)$|\.approvers\.(ya?ml|json)$|^completed_qs/' \
+  | grep -Ei '(^|/)(contacts|identity|quorum|rates|change-approvers|hipaa-contacts)\.env($|\.)|\.tfvars(\.json)?$|\.tfstate($|\.)|(^|/)\.env$|\.questionnaire\.(ya?ml|json)$|\.roster\.(ya?ml|json)$|\.approvers\.(ya?ml|json)$|^completed_qs/' \
   | grep -v '\.example$' | grep -v '^completed_qs/README\.md$' || true)"
 if [[ -n "${BLOCKED}" ]]; then
   echo "BLOCKED: these staged files carry personal data or credentials:" >&2

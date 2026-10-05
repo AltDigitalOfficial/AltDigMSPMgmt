@@ -27,6 +27,12 @@ config/quorum.env*
 config/change-approvers.env*
 !config/change-approvers.env.example
 
+# HIPAA eligibility contacts: tenant alert recipients (E8) and exception
+# approvers (E5). Direct email addresses. Published by
+# scripts/sync-hipaa-alerts.sh. docs/hipaa-eligibility.md.
+config/hipaa-contacts.env*
+!config/hipaa-contacts.env.example
+
 # Support pricing. Commercial terms, not source: a rate does not belong in git
 # history, in a diff, or on a screenshare. Copy config/rates.env.example.
 #
