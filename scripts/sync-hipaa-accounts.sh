@@ -22,6 +22,12 @@
 # than the live attachment would turn a missing attachment into a quiet
 # "denied attempt" — exactly backwards.
 #
+# Also writes /platform/eligibility/hipaa-enforced-targets in the MANAGEMENT
+# account: the account ids PlatformHipaaEligibleOnly should be attached to,
+# which deploy-policies.sh reads as the target 'hipaa-enforced'. That one is
+# INTENT, from the registry: hipaa in compliance_scope and environment uat or
+# prod. Comparing it with "enforced" above is the attachment check in miniature.
+#
 # Same publishing arrangement as sync-tenant-facts.sh and sync-account-tiers.sh:
 # the registry is the source of truth, the SSM copy is what a Lambda in Audit
 # can read without a cross-account call on its path. Re-run after vesting a
@@ -131,10 +137,32 @@ for p, c in clients:
 " "${MAP}"
 hr
 
+# Intent: which accounts SHOULD carry the SCP. uat and prod only; design 11's
+# scope upgrade will add a posture field and join here when it is built.
+TARGETS="$("${PY}" -c "
+import json,sys
+m = json.loads(sys.argv[1])
+print(','.join(sorted(a for a, v in m.items() if v.get('environment') in ('uat', 'prod'))) or 'none')
+" "${MAP}")"
+log "  hipaa-enforced targets (intent): ${TARGETS}"
+GAP="$("${PY}" -c "
+import json,sys
+m = json.loads(sys.argv[1]); want = set(sys.argv[2].split(',')) - {'none'}
+have = {a for a, v in m.items() if v.get('enforced')}
+print(' '.join(sorted('missing:'+a for a in want - have) + sorted('unexpected:'+a for a in have - want)))
+" "${MAP}" "${TARGETS}")"
+[[ -z "${GAP}" ]] || warn "intent and live attachment disagree: ${GAP}"
+
 if [[ "${DRY_RUN}" == "1" ]]; then
   printf '%s DRY%s  would write %s in %s\n' "${C_YELLOW}" "${C_RESET}" "${PARAM_NAME}" "${AUDIT}"
+  printf '%s DRY%s  would write /platform/eligibility/hipaa-enforced-targets = %s\n' \
+    "${C_YELLOW}" "${C_RESET}" "${TARGETS}"
   exit 0
 fi
+
+# Written from the management account, before switching to Audit below.
+put_param /eligibility/hipaa-enforced-targets "${TARGETS}" \
+  "Accounts PlatformHipaaEligibleOnly should be attached to: hipaa in compliance_scope, environment uat or prod. From the registry by scripts/sync-hipaa-accounts.sh. 'none' when empty."
 
 CREDS="$(aws sts assume-role \
   --role-arn "arn:aws:iam::${AUDIT}:role/OrganizationAccountAccessRole" \

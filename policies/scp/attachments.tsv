@@ -20,6 +20,11 @@
 #             evidence everything else is judged against, so they get the same
 #             control protection as tenants rather than less.
 #   infra     the Infrastructure OU — Platform Tooling, Shared Services, Backup.
+#   hipaa-enforced
+#             NOT an OU: the uat and prod accounts of HIPAA-scoped clients, from
+#             the registry via /platform/eligibility/hipaa-enforced-targets
+#             (scripts/sync-hipaa-accounts.sh). D-030. Requires
+#             --confirm-production.
 #
 # Columns: <policy file>  <TAB>  <comma-separated targets>
 
@@ -82,3 +87,11 @@
 # SCP condition key can see a trust policy's Principal -- an RCP
 # evaluates on the RESOURCE side and denies the assume itself. D-003.
 00-no-external-principals.json	sandbox,members
+
+# HIPAA-eligible services only (docs/hipaa-eligibility.md). Generated from
+# eligibility/hipaa-eligible-services.tsv by scripts/generate-hipaa-scp.py; never
+# hand-edited. Attached per ACCOUNT, not per OU (D-030): dev and test of the same
+# client warn through the daily sweep instead of being denied, and tenants
+# without HIPAA exposure never carry it. Proven on Sandbox Canary by
+# scripts/test-hipaa-scp.sh, which attaches, tests and detaches.
+09-hipaa-eligible-only.json	hipaa-enforced

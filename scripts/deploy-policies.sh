@@ -255,8 +255,23 @@ resolve_target() {
     security) get_param /org/ou/security ;;
     infra)   get_param /org/ou/infrastructure ;;
     *) die "Unknown attachment target '$1' in $(basename "${MANIFEST}").
-      Expected root, sandbox, members, security or infra." ;;
+      Expected root, sandbox, members, security, infra or hipaa-enforced." ;;
   esac
+}
+
+# hipaa-enforced is a SET of accounts, not an OU (D-030): the uat and prod
+# accounts of HIPAA-scoped clients, derived from the registry by
+# scripts/sync-hipaa-accounts.sh. 'none' is a real answer and attaches nothing.
+expand_target() {
+  if [[ "$1" == "hipaa-enforced" ]]; then
+    local ids; ids="$(get_param /eligibility/hipaa-enforced-targets)"
+    [[ -n "${ids}" && "${ids}" != "None" ]] \
+      || die "/platform/eligibility/hipaa-enforced-targets is not published. Run scripts/sync-hipaa-accounts.sh."
+    [[ "${ids}" == "none" ]] && return 0
+    printf '%s\n' ${ids//,/ }
+  else
+    resolve_target "$1"
+  fi
 }
 
 # Any target that reaches tenant accounts needs explicit confirmation. Checked
@@ -274,7 +289,8 @@ while IFS=$'\t' read -r pfile ptargets; do
   in_run=0
   for f in "${FILES[@]}"; do [[ "$(basename "${f}")" == "${pfile}" ]] && in_run=1; done
   [[ ${in_run} -eq 1 ]] || continue
-  if [[ ",${ptargets}," == *",members,"* || ",${ptargets}," == *",root,"* ]]; then
+  if [[ ",${ptargets}," == *",members,"* || ",${ptargets}," == *",root,"* \
+        || ",${ptargets}," == *",hipaa-enforced,"* ]]; then
     NEEDS_CONFIRM=1
   fi
 done < "${MANIFEST}"
@@ -307,8 +323,12 @@ while IFS=$'\t' read -r pfile ptargets; do
   fi
 
   IFS=',' read -ra tlist <<<"${ptargets}"
-  for t in "${tlist[@]}"; do
-    tgt="$(resolve_target "${t}")"
+  for tname in "${tlist[@]}"; do
+  mapfile -t tids < <(expand_target "${tname}")
+  [[ ${#tids[@]} -gt 0 ]] || { skip "${pfile}: ${tname} resolves to no accounts"; continue; }
+  for tgt in "${tids[@]}"; do
+    t="${tname}"
+    [[ "${tname}" == "hipaa-enforced" ]] && t="${tname}:${tgt}"
     [[ -n "${tgt}" && "${tgt}" != "None" ]] || die "Could not resolve target '${t}'."
 
     # Filter by THIS policy's type. It was SERVICE_CONTROL_POLICY for every
@@ -324,6 +344,7 @@ while IFS=$'\t' read -r pfile ptargets; do
       run "attach ${pname} -> ${t} (${tgt})" \
         aws organizations attach-policy --policy-id "${pid}" --target-id "${tgt}"
     fi
+  done
   done
 done < "${MANIFEST}"
 hr
