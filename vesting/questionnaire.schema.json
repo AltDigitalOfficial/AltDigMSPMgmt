@@ -557,6 +557,54 @@
               "description": "The Jira project holding this application's change records. Required unless system is none."
             }
           }
+        },
+        "work_spaces": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Client form 12.7. Spaces (Jira projects) to create on AltDigital's Jira for the team's own work, separate from where change records live (12.4). Arc8 kept change records on its own site and still wanted a Scrum board on ours, so this does not depend on 12.4. Omitted or empty means none. Members are named by roster ROLE, never by person, so the questionnaire stays free of personal data and a space's membership follows the roster. Creation is by hand today; derive-vesting.py lists what to create.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "key",
+              "template",
+              "members"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "Display name, e.g. 'Arc8 Development'."
+              },
+              "key": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{1,9}$",
+                "description": "Jira project key. Unique across the list, and not the 12.4c change-record project when that is on AltDigital's Jira."
+              },
+              "template": {
+                "enum": [
+                  "scrum",
+                  "kanban",
+                  "service-management"
+                ],
+                "description": "scrum: sprints, backlog and a sprint board (Jira Software). kanban: a continuous-flow board, no sprints (Jira Software). service-management: a request queue (Jira Service Management)."
+              },
+              "members": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "enum": [
+                    "developers",
+                    "readonly"
+                  ]
+                },
+                "description": "Roster roles added to the space: developers (3b developers) and/or readonly (the development manager and other read-only oversight)."
+              }
+            }
+          }
         }
       }
     },

@@ -109,6 +109,12 @@ change:
     product: jira-service-management
     site: "https://example.atlassian.net"
     project_key: ARC8
+  # 12.7: the team's own work, on AltDigital's Jira. Independent of 12.4.
+  work_spaces:
+    - name: Arc8 Development
+      key: ARCDEV
+      template: scrum
+      members: [developers, readonly]
 
 exit:
   ip_boundary_ack: true

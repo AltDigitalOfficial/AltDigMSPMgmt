@@ -544,6 +544,7 @@ about, and it is the thing we can only build if you tell us what to watch.
 | 12.4c | Project key | e.g. `ARC8` — or ask us to create one | Dev | Reversible |
 | 12.5 | Who on your side approves production changes? | Name, email | Prod | Reversible |
 | 12.6 | Do you require a business test plan before production changes? | Yes / No | Prod | Reversible |
+| 12.7 | Do you want spaces on **our** Jira for your team's own work? | One row per space: **name**, **key** (e.g. `ARCDEV`), **template** — pick one: `scrum` / `kanban` / `service-management` — and **who joins** — pick any: `developers` / `readonly`. Leave empty for none. | Dev | Reversible |
 
 **On 12.4.** We check every deployment to your environments against a change
 record, and we look for that record wherever you keep it.
@@ -564,6 +565,22 @@ person requesting and the person approving cannot be the same individual, even
 if they work for the same organisation. This is a control we enforce rather than
 a preference, so please nominate someone distinct from whoever will be raising
 the changes.
+
+**On 12.7.** This is separate from 12.4. 12.4 is where your *change records*
+live, which may be your own Atlassian site. 12.7 is where your team *plans and
+tracks its work*, if you would like that on ours. You can answer one without
+the other.
+
+- **`scrum`** gives you a backlog, sprints and a sprint board. **`kanban`**
+  gives you a continuous-flow board with no sprints. **`service-management`**
+  gives you a request queue, for work that arrives as requests rather than as
+  planned stories.
+- **Who joins** is answered by role, not by name: `developers` are the people in
+  your developer roster (3b), and `readonly` is your development manager and
+  anyone else with read-only oversight. When the roster changes, we update the
+  space to match, so there is no second list for you to keep.
+- If 12.4 is `altdigital-jira`, we already create your change-record project
+  from 12.4c. Don't list it again here.
 
 ---
 

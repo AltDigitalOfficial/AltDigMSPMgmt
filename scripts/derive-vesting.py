@@ -386,6 +386,30 @@ def ticketing_pending(q):
     return [f for f in need if not t.get(f)]
 
 
+def check_work_spaces(q):
+    """Client form 12.7: keys the schema cannot see are wrong.
+
+    Uniqueness by key is not expressible in JSON Schema (uniqueItems compares
+    whole objects), and two spaces asking for one key would fail halfway
+    through creating them by hand. The 12.4c clash is the same failure one
+    question removed: on AltDigital's Jira the change-record project is a
+    space we create too, and listing it again under 12.7 asks for it twice
+    with two different templates.
+    """
+    spaces = q["change"].get("work_spaces") or []
+    errs = []
+    seen = set()
+    for s in spaces:
+        if s["key"] in seen:
+            errs.append(f"change.work_spaces: key '{s['key']}' is listed twice.")
+        seen.add(s["key"])
+    t = q["change"]["ticketing"]
+    if t["system"] == "altdigital-jira" and t.get("project_key") in seen:
+        errs.append(f"change.work_spaces: '{t['project_key']}' is also the 12.4c change-record "
+                    "project. That space is created from 12.4; give the work space another key.")
+    return errs
+
+
 def check_dedicated_infrastructure(q):
     s = q["security"]
     if s["dedicated_infrastructure_required"] and not s.get("dedicated_infrastructure_driver"):
@@ -487,6 +511,7 @@ CHECKS = [
     check_timezones,
     check_maintenance_windows,
     check_ticketing,
+    check_work_spaces,
     check_dedicated_infrastructure,
     check_evidence,
     # Halting checks last, so every form error is collected before a Halt ends
@@ -556,6 +581,11 @@ def derive(q, rules):
     d["egress_profile_default"] = default_egress
     d["egress_profile"] = chosen
     d["egress_profile_overridden"] = chosen != default_egress
+
+    # 12.7 — work-tracking spaces on AltDigital's Jira, as asked. Nothing is
+    # derived from them; they are carried so the operator's list comes from
+    # the form and not from memory.
+    d["jira_work_spaces"] = q["change"].get("work_spaces") or []
 
     # 3a.9 — not asked. UAT is production-equivalent for data handling because
     # real users bring real data.
@@ -668,6 +698,15 @@ def warnings_for(q, d):
             "change.ticketing.product is 'jira-software'. Jira Software has no approval\n"
             "    records, so reconciliation can only infer approval from the status name and\n"
             "    cannot check WHO approved. Jira Service Management is needed for that.")
+    if d["jira_work_spaces"]:
+        listed = "\n".join(
+            f"      {s['key']:<10} {s['name']} ({s['template']}); members: {', '.join(s['members'])}"
+            for s in d["jira_work_spaces"])
+        w.append(
+            f"{len(d['jira_work_spaces'])} work space(s) to create on AltDigital's Jira (form 12.7).\n"
+            "    Not automated: create each by hand, then add the roster's people in the\n"
+            "    roles named. Membership is by role, so re-check it whenever the roster changes.\n"
+            + listed)
     if d["frameworks_without_pack"] and d["conformance_packs"]:
         w.append(
             f"No conformance pack is applied for: {', '.join(d['frameworks_without_pack'])}.\n"

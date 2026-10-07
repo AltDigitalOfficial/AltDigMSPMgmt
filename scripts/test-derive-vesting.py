@@ -192,6 +192,57 @@ class Ticketing(unittest.TestCase):
         self.assertIn("cannot check WHO approved", out)
 
 
+class WorkSpaces(unittest.TestCase):
+    """Form 12.7: work spaces on AltDigital's Jira, independent of 12.4."""
+
+    def setUp(self):
+        self.base = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+
+    def q(self, spaces, **ticketing):
+        q = copy.deepcopy(self.base)
+        q["change"]["work_spaces"] = spaces
+        if ticketing:
+            q["change"]["ticketing"] = ticketing
+        return q
+
+    def space(self, key="ARCDEV", template="scrum", members=("developers",)):
+        return {"name": "Arc8 Development", "key": key, "template": template,
+                "members": list(members)}
+
+    def test_listed_for_creation_alongside_client_jira(self):
+        # Arc8's shape: change records on its own site, a Scrum board on ours.
+        rc, out = run_report(self.q([self.space()]))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("work space(s) to create on AltDigital's Jira", out)
+        self.assertIn("ARCDEV", out)
+
+    def test_omitted_means_none_and_says_nothing(self):
+        q = copy.deepcopy(self.base)
+        q["change"].pop("work_spaces", None)
+        rc, out = run_report(q)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("work space(s)", out)
+
+    def test_duplicate_key_is_refused(self):
+        rc, err = run(self.q([self.space(), self.space(template="kanban")]))
+        self.assertEqual(rc, 1, err)
+        self.assertIn("listed twice", err)
+
+    def test_change_record_project_cannot_be_listed_again(self):
+        rc, err = run(self.q([self.space(key="ARC8")], system="altdigital-jira",
+                             product="jira-service-management", project_key="ARC8"))
+        self.assertEqual(rc, 1, err)
+        self.assertIn("12.4c change-record", err)
+
+    def test_members_are_roles_not_people(self):
+        rc, err = run(self.q([self.space(members=["someone@example.com"])]))
+        self.assertEqual(rc, 1, err)
+
+    def test_unknown_template_fails_the_schema(self):
+        rc, err = run(self.q([self.space(template="business")]))
+        self.assertEqual(rc, 1, err)
+
+
 class Frameworks(unittest.TestCase):
     """4.1: hitrust is askable, and nothing applied for it is said out loud."""
 

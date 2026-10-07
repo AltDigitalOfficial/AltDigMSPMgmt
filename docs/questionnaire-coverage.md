@@ -311,6 +311,7 @@ the rows that are not are marked.
 | 12.4 | Ticketing: system, product, site, project | `change.ticketing` | registry → tenant facts → change reconciliation, on the client's own Atlassian site where given. Creating the project and the client's service account is still manual | P | builds |
 | 12.5 | Production change approver | — | — (duplicates 3.3) | P | form only |
 | 12.6 | Business test plan | — | — | P | form only |
+| 12.7 | Work spaces on AltDigital's Jira | `change.work_spaces` | derive-vesting.py lists them for the operator. Creating the spaces and adding the people is manual | P | stored · created by hand |
 
 ### 13. Cost
 
