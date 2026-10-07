@@ -7501,3 +7501,50 @@ effect at the next router deploy. Arc8's PagerDuty services are not yet applied
 (open on the Arc8 onboarding list), and a missing tenant routing key still
 falls back to the platform service. So the deploy changes nothing that pages
 today. It only makes the tenant lookup work for when those services exist.
+
+
+---
+
+## B-168 · Containment isolates a production instance without asking whether it is the only one
+
+**Open**, 2026-10-06. Found during a thought experiment about hosting a
+network appliance (the PPC Meraki vMX pair). Nothing about it is specific to
+that appliance; Arc8 prod is the first tenant it reaches.
+
+CLAUDE.md's hard rule says that if containment would take a production service
+down, it stops and pages. Containment never asks that question. The only
+production protection is `CONTAINMENT_DECISION` in `containment/src/contain.py`:
+`(prod, high)` means contain, and `(prod, medium)` means gather and page. But
+`declare.py` `_from_guardduty` only declares at severity 7.0 or above, and marks
+every declared finding `high`. So **every GuardDuty incident in prod reaches
+the `contain` row**, and the medium row is unreachable from GuardDuty.
+
+`contain` moves every ENI on the instance into `platform-isolation`, which has
+no ingress and only loopback egress. If that instance is the only one serving
+the workload, the tenant's service goes down. A false positive costs a
+production outage, which is exactly what the production row was written to
+prevent.
+
+The redundancy check this needs already exists, but only for runbooks.
+`runbooks/src/rails.py` (351-410) treats an EC2 instance as redundant only if
+another target in its ELB target group is healthy, and treats "unknown" as no.
+`contain.py` does not call it.
+
+**Exposure:** Arc8 prod, once it is vested (blocked on B-140). It also applies
+to any prod or uat EC2 instance that is not behind a load balancer. I have not
+checked whether Arc8's prod compute puts an instance in that position. Settle
+that first, because it decides whether this must land before Arc8 prod or can
+follow it.
+
+**To close:**
+- Before isolating in prod or uat, `contain.py` runs the same redundancy test
+  as `rails.py`. Share the code rather than copy it.
+- If the instance is not provably redundant, the decision falls to
+  `gather_and_page`: snapshots taken, page sent, nothing isolated. The incident
+  record names the reason.
+- Decide whether severity should produce a `medium` band for GuardDuty
+  (7.0–8.0, say) so the table's medium row means something. Record the choice
+  either way.
+- Prove it with the containment exercise: a single-instance target must page
+  and not isolate, and a target behind a load balancer with another healthy
+  target must isolate.
