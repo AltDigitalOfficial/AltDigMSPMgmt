@@ -492,6 +492,13 @@ and the same people, in case reputation is the concern. It does not claim bounce
 routing is finished: B-155 records that nobody subscribes to the topic yet.
 AWS answers through a support case on the Tooling account.
 
+**Resolved** — granted; found 2026-10-07. `sesv2 get-account` in Tooling:
+`ProductionAccessEnabled true`, review `GRANTED` on case 179099188900356,
+50,000 a day at 14 a second, enforcement `HEALTHY`. The case itself cannot be
+read from the CLI: the Support API needs a paid support plan. Granting it set
+off two B-155 triggers: remove the sandbox recipient identity (done the same
+day), and subscribe something to `platform-digest-bounces` (still open).
+
 ---
 
 ## B-016 · Terraform state for PagerDuty is local and unlocked
@@ -6885,6 +6892,66 @@ addresses, and therefore real bounces, begin.
 
 **Unconfirmed:** whether `platform@altdigital.ai` is a mailbox anyone reads.
 Replies to the digest go there.
+
+### 2026-10-07 — it never sent. Fixed, and now watched.
+
+**Every scheduled run from at least 2026-09-28 to 2026-10-07 failed** on its
+first registry query: `kms:Decrypt` denied on `alias/platform-registry`. The
+registry table is encrypted with its own key and the sender role was never
+granted it. Lambda's async retries made three failures a day. The sandbox
+question above was never reached. Nothing reported it, because nothing watched
+the function. Before this was found, the entry above recorded the digest as
+"sending".
+
+Fixed in `c3b7845` and `9c83ea4`:
+- **Decrypt** is granted only through DynamoDB (`kms:ViaService`) and only
+  for the registry key, named by alias (`kms:ResourceAliases`).
+- **Reads are limited to named attributes** (`dynamodb:Attributes`, `Select =
+  SPECIFIC_ATTRIBUTES`), and the code requests exactly those. The CLIENT record
+  holds six contacts and the digest needs two, so the breach, security,
+  change-approver and IP-owner contacts cannot be read by this role. Checked
+  with the IAM policy simulator: the two contacts are allowed;
+  `breach_contact` and a whole-record read are `implicitDeny`.
+- **Tenant accounts only.** The first dry run showed all eight `shared`
+  platform accounts as skipped (no client, so no contact). They are now
+  listed in the run result as `shared_not_digested` and not counted as
+  skipped. A missing `kind` is still treated as a tenant.
+- **`{"dry_run": true}`** on a manual invoke reads and renders everything and
+  sends nothing, records nothing and emits no counts. The 2026-10-07 dry run
+  digested Arc8 dev and test with nothing skipped or failed. The first real
+  send is the 2026-10-08 13:00Z run.
+
+**Schedule is daily** (`5ad637d`), `cron(0 13 * * ? *)`. It was weekdays
+only with a 24-hour window, so Friday 13:00 to Sunday 13:00 was in no digest.
+
+**`platform-digest-not-delivered`** (`5ad637d`): low urgency, through the
+router (D-028). It fires on Lambda `Errors` plus `AccountsFailed` and
+`AccountsSkipped` (EMF, namespace `AltDigital/Digest`). The handler catches
+per-account failures, so `Errors` alone would miss an account SES rejected.
+*Not yet proven end to end*: no real failure has happened since it was
+deployed. *Not covered*: a schedule that stops firing at all. That needs a
+heartbeat. *Trigger:* the next time a missed run is noticed by a person
+rather than an alarm.
+
+**Sandbox identity removed** 2026-10-07, per the instruction above, B-028
+having been granted. It had never been verified (`FAILED`: the 24-hour
+link lapsed). Worth knowing before anyone uses this workaround again: SES has
+no recipient-only verification. Verifying a sandbox recipient makes it a full
+**sender** identity, so had the link been clicked, AltDigital's SES account
+could have sent as a partner's OEight address. Prefer waiting for production
+access.
+
+**Still open:** the bounce topic has no subscriber, and its trigger ("before
+SES leaves the sandbox") has now passed. With real sends starting
+2026-10-08, a bounce from Arc8 would go nowhere.
+
+**Not the same as design 11's manager digest.** This digest carries new or
+changed alarms, alarms in ALARM and instrumentation exceptions. It does not
+carry services newly enabled, roles created, guardrail denials, cost against
+budget or telemetry gaps. `docs/developer-guide.md` §4.15–4.16 tells Arc8's
+developers it does. The eligibility sweep's `digest`-class findings also do
+not reach it (B-051: they go to the review queue, and nothing here reads the
+routing log). Under discussion with Jamie, 2026-10-07.
 
 ## B-156 · Runaway page: one finding cost five invocations, and OEight evidence is reaching no tenant
 
