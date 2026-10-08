@@ -78,11 +78,17 @@ Parameters:
 
   ScheduleExpression:
     Type: String
-    Default: 'cron(0 13 ? * MON-FRI *)'
+    Default: 'cron(0 13 * * ? *)'
     Description: >-
-      When the digest runs. Default 13:00 UTC on weekdays — morning in US
-      Central, and deliberately NOT a weekend: a digest arriving on Saturday is
-      read on Monday alongside Monday's, which is how two get skimmed as one.
+      When the digest runs. Default 13:00 UTC every day — morning in US
+      Central. Must tile with WindowHours: each run looks back exactly
+      WindowHours, so a 24-hour window needs a run every 24 hours.
+
+      This was weekdays only until 2026-10-07. With a 24-hour window that left
+      Friday 13:00 to Sunday 13:00 in no digest at all, and a dev team that
+      works weekends was invisible for two days a week. Weekend digests get
+      skimmed on Monday, but a skimmed line is still on record and an unreported
+      one is not.
 
   EvidenceBucket:
     Type: String
@@ -311,6 +317,77 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt DigestScheduleRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Watching the watcher
+  # -------------------------------------------------------------------------
+  # Found 2026-10-07: every scheduled run from at least 2026-09-28 failed on
+  # its first registry read, and nothing said so. The digest is the evidence
+  # that monitoring requirements were communicated, so a digest that is not
+  # going out leaves no record that we told the client, and nobody hears about it.
+  #
+  # Two signals, because either alone misses one way of failing:
+  #   - Errors: the function crashed before it digested anyone (the 09-28
+  #     KMS failure).
+  #   - AccountsFailed + AccountsSkipped: the function finished, but some
+  #     account got no digest (SES rejected it, the account was unreadable,
+  #     or the client has no contact). The handler catches those per account,
+  #     so Errors stays at zero.
+  #
+  # urgency=low: a missed digest is a day late, not an outage. It runs at
+  # 13:00 UTC, so this lands in the US morning anyway.
+  DigestNotDeliveredAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-digest-not-delivered
+      AlarmDescription: >-
+        The instrumentation digest did not reach every account today. Either
+        the function failed outright (see /aws/lambda/platform-digest) or it
+        finished with accounts in its failed or skipped lists, which the
+        run's final log line names with the reason.
+
+        [platform-routing] routing=pagerduty layer=infrastructure urgency=low
+      Metrics:
+        - Id: undelivered
+          Label: Errors plus accounts failed or skipped
+          Expression: 'FILL(errors, 0) + FILL(failed, 0) + FILL(skipped, 0)'
+          ReturnData: true
+        - Id: errors
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref DigestFunction
+            Period: 3600
+            Stat: Sum
+        - Id: failed
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AltDigital/Digest
+              MetricName: AccountsFailed
+            Period: 3600
+            Stat: Sum
+        - Id: skipped
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AltDigital/Digest
+              MetricName: AccountsSkipped
+            Period: 3600
+            Stat: Sum
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # notBreaching: the function runs once a day, so 23 of 24 hours have no
+      # data and that is normal. A schedule that stops firing altogether is
+      # not caught here; that would need a heartbeat, and is noted in B-155.
+      TreatMissingData: notBreaching
+      # D-028: no direct action. Delivered by the router (the marker above, and
+      # alerting/60-alarm-forwarding.yaml in this account).
 
 Outputs:
 

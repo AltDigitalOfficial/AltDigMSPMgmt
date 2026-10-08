@@ -359,4 +359,36 @@ def handler(event, context):
 
     result = {"sent": sent, "skipped": skipped, "failed": failed}
     print(json.dumps(result, default=str))
+    emit_metrics(len(sent), len(skipped), len(failed))
     return result
+
+
+def emit_metrics(sent, skipped, failed):
+    """Per-run counts, as an embedded metric format log line.
+
+    The handler catches per-account failures so one bad account cannot stop
+    the rest, which means a run where every account failed still returns
+    normally and Lambda's own Errors metric stays at zero. These counts are
+    what the alarm in 10-digest-sender.yaml watches alongside Errors, so an
+    account that was not digested reaches a person instead of only this log.
+
+    EMF rather than PutMetricData: CloudWatch extracts the metric from the log
+    line, so the role needs no cloudwatch:PutMetricData grant.
+    """
+    print(json.dumps({
+        "_aws": {
+            "Timestamp": int(_now().timestamp() * 1000),
+            "CloudWatchMetrics": [{
+                "Namespace": "AltDigital/Digest",
+                "Dimensions": [[]],
+                "Metrics": [
+                    {"Name": "AccountsSent", "Unit": "Count"},
+                    {"Name": "AccountsSkipped", "Unit": "Count"},
+                    {"Name": "AccountsFailed", "Unit": "Count"},
+                ],
+            }],
+        },
+        "AccountsSent": sent,
+        "AccountsSkipped": skipped,
+        "AccountsFailed": failed,
+    }))
