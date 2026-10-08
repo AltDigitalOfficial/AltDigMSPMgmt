@@ -260,6 +260,7 @@ Resources:
                       - record_type
                       - baseline_version
                       - account_id
+                      - kind
                       - partner
                       - client
                       - app

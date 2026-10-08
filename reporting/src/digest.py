@@ -79,7 +79,7 @@ def _now():
 # Every name goes through ExpressionAttributeNames because several (state,
 # environment, client) are or may become DynamoDB reserved words, and a
 # reserved word in a bare projection fails the whole query.
-ACCOUNT_ATTRIBUTES = ("account_id", "partner", "client", "app", "environment", "state")
+ACCOUNT_ATTRIBUTES = ("account_id", "kind", "partner", "client", "app", "environment", "state")
 CLIENT_ATTRIBUTES = ("partner", "slug", "tech_contact", "dev_manager")
 
 
@@ -118,6 +118,7 @@ def member_accounts():
         for item in page.get("Items", []):
             out.append({
                 "account_id": item["account_id"]["S"],
+                "kind": item.get("kind", {}).get("S", ""),
                 "partner": item.get("partner", {}).get("S", ""),
                 "client": item.get("client", {}).get("S", ""),
                 "app": item.get("app", {}).get("S", ""),
@@ -350,10 +351,25 @@ def handler(event, context):
     # one was sent.
     dry_run = bool((event or {}).get("dry_run"))
     region = os.environ.get("AWS_REGION", "us-east-2")
-    sent, skipped, failed = [], [], []
+    sent, skipped, failed, shared = [], [], [], []
     contacts = client_contacts()
 
     for account in member_accounts():
+        # Shared accounts (management, audit, log archive, tooling and the
+        # rest) are AltDigital's own. They have no client, so no contact, and
+        # the digest's audience -- the application owner -- does not exist for
+        # them. Listed in the result so the exclusion is visible, but not
+        # counted as skipped: skipped feeds platform-digest-not-delivered, and
+        # eight permanent skips would page every day for nothing (found on the
+        # first dry run, 2026-10-07).
+        #
+        # Only an explicit "shared" is excluded. A record with kind missing is
+        # treated as a tenant: a missing value fails toward sending, and then
+        # toward a visible skip, never toward silently dropping a client.
+        if account["kind"] == "shared":
+            shared.append(account["account_id"])
+            continue
+
         who = contacts.get((account["partner"], account["client"]), {})
         # The development manager first, then the technical contact. The
         # questionnaire has always said the digest goes to the development
@@ -389,7 +405,8 @@ def handler(event, context):
         except Exception as exc:
             failed.append({"account": account["account_id"], "error": str(exc)})
 
-    result = {"dry_run": dry_run, "sent": sent, "skipped": skipped, "failed": failed}
+    result = {"dry_run": dry_run, "sent": sent, "skipped": skipped, "failed": failed,
+              "shared_not_digested": shared}
     print(json.dumps(result, default=str))
     # A dry run emits no counts: the alarm is about digests the client did or
     # did not receive, and a dry run sends none either way.
