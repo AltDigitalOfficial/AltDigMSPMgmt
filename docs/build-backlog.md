@@ -6941,9 +6941,20 @@ no recipient-only verification. Verifying a sandbox recipient makes it a full
 could have sent as a partner's OEight address. Prefer waiting for production
 access.
 
-**Still open:** the bounce topic has no subscriber, and its trigger ("before
-SES leaves the sandbox") has now passed. With real sends starting
-2026-10-08, a bounce from Arc8 would go nowhere.
+**Bounces now route** (2026-10-07). Done with a second event destination on
+the `platform-digest` configuration set rather than a topic subscriber. It
+turns BOUNCE, COMPLAINT and REJECT into `AWS/SES` metrics (dimension
+`configuration-set=platform-digest`). `platform-digest-bounced` alarms on
+them with the routing marker, so they reach the router through
+`platform-alarm-forwarding` at low urgency. No new code, no router change.
+The SNS topic stays, unsubscribed, as the record of the full event. Which
+address bounced is on the account suppression list (BOUNCE and COMPLAINT,
+already on). SES turns each later send to a suppressed address into another
+bounce, so the alarm keeps firing until the contact is fixed and the address
+is removed from the list. *Unverified:* the metric names `Bounce`, `Complaint`
+and `Reject` are from documentation and no event has produced one yet. A send
+to the SES mailbox simulator's bounce address would prove the metric name
+and the whole path to PagerDuty, at the cost of one low-urgency page.
 
 **Not the same as design 11's manager digest.** This digest carries new or
 changed alarms, alarms in ALARM and instrumentation exceptions. It does not

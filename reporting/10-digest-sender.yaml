@@ -218,6 +218,36 @@ Resources:
         SnsDestination:
           TopicARN: !Ref BounceTopic
 
+  # The SNS topic above has no subscriber, so on its own a bounce published
+  # there reached nobody (B-155). This second destination turns the same events
+  # into CloudWatch metrics so the DigestBouncedAlarm below can route them
+  # through the router like every other platform event. No new code, and no
+  # router change.
+  #
+  # The dimension value is fixed: no message carries a "configuration-set"
+  # tag, so every event takes the default. One metric series per event type,
+  # for this configuration set only.
+  DigestMetricsDestination:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Condition: HasSender
+    Properties:
+      ConfigurationSetName: !Ref DigestConfigurationSet
+      EventDestination:
+        Name: bounce-metrics
+        Enabled: true
+        # RENDERING_FAILURE is left out here (it stays on the SNS destination):
+        # it applies only to SES templates, and the digest sends Simple
+        # content, so it cannot occur.
+        MatchingEventTypes:
+          - BOUNCE
+          - COMPLAINT
+          - REJECT
+        CloudWatchDestination:
+          DimensionConfigurations:
+            - DimensionName: configuration-set
+              DimensionValueSource: messageTag
+              DefaultDimensionValue: platform-digest
+
   # -------------------------------------------------------------------------
   # Sender
   # -------------------------------------------------------------------------
@@ -438,6 +468,74 @@ Resources:
       TreatMissingData: notBreaching
       # D-028: no direct action. Delivered by the router (the marker above, and
       # alerting/60-alarm-forwarding.yaml in this account).
+
+  # A digest that left SES and did not arrive. The function's view of this is
+  # a successful send, so platform-digest-not-delivered cannot see it. That is
+  # prompt 4.4's rotted contact: "a bounced digest is a finding".
+  #
+  # Kept separate from the not-delivered alarm because the fix is different:
+  # that one means look at the function, this one means fix the contact on the
+  # client's registry record (questionnaire 3.6 / 3.1).
+  #
+  # It stays live once the contact is wrong. The account suppression list
+  # holds bounced and complaining addresses, and SES turns each later send to
+  # one into another bounce event, so this fires every day until the contact
+  # is fixed AND the address is removed from the list.
+  DigestBouncedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasSender
+    Properties:
+      AlarmName: platform-digest-bounced
+      AlarmDescription: >-
+        A digest was accepted by SES but bounced, was rejected, or drew a spam
+        complaint, so the client contact did not receive it and the evidence
+        record overstates what was communicated. The address is on the SES
+        account suppression list in Infra Tooling
+        (aws sesv2 list-suppressed-destinations). Correct the contact on the
+        client registry record, then remove the address from the list, or
+        every later digest to it is suppressed too.
+
+        [platform-routing] routing=pagerduty layer=infrastructure urgency=low
+      Metrics:
+        - Id: undelivered
+          Label: Bounces, complaints and rejects
+          Expression: 'FILL(bounce, 0) + FILL(complaint, 0) + FILL(reject, 0)'
+          ReturnData: true
+        - Id: bounce
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Bounce
+              Dimensions:
+                - { Name: configuration-set, Value: platform-digest }
+            Period: 3600
+            Stat: Sum
+        - Id: complaint
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Complaint
+              Dimensions:
+                - { Name: configuration-set, Value: platform-digest }
+            Period: 3600
+            Stat: Sum
+        - Id: reject
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Reject
+              Dimensions:
+                - { Name: configuration-set, Value: platform-digest }
+            Period: 3600
+            Stat: Sum
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      # D-028: no direct action. Delivered by the router.
 
 Outputs:
 
