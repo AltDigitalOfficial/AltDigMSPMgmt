@@ -69,6 +69,42 @@ def _now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
+# The registry attributes this function reads, and the only ones its role may
+# read: 10-digest-sender.yaml grants dynamodb:Query on exactly this list
+# (dynamodb:Attributes). A CLIENT record also carries the breach, security,
+# change-approver and IP-owner contacts; the digest needs none of them, so it
+# cannot see them. Add a name here and in the template together, or the query
+# is denied.
+#
+# Every name goes through ExpressionAttributeNames because several (state,
+# environment, client) are or may become DynamoDB reserved words, and a
+# reserved word in a bare projection fails the whole query.
+ACCOUNT_ATTRIBUTES = ("account_id", "partner", "client", "app", "environment", "state")
+CLIENT_ATTRIBUTES = ("partner", "slug", "tech_contact", "dev_manager")
+
+
+def _projection(names):
+    return {
+        "ProjectionExpression": ", ".join(f"#a{i}" for i in range(len(names))),
+        "ExpressionAttributeNames": {f"#a{i}": n for i, n in enumerate(names)},
+    }
+
+
+def _query_by_type(record_type, names):
+    proj = _projection(names)
+    # The key condition is also an attribute access, so record_type is named
+    # through the same map and is on the template's allowed list.
+    proj["ExpressionAttributeNames"]["#rt"] = "record_type"
+    paginator = dynamodb.get_paginator("query")
+    return paginator.paginate(
+        TableName=REGISTRY_TABLE,
+        IndexName="by-type",
+        KeyConditionExpression="#rt = :t",
+        ExpressionAttributeValues={":t": {"S": record_type}},
+        **proj,
+    )
+
+
 def member_accounts():
     """Accounts from the registry, with their contacts.
 
@@ -78,13 +114,7 @@ def member_accounts():
     should have created.
     """
     out = []
-    paginator = dynamodb.get_paginator("query")
-    for page in paginator.paginate(
-        TableName=REGISTRY_TABLE,
-        IndexName="by-type",
-        KeyConditionExpression="record_type = :t",
-        ExpressionAttributeValues={":t": {"S": "ACCOUNT"}},
-    ):
+    for page in _query_by_type("ACCOUNT", ACCOUNT_ATTRIBUTES):
         for item in page.get("Items", []):
             out.append({
                 "account_id": item["account_id"]["S"],
@@ -106,13 +136,7 @@ def client_contacts():
     answer, and worse, would let the environments disagree.
     """
     out = {}
-    paginator = dynamodb.get_paginator("query")
-    for page in paginator.paginate(
-        TableName=REGISTRY_TABLE,
-        IndexName="by-type",
-        KeyConditionExpression="record_type = :t",
-        ExpressionAttributeValues={":t": {"S": "CLIENT"}},
-    ):
+    for page in _query_by_type("CLIENT", CLIENT_ATTRIBUTES):
         for item in page.get("Items", []):
             key = (item.get("partner", {}).get("S", ""),
                    item.get("slug", {}).get("S", ""))
@@ -259,8 +283,8 @@ def render(account, data):
     return "\n".join(lines)
 
 
-def send(to_address, subject, body):
-    if DRY_RUN or not SENDER:
+def send(to_address, subject, body, dry_run=False):
+    if dry_run or DRY_RUN or not SENDER:
         print(json.dumps({"dry_run": True, "to": to_address, "subject": subject}))
         return {"MessageId": "dry-run"}
 
@@ -319,6 +343,12 @@ def record_evidence(account, to_address, message_id, body):
 
 
 def handler(event, context):
+    # {"dry_run": true} on a manual invoke: read the registry, assume into
+    # every account, gather and render, then send nothing and record nothing.
+    # It exercises every permission the real run needs without a client
+    # receiving an unscheduled email, and without an evidence record claiming
+    # one was sent.
+    dry_run = bool((event or {}).get("dry_run"))
     region = os.environ.get("AWS_REGION", "us-east-2")
     sent, skipped, failed = [], [], []
     contacts = client_contacts()
@@ -351,15 +381,20 @@ def handler(event, context):
             body = render(account, data)
             label = "/".join(x for x in (account["client"], account["app"],
                                          account["environment"]) if x)
-            resp = send(to_address, f"Instrumentation digest — {label}", body)
-            key = record_evidence(account, to_address, resp.get("MessageId"), body)
+            resp = send(to_address, f"Instrumentation digest — {label}", body,
+                        dry_run=dry_run)
+            key = None if dry_run else record_evidence(
+                account, to_address, resp.get("MessageId"), body)
             sent.append({"account": account["account_id"], "evidence": key})
         except Exception as exc:
             failed.append({"account": account["account_id"], "error": str(exc)})
 
-    result = {"sent": sent, "skipped": skipped, "failed": failed}
+    result = {"dry_run": dry_run, "sent": sent, "skipped": skipped, "failed": failed}
     print(json.dumps(result, default=str))
-    emit_metrics(len(sent), len(skipped), len(failed))
+    # A dry run emits no counts: the alarm is about digests the client did or
+    # did not receive, and a dry run sends none either way.
+    if not dry_run:
+        emit_metrics(len(sent), len(skipped), len(failed))
     return result
 
 
