@@ -782,6 +782,7 @@ Resources:
                 "isolate": null,
                 "revoke": null,
                 "blast_radius": null,
+                "preserve_error": null,
                 "error": null
               },
               "Next": "Triage"
@@ -809,7 +810,7 @@ Resources:
 
             "Preserve": {
               "Type": "Task",
-              "Comment": "Stage 1. ALWAYS runs, for every declared incident, including the ones that will not be contained. Evidence is perishable and the decision to contain may be a human's, taken later.",
+              "Comment": "Stage 1. ALWAYS runs, for every declared incident, including the ones that will not be contained. Evidence is perishable and the decision to contain may be a human's, taken later. A failure here is recorded in $.preserve_error and containment CONTINUES (Jamie, 2026-10-13): this Catch went to Finalise until the 2026-10-13 exercise, where an unshareable snapshot left the instance unisolated and the principal unrevoked. Isolation does not touch the disks, so nothing preservable is lost by isolating without it.",
               "Resource": "${ContainArn}",
               "Parameters": {
                 "step": "preserve",
@@ -823,7 +824,7 @@ Resources:
                 { "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2 }
               ],
               "Catch": [
-                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Finalise" }
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.preserve_error", "Next": "ShouldContain" }
               ],
               "Next": "ShouldContain"
             },
@@ -914,6 +915,7 @@ Resources:
                 "isolate.$": "$.isolate",
                 "revoke.$": "$.revoke",
                 "blast_radius.$": "$.blast_radius",
+                "preserve_error.$": "$.preserve_error",
                 "error.$": "$.error"
               },
               "ResultPath": "$.summary",

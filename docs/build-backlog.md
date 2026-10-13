@@ -7308,6 +7308,17 @@ script should end with a count, not just an exit status.
 
 ## B-158 · Log custody was built on 2026-09-23 and never deployed
 
+**Deployed 2026-10-13; first custody run not yet watched.** `platform-evidence`
+now has `LogArchiveBucketName`, `ConfigArchiveBucketName` and `OrganizationId`,
+so the custody function, role and hourly schedule exist. `platform-log-archive`
+now has `AuditAccountId`, so both archive buckets grant `PlatformEvidenceCustody`
+`s3:ListBucket`. The package was already current (`evidence-bab6fb1ea5905860`).
+
+**The order below is wrong, and the stack says so.** The archive must be
+deployed *second*. S3 rejects a bucket-policy principal that does not exist
+("Invalid principal in policy"), and `PlatformEvidenceCustody` is created by the
+evidence stack. Deploying the archive first failed and rolled back cleanly.
+
 **Open**, 2026-10-04. Found comparing the deployed `platform-evidence` template
 with the repo's. The deployed one predates `8881b3a` ("Log custody: hourly
 evidence that every account's raw logs arrived"). It has no
@@ -7670,3 +7681,52 @@ accounts, the six send dates and the cause (Jamie, 2026-10-13).
 **To close:** the 2026-10-14 13:00Z run reports `sent` for both Arc8 accounts,
 two objects appear under `digest-evidence/oeight/arc8/`, and
 `platform-digest-not-delivered` stays OK.
+
+## B-170 · Containment stopped at preservation, and recorded "contained" anyway
+
+**Stage 1 fixed 2026-10-13. Stage 2 open.** Found by the first scheduled
+containment exercise (2026-10-13 14:00Z, Sandbox Exercise), which failed and
+paged correctly (PagerDuty #205, #206).
+
+B-139 (2026-09-29) turned on EBS encryption by default with the AWS-managed
+`aws/ebs` key. AWS will not share a snapshot encrypted with that key across
+accounts: `OperationNotPermitted: Encrypted snapshots with EBS default key
+cannot be shared`. `preserve` created the snapshots, raised on the share to
+Forensics, and every stage's Catch went to Finalise. **The instance was never
+isolated and the principal was never revoked.** This holds for any real incident
+on an instance whose volumes use `aws/ebs`, which is every volume created in a
+B-139 account since 09-29, including Arc8 dev and test. The 09-19 exercises
+passed because they ran before B-139. The blast-radius check (V3) passed.
+
+Then `finalise` recorded the outcome as `contained`, because it read the triage
+*decision* and not what ran. The incident record claimed a containment that did
+not happen.
+
+The exercise's snapshots from that run were never recorded, so its teardown did
+not know about them. They are still in Sandbox Exercise, tagged
+`platform-incident-id=20261013-f7dc3951cc`.
+
+**Stage 1 (done):**
+- A failed share is recorded per snapshot and never raises. `shared_with` names
+  Forensics only when every snapshot got there.
+- Preserve's Catch goes to `ShouldContain` with `$.preserve_error`, not to
+  Finalise. Containment continues without evidence (Jamie, 2026-10-13; ADR-002).
+- `finalise` records what happened: `contained` only when isolate and revoke
+  both ran and nothing raised. Otherwise `containment-incomplete`, with a "finish
+  by hand" line. The gather path likewise records `gathered` or
+  `gather-incomplete`.
+
+The exercise will still FAIL until stage 2. Its `evidence_share_requested` check
+is correct to fail while evidence cannot reach Forensics.
+
+**Stage 2 (open): make evidence shareable (Jamie, 2026-10-13: both):**
+- A platform CMK per member account, in the baseline, whose key policy lets
+  Forensics use it. `apply-account-settings.sh` sets it as the EBS default key
+  (`modify-ebs-default-kms-key-id`), so new volumes are shareable.
+- In containment, a snapshot that cannot be shared directly is copied and
+  re-encrypted with that CMK, and the copy is shared. That covers existing
+  `aws/ebs` volumes and tenant keys. The copy is asynchronous, so it needs a
+  wait in the state machine that does not hold up isolation.
+
+**To close:** the containment exercise passes, run on demand, with a target
+volume encrypted under `aws/ebs`.

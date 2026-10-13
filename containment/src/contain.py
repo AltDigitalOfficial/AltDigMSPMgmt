@@ -392,13 +392,38 @@ def preserve(event):
     # also the right direction of trust.
     forensics, forensics_problem = _forensics_account(session)
     if forensics:
+        # Per snapshot, and never fatal. A share that fails is recorded and
+        # containment carries on to isolate and revoke (Jamie, 2026-10-13).
+        # Raising here once skipped both: the 2026-10-13 exercise snapshotted
+        # a volume encrypted with the AWS-managed aws/ebs key, which AWS will
+        # not share across accounts ("Encrypted snapshots with EBS default key
+        # cannot be shared"), and the instance was left unisolated and its
+        # principal unrevoked. Unshared evidence is bad. An attacker who keeps
+        # their access is worse.
+        unshared = []
         for snap in preserved["snapshots"]:
-            ec2.modify_snapshot_attribute(
-                SnapshotId=snap["snapshot_id"],
-                Attribute="createVolumePermission",
-                OperationType="add",
-                UserIds=[forensics])
-        preserved["shared_with"] = forensics
+            try:
+                ec2.modify_snapshot_attribute(
+                    SnapshotId=snap["snapshot_id"],
+                    Attribute="createVolumePermission",
+                    OperationType="add",
+                    UserIds=[forensics])
+                snap["shared"] = True
+            except Exception as exc:                   # noqa: BLE001
+                code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+                snap["shared"] = False
+                unshared.append({"snapshot_id": snap["snapshot_id"],
+                                 "error": f"{code or type(exc).__name__}: {exc}"})
+        # shared_with names Forensics only if EVERY snapshot reached it. A
+        # partial share reported as a share is the failure this replaces.
+        preserved["shared_with"] = None if unshared else forensics
+        if unshared:
+            preserved["unshared"] = unshared
+            preserved["note"] = (
+                f"EVIDENCE WAS NOT MOVED OUT OF THE ACCOUNT for {len(unshared)} of "
+                f"{len(preserved['snapshots'])} snapshot(s). They exist only in "
+                "the account being contained, where a principal with local admin "
+                "can delete them. Containment continued regardless.")
     else:
         # Reported as part of the incident, not passed over. Evidence sitting in
         # the account an attacker holds admin in is evidence they can delete.
@@ -421,7 +446,9 @@ def preserve(event):
                   "feasible'; it is not feasible from the control plane.",
     }
 
-    record_event(incident_id, "preserve", "complete", preserved)
+    record_event(incident_id, "preserve",
+                 "complete" if preserved.get("shared_with") else "not-moved",
+                 preserved)
     return preserved
 
 
@@ -727,15 +754,42 @@ def finalise(event):
     started = _parse(event.get("started_at"))
     now = _now()
 
-    contained = triage_result.get("decision") == "contain"
+    # What HAPPENED, not what was decided. This read the triage decision alone
+    # until 2026-10-13, so the exercise that day recorded "contained" for an
+    # instance that was never isolated and a principal never revoked: preserve
+    # had failed and the state machine jumped straight here. Contained means
+    # isolate and revoke both ran to a result and nothing raised. Either may
+    # legitimately be "not applicable" (a principal-only finding has no
+    # instance), which still counts: the stage ran and decided.
+    decided_contain = triage_result.get("decision") == "contain"
+    error = event.get("error")
+    contained = (decided_contain and not error
+                 and event.get("isolate") is not None
+                 and event.get("revoke") is not None)
+    if decided_contain:
+        outcome = "contained" if contained else "containment-incomplete"
+    else:
+        outcome = "gathered" if not error else "gather-incomplete"
+
     not_done = []
-    if not contained:
+    if decided_contain and not contained:
+        not_done.append(
+            "CONTAINMENT DID NOT COMPLETE. "
+            f"Isolation {'ran' if event.get('isolate') is not None else 'did NOT run'}; "
+            f"revocation {'ran' if event.get('revoke') is not None else 'did NOT run'}. "
+            "See error. A human must finish containment by hand.")
+    if event.get("preserve_error"):
+        not_done.append(
+            "Evidence preservation FAILED and containment continued without it. "
+            "See preserve_error.")
+    if not decided_contain:
         not_done.append(
             "Isolation, revocation and session revocation were NOT performed. "
             f"design 07 routes a {triage_result.get('confidence')}-confidence "
             f"finding in {triage_result.get('environment_tier')} to gather and "
             "page, because isolating a healthy production service on a false "
-            "positive is its own incident. Evidence WAS preserved.")
+            "positive is its own incident."
+            + ("" if event.get("preserve_error") else " Evidence WAS preserved."))
     not_done.append(
         "Nothing was terminated, deleted, deregistered, rolled back or purged. "
         "The responder role holds no permission to do so.")
@@ -761,15 +815,16 @@ def finalise(event):
         "isolated": event.get("isolate"),
         "revoked": event.get("revoke"),
         "blast_radius": event.get("blast_radius"),
+        "outcome": outcome,
         "deliberately_not_done": not_done,
-        "error": event.get("error"),
+        "preserve_error": event.get("preserve_error"),
+        "error": error,
     }
-    record_event(incident_id, "summary",
-                 "contained" if contained else "gathered", summary)
+    record_event(incident_id, "summary", outcome, summary)
     emit(summary, incident)
     print(json.dumps(summary, default=str))
     return {"incident_id": incident_id, "decision": triage_result.get("decision"),
-            "contained": contained,
+            "contained": contained, "outcome": outcome,
             "elapsed_seconds": summary["elapsed_seconds"]}
 
 
