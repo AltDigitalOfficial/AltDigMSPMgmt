@@ -201,6 +201,22 @@ resource_types_no_alarms:
   # alarm set and move it to resource_types_in_scope.
   - AWS::EC2::VPCEndpoint
 
+  # --- found in Sandbox Exercise, 2026-10-13 -------------------------------------
+  # The 05:00 UTC backup plan (recovery/30-backup-policy.yaml) creates a
+  # recovery point a day, and each one raised platform-instrumentation-exception
+  # as unrecognised: four consecutive days, 2026-10-10 to 2026-10-13. Every
+  # tenant with a backup plan would do the same daily.
+  #
+  # A recovery point is an output of a backup, not a workload. It has no metric
+  # of its own, and the ways it goes wrong are watched where they matter: in
+  # production, a backup that did not produce one fires
+  # platform-backup-job-failed (NumberOfBackupJobsFailed), and one that will
+  # not restore is what the scheduled restore test
+  # (recovery/20-restore-schedule.yaml, uat and above) exists to find. Below
+  # those tiers neither exists, by design 14, and a per-recovery-point alarm
+  # would not supply them.
+  - AWS::Backup::RecoveryPoint
+
 # =============================================================================
 # AWS DEFAULT RESOURCES -- known by NAME, not by type
 # =============================================================================

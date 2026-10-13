@@ -7626,3 +7626,47 @@ follow it.
 - Prove it with the containment exercise: a single-instance target must page
   and not isolate, and a target behind a load balancer with another healthy
   target must isolate.
+
+## B-169 · No digest has ever produced its evidence record
+
+**Fixed 2026-10-13, pending the next scheduled run.** Found investigating a
+daily `platform-digest-not-delivered` incident (value 2.0 every day).
+
+Every scheduled digest since sending began, 2026-10-08 to 2026-10-13, reached
+the client: the CC copies arrived. Every one then failed writing its send
+record to `digest-evidence/` in the locked log archive, and was counted as
+`failed`. Six runs, two Arc8 accounts each: **twelve digests with no evidence
+record.** `digest-evidence/` held no objects at all. Design 06 treats the record
+as the evidence that monitoring requirements were communicated, so the gap is in
+our evidence, not in what the client received. The alarm's name, "not
+delivered", is wrong for this case. The emails were delivered; the records were
+not.
+
+Three things were missing, and the first one hid the other two:
+
+1. **The bucket named its key by bare id** (`KMSMasterKeyID: !Ref LogArchiveKey`).
+   S3 resolves a bare id in the *requester's* account, so the Infra Tooling
+   role was sent looking for the key in Infra Tooling. The error,
+   `KMS.NotFoundException` naming `arn:aws:kms:us-east-2:<infra-tooling>:key/...`,
+   reads like a deleted key. AWS service writers (CloudTrail, Config, flow
+   logs) were unaffected, which is why nothing else noticed. All three archive
+   buckets now name the key by ARN.
+2. **The bucket policy never granted the role `s3:PutObject`.** The role's IAM
+   policy did, from 2026-09-18, but a cross-account write needs both sides.
+   Added `DigestEvidenceWrite`, scoped to `digest-evidence/*`, write-only.
+3. **Neither side granted `kms:GenerateDataKey`.** Added to the key policy
+   (`AllowDigestEvidenceEncrypt`) and the role, both pinned by encryption
+   context to the locked bucket and by `kms:ViaService` to S3.
+
+`DigestAccountId` is a new parameter on `security/10-log-archive.yaml`; empty
+grants nothing. Where the records live was a ruling (Jamie, 2026-10-13); see
+the ADR.
+
+**The gap is recorded, not reconstructed.** Each digest body was rendered at
+send time and never kept, so the twelve records cannot be written faithfully
+after the fact. One gap record under `digest-evidence/_gaps/` names the
+accounts, the six send dates and the cause (Jamie, 2026-10-13).
+
+**To close:** the 2026-10-14 13:00Z run reports `sent` for both Arc8 accounts,
+two objects appear under `digest-evidence/oeight/arc8/`, and
+`platform-digest-not-delivered` stays OK.

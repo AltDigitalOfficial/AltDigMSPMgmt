@@ -94,8 +94,20 @@ Parameters:
       Passed from SSM at deploy. Empty grants nothing -- and log custody then
       fails with AccessDenied, which it reports as a finding.
 
+  DigestAccountId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^([0-9]{12})?$'
+    Description: >-
+      The Infra Tooling account, whose PlatformDigestSender role writes one
+      send record per instrumentation digest under digest-evidence/
+      (reporting/src/digest.py). Passed from SSM at deploy. Empty grants
+      nothing -- and every digest then counts as failed, which
+      platform-digest-not-delivered reports.
+
 Conditions:
   HasCustody: !Not [!Equals [!Ref AuditAccountId, '']]
+  HasDigest: !Not [!Equals [!Ref DigestAccountId, '']]
 
   # Replication is off until the destination stack exists in the replica
   # region. Both parameters must be supplied; a half-configured rule is worse
@@ -365,6 +377,31 @@ Resources:
               StringEquals:
                 'aws:SourceOrgID': !Ref OrganizationId
 
+          # The digest's send records -- the evidence that monitoring
+          # requirements were communicated to the client -- are the one thing
+          # in the archive written by an IAM role rather than by an AWS
+          # service. See docs/adr/ for why they live here and not in a bucket
+          # in Infra Tooling.
+          #
+          # Scoped by encryption context to the locked archive bucket only, and
+          # by kms:ViaService to S3, so the role can encrypt nothing else with
+          # this key and cannot call KMS directly. No Decrypt: the writer never
+          # reads a record back. The role's own IAM policy carries the matching
+          # grant; cross-account KMS needs both.
+          - !If
+            - HasDigest
+            - Sid: AllowDigestEvidenceEncrypt
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${DigestAccountId}:role/PlatformDigestSender'
+              Action: 'kms:GenerateDataKey'
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  'kms:ViaService': !Sub 's3.${AWS::Region}.amazonaws.com'
+                  'kms:EncryptionContext:aws:s3:arn': !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-${AWS::AccountId}'
+            - !Ref AWS::NoValue
+
   LogArchiveKeyAlias:
     Type: AWS::KMS::Alias
     Properties:
@@ -394,7 +431,15 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: aws:kms
-              KMSMasterKeyID: !Ref LogArchiveKey
+              # The ARN, never the bare key id (!Ref). S3 resolves a bare id in
+              # the REQUESTER's account, so a cross-account writer was sent
+              # looking for this key in its own account and failed with
+              # KMS.NotFoundException -- naming a key ARN in the wrong account,
+              # which reads like a deleted key. Every digest evidence write
+              # failed this way from go-live until 2026-10-13. Service
+              # principals were unaffected, which is why nothing else noticed.
+              # The same applies to the two buckets below.
+              KMSMasterKeyID: !GetAtt LogArchiveKey.Arn
             BucketKeyEnabled: true
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
@@ -495,7 +540,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: aws:kms
-              KMSMasterKeyID: !Ref LogArchiveKey
+              KMSMasterKeyID: !GetAtt LogArchiveKey.Arn
             BucketKeyEnabled: true
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
@@ -636,7 +681,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: aws:kms
-              KMSMasterKeyID: !Ref LogArchiveKey
+              KMSMasterKeyID: !GetAtt LogArchiveKey.Arn
             BucketKeyEnabled: true
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
@@ -826,6 +871,24 @@ Resources:
                 AWS: !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:role/PlatformEvidenceCustody'
               Action: 's3:ListBucket'
               Resource: !GetAtt LogArchiveBucket.Arn
+            - !Ref AWS::NoValue
+
+          # PutObject for the digest's send records, under digest-evidence/
+          # and nowhere else. Write-only: no GetObject, no ListBucket, and no
+          # DeleteObject, so the role that writes a record cannot read, find or
+          # mask one. Object Lock holds each record for RetentionDays.
+          #
+          # Absent until 2026-10-13. The role's IAM policy granted the write
+          # from the start, but a cross-account write needs the bucket to agree,
+          # and it never did -- masked by the KMS failure that came first.
+          - !If
+            - HasDigest
+            - Sid: DigestEvidenceWrite
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${DigestAccountId}:role/PlatformDigestSender'
+              Action: 's3:PutObject'
+              Resource: !Sub '${LogArchiveBucket.Arn}/digest-evidence/*'
             - !Ref AWS::NoValue
 
 
