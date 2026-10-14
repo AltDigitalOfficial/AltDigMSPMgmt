@@ -6677,6 +6677,22 @@ tier like everything else, or to the digest. The emitter still never
 escalates (CLAUDE.md). Then confirm the per-hour rate drops back to
 near-zero for steady-state accounts.
 
+**Resolved 2026-10-14 (code; confirmation pending deploy).**
+- **evidence-completeness:** got its normaliser under B-156.
+- **telemetry-gap:** now does too. `router.py` maps it to `from_dossier`,
+  because gap.py already emits that shape.
+- **Routing:**
+  - dev routes as `digest`;
+  - a persistent gap in test routes as `digest_and_jira`, with the
+    `pagerduty` the scan declares REFUSED;
+  - prod pages only for a gap that persists.
+- **Two additions to every routing record:**
+  - `reason` and `severity`, which the digest reads;
+  - the dossier tier is written back. Until now every dossier logged
+    `environment_tier: null`.
+- **Tests:** `scripts/test-router-telemetry.py`.
+- **Still to do:** check the per-hour review-queue rate after deploy.
+
 ---
 
 ## B-150 · A canary that never runs after creation is silent
@@ -7757,6 +7773,32 @@ Archive, manager render (§7), CLIENT `timezone` attribute and its
 who/what/when/how, checked against the 2026-10-09 Resource Explorer events,
 and a run with the facts document deliberately absent that still sends and
 says so.
+
+**Stage A built 2026-10-14.** It needs no trail.
+- **What it is:**
+  - `reporting/src/facts.py` and `reporting/20-digest-facts.yaml`, deployed to
+    Audit;
+  - `digest.py` rewritten into the four-section manager digest;
+  - the CLIENT `timezone` attribute (`registry.sh --timezone`);
+  - tzdata vendored by `publish-digest.sh`;
+  - `platform-digest-facts-incomplete` (Audit) and
+    `platform-digest-facts-missing` (Tooling);
+  - `scripts/test-digest.py`.
+- **Subject line changed:** "AltDigital daily digest — <label>", replacing
+  "Instrumentation digest". Anyone filtering on the old subject needs to
+  update.
+- **Window changed:** alarms and exceptions now share the facts window, which
+  ends at 12:00 UTC, instead of ending at the 13:00 run.
+- **Stage B** waits on `security/50`: the "What your team did" section and
+  "who created it" on resource lines. The column and KMS decrypt notes are in
+  design §10, and the query role needs `kms:Decrypt` on the archive key
+  through S3. The design omitted that.
+
+**B-051 now has a consumer to decide against.** The digest reads the router
+log. A digest-class event that is also enqueued to the review queue is
+therefore read twice: once by the digest, and once by nobody. Stopping
+`digest` from enqueueing is still B-051's decision, and it changes router
+behaviour for every digest-class event, so it is left for Jamie.
 
 ## B-172 · Platform digest: AltDigital's daily cross-tenant read
 

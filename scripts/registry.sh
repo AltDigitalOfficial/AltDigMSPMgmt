@@ -59,6 +59,7 @@ Clients
                  [--change-approver EMAIL] [--jira-project KEY] [--jira-site URL]
                  [--evidence-destination truveon|external|archive]
                  [--breach-contact EMAIL] [--security-contact EMAIL]
+                 [--timezone IANA_ZONE]
                  Updates only the fields passed; never erases the rest.
   get-client     --partner S --slug S
   link-truveon   --partner S --slug S --name TRUVEON_TENANT_SLUG
@@ -97,6 +98,7 @@ BAA=""; IP_OWNER=""; ACCOUNT_ID=""; ENVIRONMENT=""; APP=""; VERSION=""
 NAME=""; REASON=""; REVIEW_BY=""; TECH_CONTACT=""; DEV_MANAGER=""
 CHANGE_APPROVER=""; JIRA_PROJECT=""; SERVICE_MODEL=""; COMPLIANCE=""; KIND=""
 BREACH_CONTACT=""; SECURITY_CONTACT=""; JIRA_SITE_URL=""; EVIDENCE_DESTINATION=""
+TIMEZONE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -118,6 +120,7 @@ while [[ $# -gt 0 ]]; do
     --evidence-destination) EVIDENCE_DESTINATION="$2"; shift 2 ;;
     --breach-contact)   BREACH_CONTACT="$2"; shift 2 ;;
     --security-contact) SECURITY_CONTACT="$2"; shift 2 ;;
+    --timezone)         TIMEZONE="$2"; shift 2 ;;
     --account-id)       ACCOUNT_ID="$2"; shift 2 ;;
     --env)              ENVIRONMENT="$2"; shift 2 ;;
     --app)              APP="$2"; shift 2 ;;
@@ -395,6 +398,23 @@ cmd_put_client() {
   if [[ -n "${SECURITY_CONTACT}" ]]; then
     set+=", security_contact = :sc"; vals+=",\":sc\":$(ddb_str "${SECURITY_CONTACT}")"
   fi
+  # The zone the development manager reads the daily digest in
+  # (docs/digest-design.md §5). The READER's zone, which is not necessarily
+  # questionnaire 5.2's: that one is the developers' schedule default, and a
+  # manager may sit elsewhere. Absent means America/Denver. Checked for shape
+  # only; a name that does not resolve renders the digest in UTC with a line
+  # saying so, rather than failing the send.
+  #
+  # `timezone` is a DynamoDB reserved word, so it goes through a name
+  # placeholder -- added only when used, because DynamoDB rejects a
+  # placeholder the expression does not reference.
+  local names='{"#st":"state"}'
+  if [[ -n "${TIMEZONE}" ]]; then
+    [[ "${TIMEZONE}" == "UTC" || "${TIMEZONE}" =~ ^[A-Z][A-Za-z_]+(/[A-Za-z0-9_+-]+)+$ ]] \
+      || die "--timezone must be an IANA zone name such as America/Denver or Asia/Kolkata."
+    set+=", #tz = :tz"; vals+=",\":tz\":$(ddb_str "${TIMEZONE}")"
+    names='{"#st":"state","#tz":"timezone"}'
+  fi
 
   if [[ "${DRY_RUN}" == "1" ]]; then
     printf '%s DRY%s  update-item CLIENT %s/%s SET %s\n' \
@@ -405,7 +425,7 @@ cmd_put_client() {
   ddb update-item --table-name "${TABLE}" \
     --key "{\"PK\":{\"S\":\"PARTNER#${PARTNER}\"},\"SK\":{\"S\":\"CLIENT#${SLUG}\"}}" \
     --update-expression "SET ${set}" \
-    --expression-attribute-names '{"#st":"state"}' \
+    --expression-attribute-names "${names}" \
     --expression-attribute-values "{${vals}}" >/dev/null
   ok "client ${PARTNER}/${SLUG} recorded: state=${STATE}${IP_OWNER:+ ip-owner=${IP_OWNER}}"
   # Questionnaire 1.5, 5.8 and 3.3: the tech contact, dev manager and change

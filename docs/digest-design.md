@@ -1,6 +1,9 @@
 # Digest design: two audiences, one gatherer
 
-**Status:** Design, 2026-10-14. Not built.
+**Status:** Stage A built 2026-10-14 (B-171): gatherer, facts bucket, manager
+render with time zones, layer-tag, HIPAA and telemetry lines, and the else
+paths. Stage B, everything from the org trail, waits on `security/50`. The
+platform digest (B-172) is designed and not built.
 **Rulings (Jamie, 2026-10-14):** two separate emails; which signals go to which
 email (§3); design all three increments before building; build the manager
 digest. [ADR-003](adr/ADR-003-two-digests-two-audiences.md).
@@ -127,10 +130,16 @@ guessed.
 ## 5. Time zone
 
 - **Manager digest:** a new attribute on the CLIENT registry record,
-  `timezone`, as an IANA name. Absent means `America/Denver`. Arc8's team works
-  India hours (developer guide §4.14), so Arc8's record should say
-  `Asia/Kolkata`. That is a registry edit, and a question to add to
-  questionnaire 3.6. Both are in B-171.
+  `timezone`, as an IANA name. Absent means `America/Denver`. Set with
+  `registry.sh put-client --timezone`.
+  - **It is the reader's zone, not the team's.** The first draft of this section
+    said Arc8's record should be `Asia/Kolkata` because Arc8's developers work
+    India hours (developer guide §4.14). That was wrong. The digest goes to the
+    development manager, who is not in India, and questionnaire 5.2's zone is
+    the developers' schedule default, so it is not a substitute.
+  - **Arc8 is left on the default.** Its manager's zone is not recorded.
+  - **The questionnaire still needs this question.** 3.6 should ask the
+    manager's zone beside the manager's address.
 - **Platform digest:** always `America/Denver`.
 - **Evidence and facts:** UTC, ISO 8601. An evidence record needs one
   unambiguous clock. The email shows the zone abbreviation on every timestamp,

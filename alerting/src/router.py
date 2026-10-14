@@ -469,6 +469,19 @@ NORMALISERS = {
     # tenants without HIPAA exposure are never swept, so nothing arrives here
     # about them.
     "hipaa-eligibility": from_hipaa_eligibility,
+    # telemetry/src/gap.py. Already dossier-shaped (alarm, assessment,
+    # current_state, routing), and with no entry here every one fell to the
+    # review queue as "unrecognised event shape" from the day the scan was
+    # deployed (B-148).
+    #
+    # The scan declares its own class: digest in dev, digest_and_jira when a
+    # gap has not yet outlived the association reinstall, pagerduty only when
+    # it has. The dossier rule honours the first two as downgrades and refuses
+    # pagerduty wherever the tier would not page, so a persistent gap in test
+    # tickets rather than pages. The scan's tier is in the detail, but the
+    # router looks the tier up from alarm.account_id itself: the emitter's
+    # copy of a routing fact is not the one that decides.
+    "telemetry-gap": from_dossier,
 }
 
 
@@ -605,6 +618,10 @@ def decide(norm):
             tier, note = account_tier(norm.get("account_id"))
             if note:
                 norm["tier_note"] = note
+            # Written back so the routing record says which tier decided it.
+            # It did not until 2026-10-14, so every dossier's record logged
+            # environment_tier null; found when the digest began reading them.
+            norm["environment_tier"] = tier
         default = "pagerduty" if tier in ("uat", "prod") else "digest_and_jira"
 
         # An emitter may DOWNGRADE its own dossier, and may never escalate one.
@@ -1127,6 +1144,14 @@ def deliver(norm, detail_type):
         "environment_tier": norm.get("environment_tier"),
         "title": norm.get("title"),
         "resource": norm.get("resource"),
+        # What the event SAID, as well as where it went. The digest reads these
+        # records to build its lines (reporting/src/facts.py), and a title
+        # alone -- "HIPAA eligibility: usage — apprunner" -- omits the part the
+        # reader acts on, such as what to use instead. Bounded, because a
+        # dossier's probable cause can run to paragraphs and this is a log
+        # line.
+        "reason": (str(norm.get("reason"))[:600] if norm.get("reason") else None),
+        "severity": norm.get("severity"),
         "routing": routing,
         "why": why,
         "delivered": delivered,

@@ -25,7 +25,7 @@ require_cli
 require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
 # Only committed sources are packaged: what runs must be a commit someone
 # can name. lib/common.sh, require_committed.
-require_committed reporting/src
+require_committed reporting/src design/06a-alarm-specification.yaml
 
 TOOLING="$(get_param /org/account/altdig-infra-tooling)"
 [[ -n "${TOOLING}" && "${TOOLING}" != "None" ]] \
@@ -35,7 +35,44 @@ BUCKET="altdig-platform-artifacts-${TOOLING}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "${BUILD}"' EXIT
 
+PY="$(command -v python || command -v python3)" || die "python not found."
+
+# Two handlers, one package: digest.handler (Tooling, 10-digest-sender.yaml)
+# and facts.handler (Audit, 20-digest-facts.yaml). digest.py imports facts.py
+# for the window and the facts key layout, so the reader and the writer of a
+# facts document cannot disagree about where it is.
 cp "${REPO_ROOT}/reporting/src/digest.py" "${BUILD}/digest.py"
+cp "${REPO_ROOT}/reporting/src/facts.py"  "${BUILD}/facts.py"
+
+# 06a, for the gatherer's list of alarmable types. Converted and validated by
+# the same script the instrumentation package uses, so both read one spec in
+# one shape (publish-instrumentation.sh explains why 06a is never copied).
+info "Validating design/06a-alarm-specification.yaml"
+"${PY}" "$(win_path "${REPO_ROOT}/scripts/lib/validate_alarm_spec.py")" \
+  "$(win_path "${REPO_ROOT}/design/06a-alarm-specification.yaml")" \
+  "$(win_path "${BUILD}/alarm-spec.json")" \
+  || die "The alarm specification is invalid. Nothing packaged."
+
+# tzdata, vendored and pinned. The digest renders in each reader's time zone
+# (docs/digest-design.md §5), and zoneinfo needs a time zone database. Whether
+# the Lambda image carries /usr/share/zoneinfo is not documented as a
+# guarantee; the tzdata package is what zoneinfo falls back to, so shipping it
+# makes the answer ours. Pinned so the package hash changes only when we
+# change the pin. Bump it when IANA publishes a rule change that matters.
+TZDATA_VERSION="2026.5"
+info "Vendoring tzdata ${TZDATA_VERSION}"
+"${PY}" -m pip install --quiet --disable-pip-version-check --no-deps \
+  --only-binary=:all: --target "$(win_path "${BUILD}")" "tzdata==${TZDATA_VERSION}" \
+  || die "Could not vendor tzdata ${TZDATA_VERSION}. Nothing packaged."
+# pip's install metadata carries absolute paths and timestamps, which would
+# make the content-addressed key differ between two builds of the same source.
+rm -rf "${BUILD}"/tzdata-*.dist-info
+
+info "Checking the sources compile"
+"${PY}" -m py_compile \
+  "$(win_path "${REPO_ROOT}/reporting/src/digest.py")" \
+  "$(win_path "${REPO_ROOT}/reporting/src/facts.py")" \
+  || die "reporting sources do not compile. Nothing packaged."
 
 info "Packaging"
 zip_deterministic "${BUILD}"
@@ -74,13 +111,17 @@ else
 fi
 
 hr
-info "Deploy with:"
+info "Deploy with, in this order (the sender reads what the gatherer writes):"
+log "  scripts/deploy-to-account.sh --account altdig-security-audit \\"
+log "    --template reporting/20-digest-facts.yaml --stack platform-digest-facts \\"
+log "    ArtifactBucket=${BUCKET} ArtifactKey=${KEY} ToolingAccountId=${TOOLING}"
+log ""
 log "  scripts/deploy-to-account.sh --account altdig-infra-tooling \\"
 log "    --template reporting/10-digest-sender.yaml --stack platform-digest \\"
 log "    ArtifactBucket=${BUCKET} ArtifactKey=${KEY} \\"
-log "    EvidenceBucket=altdig-log-archive-<logarchive-acct>"
+log "    FactsBucket=altdig-digest-facts-<audit-acct>"
 log ""
-log "Leave DigestSender EMPTY until an SES identity is verified. The function"
-log "then gathers and renders and sends nothing, so the content can be read"
-log "before a client's technical contact ever receives one."
+log "Parameters not passed keep their current values (UsePreviousValue)."
+log "Then invoke platform-digest-facts once by hand, and platform-digest with"
+log "{\"dry_run\": true} to read the rendered bodies before 13:00 UTC."
 hr

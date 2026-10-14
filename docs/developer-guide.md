@@ -692,10 +692,22 @@ development manager to have the environment turned on.
 
 ### 4.15 Expensive services are allowed, and visible
 
-Bedrock, SageMaker and similar services are not blocked. Turning one on
-appears in the development manager's digest and counts against the budget
-alarm. The digest also lists new services enabled in the account, roles
-created, guardrail denials and telemetry gaps.
+Bedrock, SageMaker and similar services are not blocked, and turning one on
+is meant to be visible to your development manager. Here is what the daily
+digest carries today, and what is still to come.
+
+**In the digest now:**
+- resources missing a valid `platform-layer` tag;
+- HIPAA-eligibility lines (§4.16);
+- telemetry gaps;
+- the platform's monitoring.
+
+**Not yet:**
+- services used for the first time in the account, roles created, guardrail
+  denials, and who created what. These arrive once AltDigital's CloudTrail
+  query is in place.
+- a budget alarm. Per-tenant budgets have not been built, so the digest says
+  "No budget is configured for this account".
 
 For a HIPAA-scoped application this holds in dev and test. In uat and prod a
 service must also be HIPAA-eligible (§4.16). Bedrock and SageMaker both are.

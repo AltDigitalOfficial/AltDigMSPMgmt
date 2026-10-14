@@ -1,9 +1,14 @@
-"""Instrumentation digest — batched, per account, to the application owner.
+"""Manager digest — batched, per account, to the client's development manager.
 
 Prompt 4.4 and design doc 06, "The dev team notification loop":
 
     Here is what appeared. Here is what we instrumented generically. Reply if
     it needs something more specific.
+
+Extended 2026-10-14 into design 11's *Manager digest* (docs/digest-design.md,
+ADR-003, B-171): what needs the manager's attention, what the team did, the
+monitoring, and cost. Stage A carries the sections that need no CloudTrail
+query; the rest say "not available yet" until stage B.
 
 ------------------------------------------------------------------------------
 Batched is the requirement, not an optimisation
@@ -23,41 +28,52 @@ Doc 06: "documented evidence that monitoring requirements were communicated to
 the application owner. If something later fails unmonitored, the trail shows we
 asked."
 
-So the send record matters as much as the send. Prompt 4.4 wants it in Truveon
-with timestamp and recipient; Truveon does not exist, so the record is written
-to the Object Lock archive instead and the Truveon hand-off is recorded as
-outstanding. Losing the record would lose the evidence, which is the half that
-survives the conversation.
+So the send record matters as much as the send. It goes to the Object Lock
+archive (ADR-001); the Truveon hand-off is recorded as outstanding. Losing the
+record would lose the evidence, which is the half that survives the
+conversation.
 
 ------------------------------------------------------------------------------
 Central, not per-account
 ------------------------------------------------------------------------------
-Runs in Platform Tooling and reads each member account through a read-only
-role. The alternative — a sender in every member account — needs an SES
-identity in every account, which means a verified domain and a sender
-reputation per tenant. One identity is not an optimisation here either: SES
-reputation is per-identity, and a tenant account that starts bouncing would
-otherwise damage only itself, which sounds good until you realise nobody is
-watching that account's reputation.
+Runs in Platform Tooling. Reads each member account's alarms and
+instrumentation exceptions through a read-only role, and everything else from
+the facts documents reporting/src/facts.py writes in Audit (ADR-004). One SES
+identity: reputation is per-identity, and a tenant account that started
+bouncing would otherwise damage a reputation nobody is watching.
 
-Tooling also already holds the registry, which is where the contact addresses
-live.
+------------------------------------------------------------------------------
+One window per email
+------------------------------------------------------------------------------
+Every section covers the same 24 hours: the window facts.window() defines,
+ending at 12:00 UTC. The alarms and exceptions read here used to cover the 24
+hours to the run, an hour later than the facts. An email whose sections
+describe different days invites the reader to reconcile them, and the one
+that does not reconcile is the one they stop trusting.
 """
 
 import datetime
 import json
 import os
+import re
 
 import boto3
+from botocore.exceptions import ClientError
+
+import facts as facts_mod
 
 REGISTRY_TABLE = os.environ.get("REGISTRY_TABLE", "platform-registry")
 SENDER = os.environ.get("DIGEST_SENDER", "")
 CC_ADDRESS = os.environ.get("DIGEST_CC", "")
 READER_ROLE = os.environ.get("READER_ROLE_NAME", "PlatformDigestReader")
 EVIDENCE_BUCKET = os.environ.get("EVIDENCE_BUCKET", "")
+FACTS_BUCKET = os.environ.get("FACTS_BUCKET", "")
 CONFIGURATION_SET = os.environ.get("SES_CONFIGURATION_SET", "")
-WINDOW_HOURS = int(os.environ.get("WINDOW_HOURS", "24"))
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1"
+# The reader's clock when the client record names none. Mountain because the
+# CC is AltDigital (Jamie, 2026-10-14); a client's manager elsewhere gets their
+# own zone from the registry's `timezone` attribute.
+DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "America/Denver")
 
 dynamodb = boto3.client("dynamodb")
 ses = boto3.client("sesv2")
@@ -77,10 +93,10 @@ def _now():
 # is denied.
 #
 # Every name goes through ExpressionAttributeNames because several (state,
-# environment, client) are or may become DynamoDB reserved words, and a
-# reserved word in a bare projection fails the whole query.
+# environment, client, timezone) are or may become DynamoDB reserved words, and
+# a reserved word in a bare projection fails the whole query.
 ACCOUNT_ATTRIBUTES = ("account_id", "kind", "partner", "client", "app", "environment", "state")
-CLIENT_ATTRIBUTES = ("partner", "slug", "tech_contact", "dev_manager")
+CLIENT_ATTRIBUTES = ("partner", "slug", "tech_contact", "dev_manager", "timezone")
 
 
 def _projection(names):
@@ -129,7 +145,7 @@ def member_accounts():
 
 
 def client_contacts():
-    """Contacts by (partner, client), from the CLIENT records.
+    """Contacts and time zone by (partner, client), from the CLIENT records.
 
     Contacts live on the client, not on the account — questionnaire 1.5 asks
     once per application, and a client's three or four environments share one
@@ -144,8 +160,92 @@ def client_contacts():
             out[key] = {
                 "tech_contact": item.get("tech_contact", {}).get("S", ""),
                 "dev_manager": item.get("dev_manager", {}).get("S", ""),
+                "timezone": item.get("timezone", {}).get("S", ""),
             }
     return out
+
+
+# ---------------------------------------------------------------------------
+# Time
+# ---------------------------------------------------------------------------
+
+
+def load_zone(name):
+    """(tzinfo, zone name, note). Falls back to UTC and SAYS so.
+
+    Deliberately unlike scheduling/src/hoop.py, which refuses to run on a zone
+    it cannot load: there, a wrong clock turns an environment off. Here a
+    refusal would lose the email, and the email is the evidence. UTC with a
+    line in the header is wrong-but-visible; no email is wrong-and-silent.
+
+    tzdata is bundled in the package by publish-digest.sh, so zoneinfo does
+    not depend on the runtime image carrying /usr/share/zoneinfo.
+    """
+    try:
+        import zoneinfo
+        return zoneinfo.ZoneInfo(name), name, None
+    except Exception:                                 # noqa: BLE001
+        return datetime.timezone.utc, "UTC", (
+            f"Times are UTC: the time zone on record ({name}) could not be loaded.")
+
+
+def fmt_time(ts, tz):
+    """'2026-10-09 11:00 MDT' from a datetime or an ISO string."""
+    if ts is None:
+        return "unknown time"
+    if isinstance(ts, str):
+        try:
+            ts = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return ts
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=datetime.timezone.utc)
+    local = ts.astimezone(tz)
+    return f"{local.strftime('%Y-%m-%d %H:%M')} {local.tzname()}"
+
+
+# ---------------------------------------------------------------------------
+# Naming resources for a reader
+# ---------------------------------------------------------------------------
+
+SERVICE_NAMES = {
+    "ApiGateway": "API Gateway", "ApiGatewayV2": "API Gateway",
+    "AutoScaling": "Auto Scaling", "DynamoDB": "DynamoDB", "EC2": "EC2",
+    "ECS": "ECS", "EFS": "EFS", "ElastiCache": "ElastiCache",
+    "ElasticLoadBalancingV2": "Load balancing", "RDS": "RDS", "S3": "S3",
+    "SQS": "SQS", "SNS": "SNS", "KMS": "KMS", "IAM": "IAM",
+    "ResourceExplorer2": "Resource Explorer",
+}
+
+
+def _words(camel):
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", camel)
+
+
+def type_label(resource_type):
+    """'AWS::ResourceExplorer2::Index' -> 'Resource Explorer index'."""
+    parts = (resource_type or "").split("::")
+    if len(parts) != 3:
+        return resource_type or "resource"
+    service = SERVICE_NAMES.get(parts[1], _words(parts[1]))
+    return f"{service} {_words(parts[2]).lower()}"
+
+
+def split_resource(resource_id):
+    """(short id, region or None). An ARN is noise in an email; its tail and
+    region are what a reader uses to find the thing."""
+    rid = resource_id or "?"
+    if rid.startswith("arn:"):
+        fields = rid.split(":", 5)
+        region = fields[3] if len(fields) > 3 and fields[3] else None
+        tail = fields[5] if len(fields) > 5 else rid
+        return tail.rsplit("/", 1)[-1], region
+    return rid, None
+
+
+# ---------------------------------------------------------------------------
+# Gathering
+# ---------------------------------------------------------------------------
 
 
 def assume(account_id):
@@ -160,14 +260,11 @@ def assume(account_id):
     }
 
 
-def gather(account_id, region):
-    """What appeared, what was instrumented, what is pending — for one account."""
+def gather(account_id, region, start, end):
+    """Alarms and instrumentation exceptions for one account, in the window."""
     c = assume(account_id)
     cw = boto3.client("cloudwatch", region_name=region, **c)
     logs = boto3.client("logs", region_name=region, **c)
-
-    since = _now() - datetime.timedelta(hours=WINDOW_HOURS)
-    since_ms = int(since.timestamp() * 1000)
 
     alarms = []
     for page in cw.get_paginator("describe_alarms").paginate(
@@ -184,24 +281,33 @@ def gather(account_id, region):
                 "updated": a.get("AlarmConfigurationUpdatedTimestamp"),
             })
 
-    new_alarms = [a for a in alarms
-                  if a["updated"] and a["updated"].timestamp() >= since.timestamp()]
+    new_alarms = [a for a in alarms if a["updated"]
+                  and start.timestamp() <= a["updated"].timestamp() < end.timestamp()]
 
-    exceptions = []
+    exceptions, seen = [], set()
     try:
         for page in logs.get_paginator("filter_log_events").paginate(
                 logGroupName="/aws/platform/instrumentation-exceptions",
-                startTime=since_ms):
+                startTime=int(start.timestamp() * 1000),
+                endTime=int(end.timestamp() * 1000) - 1):
             for e in page.get("events", []):
                 try:
                     rec = json.loads(e["message"])
                 except ValueError:
                     continue
+                detail = rec.get("detail") or {}
+                key = (rec.get("reason"), detail.get("resource_id"), detail.get("alarm_id"))
+                if key in seen:
+                    # Drift re-evaluation can record the same exception twice
+                    # in a day. One resource, one line.
+                    continue
+                seen.add(key)
                 exceptions.append({
                     "reason": rec.get("reason"),
-                    "resource_type": (rec.get("detail") or {}).get("resource_type"),
-                    "resource_id": (rec.get("detail") or {}).get("resource_id"),
-                    "alarm_id": (rec.get("detail") or {}).get("alarm_id"),
+                    "resource_type": detail.get("resource_type"),
+                    "resource_id": detail.get("resource_id"),
+                    "alarm_id": detail.get("alarm_id"),
+                    "recorded_at": rec.get("recorded_at"),
                 })
     except logs.exceptions.ResourceNotFoundException:
         # The exception group is created by the instrumentation stack. Absent
@@ -217,24 +323,133 @@ def gather(account_id, region):
     }
 
 
-def render(account, data):
-    """Plain text. Deliberately.
+def read_facts(account_id, end):
+    """(facts document or None, status). Status is what the email says.
 
-    The recipient is a named technical contact and the content is a short list
-    of resource names. HTML buys nothing here and costs the thing that matters:
-    a plain-text digest renders identically in every client, quotes cleanly
-    when they reply to ask for different monitoring, and cannot silently fail
-    to display.
+    ok           read, and for the expected window
+    missing      no document: the gatherer did not write one for this account
+    unreadable   the digest cannot read Audit's bucket (a grant, not a gap)
+    stale        a document for a different window than this email covers
+    unconfigured FACTS_BUCKET is not set on this function
     """
-    label = "/".join(x for x in (account["partner"], account["client"],
-                                 account["app"], account["environment"]) if x)
-    lines = [
-        f"Instrumentation digest — {label}",
-        f"AWS account {account['account_id']}",
-        f"Covering the {WINDOW_HOURS} hours to {_now().strftime('%Y-%m-%d %H:%M UTC')}",
+    if not FACTS_BUCKET:
+        return None, "unconfigured"
+    key = facts_mod.facts_key(end, account_id)
+    try:
+        body = s3.get_object(Bucket=FACTS_BUCKET, Key=key)["Body"].read()
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        return None, "missing" if code in ("NoSuchKey", "404") else "unreadable"
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return None, "unreadable"
+    expected_end = end.isoformat().replace("+00:00", "Z")
+    if (doc.get("window") or {}).get("end") != expected_end:
+        return None, "stale"
+    return doc, "ok"
+
+
+FACTS_STATUS_TEXT = {
+    "missing": "the daily findings for this account were not produced",
+    "unreadable": "the daily findings could not be read",
+    "stale": "the daily findings available were for a different day",
+    "unconfigured": "the daily findings are not connected yet",
+}
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+
+def _rule(title):
+    return [f"== {title} " + "=" * max(4, 64 - len(title)), ""]
+
+
+def render_attention(doc, facts_status, tz):
+    lines = _rule("Needs your attention")
+    if doc is None:
+        lines += [
+            f"Not available for this window: {FACTS_STATUS_TEXT.get(facts_status, facts_status)}.",
+            "AltDigital has been told. The monitoring section below is unaffected.",
+            "",
+        ]
+        return lines
+
+    src = doc.get("sources") or {}
+    shown = False
+
+    # Missing platform-layer tag. Tenant resources only: an untagged platform
+    # resource is AltDigital's to fix and is reported to AltDigital instead.
+    layer = (doc.get("layer_tag") or {}).get("tenant") or {}
+    if src.get("layer") != "ok":
+        lines += ["Resources missing the platform-layer tag: could not be checked today.", ""]
+        shown = True
+    elif layer.get("total"):
+        shown = True
+        lines.append(f"Resources missing a valid platform-layer tag ({layer['total']}):")
+        for e in layer.get("items", [])[:25]:
+            name = e.get("name") or e.get("resource_id")
+            problem = ("tag missing" if e.get("problem") == "missing"
+                       else f"tag value '{e.get('value')}' is not infrastructure or application")
+            lines.append(f"  - {type_label(e.get('resource_type'))} {name}, "
+                         f"{e.get('region') or '?'} — {problem}")
+        if layer["total"] > 25:
+            lines.append(f"  ... and {layer['total'] - 25} more")
+        lines += [
+            "  Until these carry platform-layer=application (or infrastructure),",
+            "  their alarms page AltDigital rather than your team, so your team",
+            "  hears about their failures second.",
+            "",
+        ]
+
+    if src.get("router") != "ok":
+        lines += ["HIPAA eligibility and telemetry findings: could not be read today.", ""]
+        shown = True
+    else:
+        findings = doc.get("routed_findings") or []
+        for source, heading in (("platform.eligibility", "HIPAA eligibility"),
+                                ("platform.telemetry", "Telemetry gaps")):
+            mine = [f for f in findings if f.get("source") == source]
+            if not mine:
+                continue
+            shown = True
+            lines.append(f"{heading} ({len(mine)}):")
+            for f in mine[:20]:
+                # The resource, unless the title already names it (eligibility
+                # titles end with the service; telemetry titles name only the
+                # scenario, so the instance would otherwise be missing).
+                title, res = f.get("title") or "", f.get("resource") or ""
+                lines.append(f"  - {title}" + (f" — {res}" if res and res not in title else ""))
+                if f.get("reason"):
+                    lines.append(f"    {f['reason']}")
+                seen = (f"seen {f['count']} times, last {fmt_time(f.get('last_seen'), tz)}"
+                        if f.get("count", 1) > 1 else fmt_time(f.get("last_seen"), tz))
+                lines.append(f"    {seen}")
+            if len(mine) > 20:
+                lines.append(f"  ... and {len(mine) - 20} more")
+            lines.append("")
+
+    if not shown:
+        lines += ["Nothing needs your attention.", ""]
+    return lines
+
+
+def render_team(doc):
+    lines = _rule("What your team did")
+    lines += [
+        "Not available yet. Resources created and by whom, roles created,",
+        "services used for the first time, guardrail denials, and resources made",
+        "by hand outside your deployment code arrive here once AltDigital's",
+        "CloudTrail query is in place.",
         "",
     ]
+    return lines
 
+
+def render_monitoring(data, tz):
+    lines = _rule("Monitoring")
     if data["alarms_new"]:
         lines.append(f"New or changed monitoring ({len(data['alarms_new'])}):")
         for a in data["alarms_new"][:50]:
@@ -259,29 +474,64 @@ def render(account, data):
             "",
         ]
     elif data["exceptions"]:
-        lines.append(f"Resources we could NOT instrument ({len(data['exceptions'])}):")
+        lines.append(f"Running with no platform monitoring ({len(data['exceptions'])}):")
         for e in data["exceptions"][:30]:
-            who = e.get("resource_id") or e.get("resource_type") or "?"
-            lines.append(f"  - {who} ({e.get('resource_type')}) — {e.get('reason')}")
-        lines += [
-            "",
-            "These are running with no platform monitoring. Usually it means a",
-            "resource type we do not yet have a standard alarm set for.",
-            "",
-        ]
+            short, region = split_resource(e.get("resource_id") or e.get("resource_type"))
+            rtype = e.get("resource_type") or "unknown type"
+            lines.append(f"  - {type_label(rtype)} ({rtype}){', ' + region if region else ''}")
+            lines.append(f"    {short}")
+            lines.append(f"    Seen {fmt_time(e.get('recorded_at'), tz)}. "
+                         "Who created it: not available yet.")
+            if e.get("reason") == "unrecognised-resource-type":
+                lines.append("    We have no monitoring standard for this type yet. AltDigital")
+                lines.append("    has been told; no action is needed from you.")
+            else:
+                lines.append(f"    Reason: {e.get('reason')}")
+        lines.append("")
     else:
         lines += ["Every resource we saw was instrumented. No exceptions pending.", ""]
+    return lines
 
+
+def render(account, data, doc, facts_status, start, end, tz, tz_name, tz_note):
+    """Plain text. Deliberately.
+
+    The recipient is a named person and the content is a short list of
+    resource names. HTML buys nothing here and costs the thing that matters:
+    a plain-text digest renders identically in every client, quotes cleanly
+    when they reply to ask for different monitoring, and cannot silently fail
+    to display.
+    """
+    label = "/".join(x for x in (account["partner"], account["client"],
+                                 account["app"], account["environment"]) if x)
+    lines = [
+        f"Daily digest — {label}",
+        f"AWS account {account['account_id']}",
+        f"Covering {fmt_time(start, tz)} to {fmt_time(end, tz)} "
+        f"({end.strftime('%H:%M')} UTC)",
+        tz_note or f"Times are shown in {tz_name}.",
+        "",
+    ]
+    lines += render_attention(doc, facts_status, tz)
+    lines += render_team(doc)
+    lines += render_monitoring(data, tz)
+    lines += _rule("Cost")
+    lines += ["No budget is configured for this account.", ""]
     lines += [
         "-" * 68,
-        "This is generic instrumentation: it tells us a thing is running, not",
-        "that it works. If any of these need specific thresholds, or if there is",
-        "a user journey whose failure we would not catch, reply to this message",
+        "Monitoring here is generic: it tells us a thing is running, not that",
+        "it works. If any of this needs specific thresholds, or if there is a",
+        "user journey whose failure we would not catch, reply to this message",
         "and we will add it.",
         "",
         "AltDigital is copied on this digest.",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Sending and recording
+# ---------------------------------------------------------------------------
 
 
 def send(to_address, subject, body, dry_run=False):
@@ -315,14 +565,8 @@ def send(to_address, subject, body, dry_run=False):
     return ses.send_email(**kwargs)
 
 
-def record_evidence(account, to_address, message_id, body):
-    """The send record. Immutable, because it is the evidence.
-
-    Prompt 4.4 wants this in Truveon with timestamp and recipient. Truveon does
-    not exist, so it goes to the Object Lock archive — which is a better home
-    for it anyway, and the Truveon hand-off is recorded as outstanding rather
-    than silently skipped.
-    """
+def record_evidence(account, to_address, message_id, body, meta):
+    """The send record. Immutable, because it is the evidence (ADR-001)."""
     if not EVIDENCE_BUCKET:
         return None
     key = (f"digest-evidence/{account['partner']}/{account['client']}/"
@@ -335,6 +579,8 @@ def record_evidence(account, to_address, message_id, body):
         "cc": CC_ADDRESS or None,
         "message_id": message_id,
         "truveon_delivered": False,
+        # UTC, whatever the email showed: one unambiguous clock for evidence.
+        **meta,
         "body": body,
     }
     s3.put_object(Bucket=EVIDENCE_BUCKET, Key=key,
@@ -348,10 +594,13 @@ def handler(event, context):
     # every account, gather and render, then send nothing and record nothing.
     # It exercises every permission the real run needs without a client
     # receiving an unscheduled email, and without an evidence record claiming
-    # one was sent.
+    # one was sent. The rendered bodies come back in the invoke RESPONSE, not
+    # the log, so reviewing one does not copy it into a 90-day log group.
     dry_run = bool((event or {}).get("dry_run"))
     region = os.environ.get("AWS_REGION", "us-east-2")
-    sent, skipped, failed, shared = [], [], [], []
+    start, end = facts_mod.window()
+    sent, skipped, failed, shared, facts_missing = [], [], [], [], []
+    rendered = {}
     contacts = client_contacts()
 
     for account in member_accounts():
@@ -374,18 +623,13 @@ def handler(event, context):
         # The development manager first, then the technical contact. The
         # questionnaire has always said the digest goes to the development
         # manager (client form 3.6): "the main way a manager sees platform
-        # activity without needing an AWS login". This read tech_contact only,
-        # so on a tenant where the two differ -- Arc8's manager runs the dev
-        # team, its technical contact is a developer -- the person the form
-        # promised it to never got it. Fixed 2026-10-01. The fallback keeps a
-        # tenant with no manager recorded from silently losing its digest.
+        # activity without needing an AWS login". The fallback keeps a tenant
+        # with no manager recorded from silently losing its digest.
         to_address = who.get("dev_manager") or who.get("tech_contact")
         if not to_address:
             # Recorded, not silent. A client with no contact means the digest —
             # which design doc 06 calls the documented evidence that monitoring
-            # requirements were communicated — is not being sent at all. That
-            # is a compliance gap, and it must be visible in this result rather
-            # than inferred from a shorter `sent` list than expected.
+            # requirements were communicated — is not being sent at all.
             skipped.append({"account": account["account_id"],
                             "client": f"{account['partner']}/{account['client']}",
                             "reason": "no dev_manager or tech_contact on the client "
@@ -393,36 +637,55 @@ def handler(event, context):
             continue
 
         try:
-            data = gather(account["account_id"], region)
-            body = render(account, data)
+            tz, tz_name, tz_note = load_zone(who.get("timezone") or DEFAULT_TIMEZONE)
+            data = gather(account["account_id"], region, start, end)
+            doc, facts_status = read_facts(account["account_id"], end)
+            if facts_status != "ok":
+                # Degraded, not undelivered: the email still goes, and says
+                # what it is missing. Counted so the gap reaches a person.
+                facts_missing.append({"account": account["account_id"],
+                                      "status": facts_status})
+            body = render(account, data, doc, facts_status, start, end,
+                          tz, tz_name, tz_note)
             label = "/".join(x for x in (account["client"], account["app"],
                                          account["environment"]) if x)
-            resp = send(to_address, f"Instrumentation digest — {label}", body,
+            resp = send(to_address, f"AltDigital daily digest — {label}", body,
                         dry_run=dry_run)
-            key = None if dry_run else record_evidence(
-                account, to_address, resp.get("MessageId"), body)
-            sent.append({"account": account["account_id"], "evidence": key})
+            if dry_run:
+                rendered[account["account_id"]] = body
+                key = None
+            else:
+                key = record_evidence(account, to_address, resp.get("MessageId"), body, {
+                    "window_start": start.isoformat(), "window_end": end.isoformat(),
+                    "timezone_shown": tz_name, "facts_status": facts_status,
+                })
+            sent.append({"account": account["account_id"], "evidence": key,
+                         "facts": facts_status})
         except Exception as exc:
             failed.append({"account": account["account_id"], "error": str(exc)})
 
-    result = {"dry_run": dry_run, "sent": sent, "skipped": skipped, "failed": failed,
+    result = {"dry_run": dry_run, "window_end": end.isoformat(), "sent": sent,
+              "skipped": skipped, "failed": failed, "facts_missing": facts_missing,
               "shared_not_digested": shared}
     print(json.dumps(result, default=str))
-    # A dry run emits no counts: the alarm is about digests the client did or
-    # did not receive, and a dry run sends none either way.
+    # A dry run emits no counts: the alarms are about digests the client did
+    # or did not receive, and a dry run sends none either way.
     if not dry_run:
-        emit_metrics(len(sent), len(skipped), len(failed))
+        emit_metrics(len(sent), len(skipped), len(failed), len(facts_missing))
+    if dry_run:
+        result["rendered"] = rendered
     return result
 
 
-def emit_metrics(sent, skipped, failed):
+def emit_metrics(sent, skipped, failed, facts_missing):
     """Per-run counts, as an embedded metric format log line.
 
     The handler catches per-account failures so one bad account cannot stop
     the rest, which means a run where every account failed still returns
     normally and Lambda's own Errors metric stays at zero. These counts are
-    what the alarm in 10-digest-sender.yaml watches alongside Errors, so an
-    account that was not digested reaches a person instead of only this log.
+    what the alarms in 10-digest-sender.yaml watch alongside Errors, so an
+    account that was not digested, or was digested without its findings,
+    reaches a person instead of only this log.
 
     EMF rather than PutMetricData: CloudWatch extracts the metric from the log
     line, so the role needs no cloudwatch:PutMetricData grant.
@@ -437,10 +700,12 @@ def emit_metrics(sent, skipped, failed):
                     {"Name": "AccountsSent", "Unit": "Count"},
                     {"Name": "AccountsSkipped", "Unit": "Count"},
                     {"Name": "AccountsFailed", "Unit": "Count"},
+                    {"Name": "AccountsFactsMissing", "Unit": "Count"},
                 ],
             }],
         },
         "AccountsSent": sent,
         "AccountsSkipped": skipped,
         "AccountsFailed": failed,
+        "AccountsFactsMissing": facts_missing,
     }))

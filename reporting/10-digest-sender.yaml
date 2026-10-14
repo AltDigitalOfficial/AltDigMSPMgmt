@@ -102,8 +102,18 @@ Parameters:
       requirements were communicated and an auditor will want it unalterable.
       The Truveon hand-off stays outstanding rather than silently skipped.
 
+  FactsBucket:
+    Type: String
+    Default: ''
+    Description: >-
+      The Audit account's digest facts bucket (reporting/20-digest-facts.yaml,
+      output FactsBucketName). Empty is allowed and visible: every digest then
+      says its findings are not connected, and AccountsFactsMissing counts
+      every account. ADR-004.
+
 Conditions:
   HasSender: !Not [!Equals [!Ref DigestSender, '']]
+  HasFactsBucket: !Not [!Equals [!Ref FactsBucket, '']]
 
 Resources:
 
@@ -299,6 +309,9 @@ Resources:
                       - slug
                       - tech_contact
                       - dev_manager
+                      # The reader's time zone (docs/digest-design.md §5).
+                      # Not personal data: an IANA zone name.
+                      - timezone
                   StringEqualsIfExists:
                     'dynamodb:Select': SPECIFIC_ATTRIBUTES
               # The registry table is encrypted with its own key
@@ -346,6 +359,37 @@ Resources:
                   StringEquals:
                     'kms:ViaService': !Sub 's3.${AWS::Region}.amazonaws.com'
                     'kms:EncryptionContext:aws:s3:arn': !Sub 'arn:${AWS::Partition}:s3:::${EvidenceBucket}'
+              # Digest facts, written in Audit (ADR-004). Read only, under
+              # facts/ only; the bucket and key policies there admit this role
+              # by name as well. ListBucket so a missing document is NoSuchKey
+              # rather than AccessDenied, which the digest reports differently.
+              # Absent entirely when FactsBucket is empty, rather than granted
+              # on an ARN with no bucket in it.
+              - !If
+                - HasFactsBucket
+                - Effect: Allow
+                  Action: ['s3:GetObject']
+                  Resource: !Sub 'arn:${AWS::Partition}:s3:::${FactsBucket}/facts/*'
+                - !Ref AWS::NoValue
+              - !If
+                - HasFactsBucket
+                - Effect: Allow
+                  Action: ['s3:ListBucket']
+                  Resource: !Sub 'arn:${AWS::Partition}:s3:::${FactsBucket}'
+                  Condition:
+                    StringLike:
+                      's3:prefix': 'facts/*'
+                - !Ref AWS::NoValue
+              - !If
+                - HasFactsBucket
+                - Effect: Allow
+                  Action: ['kms:Decrypt']
+                  Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:*:key/*'
+                  Condition:
+                    StringEquals:
+                      'kms:ViaService': !Sub 's3.${AWS::Region}.amazonaws.com'
+                      'kms:EncryptionContext:aws:s3:arn': !Sub 'arn:${AWS::Partition}:s3:::${FactsBucket}'
+                - !Ref AWS::NoValue
               - Effect: Allow
                 Action:
                   - 'logs:CreateLogGroup'
@@ -377,6 +421,7 @@ Resources:
           DIGEST_CC: !Ref DigestCc
           READER_ROLE_NAME: PlatformDigestReader
           EVIDENCE_BUCKET: !Ref EvidenceBucket
+          FACTS_BUCKET: !Ref FactsBucket
           WINDOW_HOURS: !Ref WindowHours
           SES_CONFIGURATION_SET: !If [HasSender, !Ref DigestConfigurationSet, '']
       Tags:
@@ -480,6 +525,35 @@ Resources:
       TreatMissingData: notBreaching
       # D-028: no direct action. Delivered by the router (the marker above, and
       # alerting/60-alarm-forwarding.yaml in this account).
+
+  # A digest that went out without its findings. The email itself says so, to
+  # the client; this is how AltDigital hears it. Distinct from
+  # platform-digest-facts-incomplete in Audit, which watches the gatherer: that
+  # one cannot see a digest that failed to READ facts the gatherer wrote (a
+  # grant, a key policy, a window mismatch), and this one can.
+  #
+  # Ticketed, not paged: the client still got a digest, minus some lines.
+  DigestFactsMissingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-digest-facts-missing
+      AlarmDescription: >-
+        Today's digest went to at least one account without its findings
+        (layer tag, HIPAA eligibility, telemetry gaps). The run's final log
+        line in /aws/lambda/platform-digest lists each account under
+        facts_missing with a status: missing (the Audit gatherer wrote
+        nothing), unreadable (a grant or key policy), stale (window mismatch)
+        or unconfigured (FactsBucket not set on this stack).
+
+        [platform-routing] routing=digest_and_jira layer=infrastructure
+      Namespace: AltDigital/Digest
+      MetricName: AccountsFactsMissing
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
 
   # A digest that left SES and did not arrive. The function's view of this is
   # a successful send, so platform-digest-not-delivered cannot see it. That is

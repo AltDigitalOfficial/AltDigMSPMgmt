@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - digest facts. Gathers, once a day in the Audit
+  account, what the manager digest reports beyond alarms: the router's
+  digest-class decisions and the platform-layer tag across the estate. Writes
+  one facts document per account for the digest in Infra Tooling to read.
+  docs/digest-design.md section 6, ADR-004, B-171.
+
+# ---------------------------------------------------------------------------
+# Why Audit
+# ---------------------------------------------------------------------------
+# The router's log and the organization Config aggregator are both here, so
+# gathering here crosses no account boundary on the read side. The one
+# crossing is the hand-off: Tooling's PlatformDigestSender may read the facts
+# objects and decrypt them through S3, and nothing else in this account
+# (ADR-004). The alternative was Tooling reading Audit's logs and aggregator
+# directly, which would give the account holding the SES identity read access
+# to the security account's sources for the sake of an email.
+#
+# ---------------------------------------------------------------------------
+# What this stack cannot do
+# ---------------------------------------------------------------------------
+# Change anything anywhere. It reads one log group, queries the aggregator and
+# writes under facts/ in its own bucket. It never reaches into a member
+# account.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+    Description: Artifact bucket holding the digest package (Infra Tooling).
+
+  ArtifactKey:
+    Type: String
+    Description: >-
+      Content-addressed digest package key, from scripts/publish-digest.sh.
+      The same package as the sender: facts.py and digest.py ship together so
+      the facts key layout they share cannot drift.
+
+  ToolingAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: >-
+      Infra Tooling, whose PlatformDigestSender role reads the facts. Passed at
+      deploy time from /platform/org/account/altdig-infra-tooling, never
+      written into the template.
+
+  AggregatorName:
+    Type: String
+    Default: platform-organization
+
+  AccountTierParam:
+    Type: String
+    Default: /platform/routing/account-tiers
+    Description: The tier map the router reads. The gatherer writes facts for every account in it.
+
+  RouterLogGroup:
+    Type: String
+    Default: /aws/lambda/platform-router
+
+  GatherSchedule:
+    Type: String
+    Default: 'cron(15 12 * * ? *)'
+    Description: >-
+      12:15 UTC. After the window closes at 12:00 (facts.py, "The window") and
+      before the digest runs at 13:00, with room for a manual re-run if this
+      one fails.
+
+  FactsRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 15
+    Description: >-
+      How long facts documents are kept. They are inputs, not evidence: the
+      evidence is the rendered digest in the Log Archive (ADR-001). At least
+      14 days plus a margin, because the platform digest reads back 14 days of
+      facts for trends (design section 8).
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Where the facts live
+  # -------------------------------------------------------------------------
+  # A key of its own rather than alias/aws/s3, because the AWS-managed key
+  # cannot be granted to another account. Tooling's sender role may decrypt
+  # with it only through S3, and only for this bucket.
+  FactsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts digest facts documents
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          # Named by aws:PrincipalArn under the account principal rather than
+          # as the role ARN itself: KMS rejects a key policy naming a role that
+          # does not exist yet, which would make this stack depend on the order
+          # the two accounts were deployed in.
+          - Sid: AllowDigestSenderDecryptThroughS3
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:root' }
+            Action: 'kms:Decrypt'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 's3.${AWS::Region}.amazonaws.com'
+                'kms:EncryptionContext:aws:s3:arn': !Sub 'arn:${AWS::Partition}:s3:::altdig-digest-facts-${AWS::AccountId}'
+              ArnEquals:
+                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:role/PlatformDigestSender'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  FactsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-digest-facts
+      TargetKeyId: !Ref FactsKey
+
+  FactsBucket:
+    Type: AWS::S3::Bucket
+    # Delete, stated: the contents expire in a month by design and nothing
+    # depends on keeping them once the stack is gone.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub 'altdig-digest-facts-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt FactsKey.Arn
+            # Bucket keys make the encryption context the bucket ARN, which is
+            # what the key policy's condition above pins.
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-facts
+            Status: Enabled
+            ExpirationInDays: !Ref FactsRetentionDays
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  FactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt FactsBucket.Arn
+              - !Sub '${FactsBucket.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': 'false' }
+          - Sid: DigestSenderReadsFacts
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:root' }
+            Action: 's3:GetObject'
+            Resource: !Sub '${FactsBucket.Arn}/facts/*'
+            Condition:
+              ArnEquals:
+                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:role/PlatformDigestSender'
+          # ListBucket, under facts/ only, so a missing document reads as
+          # NoSuchKey rather than AccessDenied. The digest reports the two
+          # differently: "the gatherer wrote nothing for this account" and
+          # "the digest cannot read Audit" have different fixes.
+          - Sid: DigestSenderListsFacts
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:root' }
+            Action: 's3:ListBucket'
+            Resource: !GetAtt FactsBucket.Arn
+            Condition:
+              ArnEquals:
+                'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::${ToolingAccountId}:role/PlatformDigestSender'
+              StringLike:
+                's3:prefix': 'facts/*'
+
+  # -------------------------------------------------------------------------
+  # The gatherer
+  # -------------------------------------------------------------------------
+  FactsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformDigestFacts
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: GatherDigestFacts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTierMap
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AccountTierParam}'
+              # The router's own log, and no other. Lambda log groups in this
+              # account include the evidence pipeline's, which carry tenant
+              # evidence; the digest has no business there.
+              - Sid: ReadRouterDecisions
+                Effect: Allow
+                Action: logs:FilterLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${RouterLogGroup}:*'
+              - Sid: QueryInventory
+                Effect: Allow
+                Action: config:SelectAggregateResourceConfig
+                Resource: !Sub 'arn:${AWS::Partition}:config:${AWS::Region}:${AWS::AccountId}:config-aggregator/*'
+              - Sid: WriteFacts
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${FactsBucket.Arn}/facts/*'
+              - Sid: EncryptFacts
+                Effect: Allow
+                Action: kms:GenerateDataKey
+                Resource: !GetAtt FactsKey.Arn
+              - Sid: Completion
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals: { 'cloudwatch:namespace': Platform/DigestFacts }
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  FactsLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-digest-facts
+      RetentionInDays: 365
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  FactsFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: FactsLogGroup
+    Properties:
+      FunctionName: platform-digest-facts
+      Runtime: python3.13
+      Handler: facts.handler
+      Role: !GetAtt FactsRole.Arn
+      # One filtered log read and one paginated aggregator query for the whole
+      # estate, then one small write per account. Seconds today.
+      Timeout: 300
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          FACTS_BUCKET: !Ref FactsBucket
+          ACCOUNT_TIER_PARAM: !Ref AccountTierParam
+          ROUTER_LOG_GROUP: !Ref RouterLogGroup
+          AGGREGATOR: !Ref AggregatorName
+          SPEC_PATH: alarm-spec.json
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  FactsScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-digest-facts
+      Description: Daily digest facts. docs/digest-design.md section 6.
+      ScheduleExpression: !Ref GatherSchedule
+      State: ENABLED
+      Targets:
+        - Id: facts
+          Arn: !GetAtt FactsFunction.Arn
+
+  FactsSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt FactsFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt FactsScheduleRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Silence is not "nothing to report"
+  # -------------------------------------------------------------------------
+  # facts.py writes FactsCompleted only when every source was read and every
+  # document written. A run that could not read the router log, or a function
+  # that stopped running, both leave the metric absent and this fires.
+  #
+  # The digest still sends without facts (it says so, and counts the account
+  # in AccountsFactsMissing), so a missing day is degraded reporting, not a
+  # missing email. Ticketed, not paged. Delivered by the router through
+  # alerting/60-alarm-forwarding.yaml in this account.
+  FactsIncompleteAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-digest-facts-incomplete
+      AlarmDescription: >-
+        The digest facts gatherer has not completed cleanly in the last day.
+        Manager digests are going out without team activity, HIPAA eligibility,
+        telemetry-gap and layer-tag lines. See /aws/lambda/platform-digest-facts
+        for the source that failed, then re-run the function by hand before
+        13:00 UTC.
+
+        [platform-routing] routing=digest_and_jira layer=infrastructure
+      Namespace: Platform/DigestFacts
+      MetricName: FactsCompleted
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+Outputs:
+  FactsBucketName:
+    Description: Passed to the digest sender stack as FactsBucket.
+    Value: !Ref FactsBucket
+  FactsFunctionName:
+    Value: !Ref FactsFunction
