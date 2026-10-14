@@ -7800,6 +7800,33 @@ therefore read twice: once by the digest, and once by nobody. Stopping
 `digest` from enqueueing is still B-051's decision, and it changes router
 behaviour for every digest-class event, so it is left for Jamie.
 
+**Deployed 2026-10-14.**
+
+| Stack | Account | Code |
+|---|---|---|
+| `platform-router` | Audit | `router/router-64e1a6ac096562be.zip` |
+| `platform-digest-facts` | Audit (new) | `digest/digest-e305d7bc9d4488e9.zip` |
+| `platform-digest` | Tooling | `digest/digest-e305d7bc9d4488e9.zip`, with `FactsBucket` set |
+
+- **Templates checked first.** Before each deploy, the live router and sender
+  templates were compared with the repo as it stood before this work. They
+  matched, so nothing undeployed went out with this change.
+- **Gatherer, run by hand:** clean, 9 accounts written. Arc8 dev had 6
+  alarmable resources, all with a valid layer tag, and no findings in the
+  window.
+- **Digest dry run:** both Arc8 accounts rendered with facts `ok`, in MDT.
+  Nothing was sent or recorded.
+- **First deploy of `platform-digest-facts` failed.**
+  - Cause: Audit has no `alias/platform-logs`. Its log groups use the
+    `alias/platform-alerts` key, passed as `LogsKeyArn`, the same as the
+    eligibility stack.
+  - Cleanup: the empty `ROLLBACK_COMPLETE` stack record was removed so the
+    name could be reused.
+  - **Orphan:** KMS key `96e97d49-5f48-4954-af86-6740a7d1b939` in Audit, left
+    behind by `DeletionPolicy: Retain`. It encrypts nothing and costs about
+    $1 a month. Left in place rather than scheduled for deletion by hand.
+    *Trigger:* the next KMS key review.
+
 ## B-172 · Platform digest: AltDigital's daily cross-tenant read
 
 **Open — designed 2026-10-14.** [digest-design.md §8](digest-design.md);
