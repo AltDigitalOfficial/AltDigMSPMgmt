@@ -61,12 +61,16 @@ info "Validating design/06a-alarm-specification.yaml"
 # change the pin. Bump it when IANA publishes a rule change that matters.
 TZDATA_VERSION="2026.5"
 info "Vendoring tzdata ${TZDATA_VERSION}"
-"${PY}" -m pip install --quiet --disable-pip-version-check --no-deps \
+"${PY}" -m pip install --quiet --disable-pip-version-check --no-deps --no-compile \
   --only-binary=:all: --target "$(win_path "${BUILD}")" "tzdata==${TZDATA_VERSION}" \
   || die "Could not vendor tzdata ${TZDATA_VERSION}. Nothing packaged."
-# pip's install metadata carries absolute paths and timestamps, which would
-# make the content-addressed key differ between two builds of the same source.
+# pip's install metadata carries absolute paths and timestamps, and compiled
+# bytecode carries the local interpreter's version and source mtimes. Either
+# would make the content-addressed key differ between two builds of the same
+# source. --no-compile stops the bytecode; this removes the metadata, and any
+# __pycache__ a future pip writes regardless.
 rm -rf "${BUILD}"/tzdata-*.dist-info
+find "${BUILD}" -name __pycache__ -type d -prune -exec rm -rf {} +
 
 info "Checking the sources compile"
 "${PY}" -m py_compile \
