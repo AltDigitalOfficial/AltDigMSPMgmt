@@ -1,0 +1,580 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — AuditEvidenceReader permission set. Everything
+  SecurityReadOnly can see, plus the OUTPUT of the controls: archived
+  CloudTrail, platform log contents, the evidence tables and execution history.
+  Assigned for the length of an audit engagement, then removed.
+
+# ---------------------------------------------------------------------------
+# Why this exists, and why it is not SecurityReadOnly made wider
+# ---------------------------------------------------------------------------
+# SecurityReadOnly answers "how is this control configured". An audit samples
+# what the control PRODUCED -- the trail entry, the reconciliation verdict, the
+# quorum record, the restore result -- and SecurityReadOnly can reach almost
+# none of it. Checked against SecurityAudit v94 and ViewOnlyAccess v46 on
+# 2026-10-08: no s3:GetObject, no per-object retention read, no log contents,
+# no DynamoDB item reads, no Step Functions history, no /platform/ parameters.
+# The org trail is retained for six years and was readable for ninety days of
+# them, through LookupEvents only.
+#
+# Widening SecurityReadOnly was the obvious fix and the wrong one. Its
+# membership is the security function PLUS every quorum approver, who are
+# there so they can see what they approve. Log contents carry principal names
+# and source IPs; the approvers need none of it. And an external assessor
+# needs a grant that is given for an engagement and taken away afterwards
+# without touching a standing role. Jamie, 2026-10-08: separate.
+#
+# ---------------------------------------------------------------------------
+# Where the boundary comes from
+# ---------------------------------------------------------------------------
+#
+#     (SecurityAudit UNION ViewOnlyAccess UNION the Allows below)
+#       MINUS the Denies below
+#
+# Every Allow below is RESOURCE-SCOPED to something the platform built and
+# named: a `platform-*` table, log group or state machine, an `altdig-*`
+# archive bucket, the `platform-audit` Athena workgroup. Nothing is granted on
+# a tenant's resources. That is what lets this set be assigned to every account
+# -- an external assessor has to be able to walk a member account's
+# configuration -- without becoming a way into a tenant's data.
+#
+# ---------------------------------------------------------------------------
+# Decryption: the one place this set is deliberately less strict
+# ---------------------------------------------------------------------------
+# SecurityReadOnly denies kms:Decrypt outright. This cannot: archived trail
+# objects are SSE-KMS under alias/platform-log-archive and cannot be read
+# without it. So decryption is permitted for exactly three keys, and only when
+# S3 is the caller:
+#
+#   alias/platform-log-archive     the trail, Config and flow log archives,
+#                                  and the digest send records
+#   alias/platform-archive-replica their us-west-2 copies
+#   alias/platform-audit-query     Athena results (security/50-trail-query.yaml)
+#
+# Two Denies hold that line rather than the Allow alone, because the managed
+# policies and any future attachment could otherwise widen it:
+#
+#   - any key WITHOUT one of those aliases (and aws/dynamodb, below), and
+#   - any use not made THROUGH S3 or DynamoDB -- so a direct kms:Decrypt of
+#     ciphertext lifted from somewhere else fails even under the right key.
+#
+# aws/dynamodb is on the list because the evidence tables use the AWS-managed
+# key (a recorded deviation from design 04 -- see docs/auditor-guide.md §11),
+# and DynamoDB decrypts in the caller's context. Without it, the table reads
+# granted below would be granted and unusable. It cannot be used for anything
+# else: it is an AWS-managed key, usable only by DynamoDB.
+#
+# The registry is NOT readable, though it is a platform table. Its client
+# records hold contact details, which an auditor does not need and the
+# registry's own key (alias/platform-registry) is not on the list above. The
+# explicit deny on the table is the second layer.
+#
+# ---------------------------------------------------------------------------
+# Not proved yet
+# ---------------------------------------------------------------------------
+# SecurityReadOnly's denies were proved against real resources (see that
+# template). This set's must be too, before an external assessor is given it:
+# the allowed reads succeed against real objects, and every deny returns
+# AccessDenied against a real resource rather than a not-found. In particular
+# the two decryption denies -- a condition key that silently fails to match
+# would leave this set reading every key in the estate.
+#
+# One behaviour is UNVERIFIED and decides whether the evidence-table reads
+# work at all: whether DynamoDB's use of aws/dynamodb is evaluated against
+# this set's identity policy, and if so whether kms:ResourceAliases carries
+# alias/aws/dynamodb for an AWS-managed key. If the table reads fail with a
+# KMS AccessDenied, that is the cause -- and the fix is the CMK migration the
+# §11 deviation already wants, not a wider deny exemption.
+
+Parameters:
+
+  InstanceArn:
+    Type: String
+    Description: IAM Identity Center instance ARN. Published at /platform/identity/instance-arn.
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16}$'
+
+  GroupId:
+    Type: String
+    Description: >-
+      Identity Center group id for Auditors. A GROUP, never a user. Membership
+      is configuration in config/identity.env.
+    AllowedPattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-zA-Z-]{1,47}$'
+
+  SsmPrefix:
+    Type: String
+    Default: /platform
+    Description: SSM Parameter Store namespace for published platform facts.
+    AllowedPattern: '^/[a-zA-Z0-9._/-]+$'
+
+Resources:
+
+  AuditEvidenceReaderPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: AuditEvidenceReader
+      Description: >-
+        Audit engagements. SecurityReadOnly's view plus archived CloudTrail,
+        platform log contents, evidence tables and execution history. No
+        write, no secret values, no tenant data, no role assumption.
+      InstanceArn: !Ref InstanceArn
+
+      # Four hours: this set cannot change anything, and an auditor working a
+      # sample through five systems should not re-authenticate mid-sample.
+      # Literal, for the reason given in 30-security-readonly.yaml.
+      SessionDuration: PT4H
+
+      RelayStateType: 'https://us-east-2.console.aws.amazon.com/securityhub/home?region=us-east-2#/summary'
+
+      ManagedPolicies:
+        - arn:aws:iam::aws:policy/SecurityAudit
+        - arn:aws:iam::aws:policy/job-function/ViewOnlyAccess
+
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+
+          # =================================================================
+          # ALLOWS -- each one scoped to a platform-named resource
+          # =================================================================
+
+          # -----------------------------------------------------------------
+          # A1. The archives: list, read, and read the lock on each object
+          # -----------------------------------------------------------------
+          # GetObjectRetention and GetObjectLegalHold are what turn "the
+          # bucket defaults to COMPLIANCE" into "this object is locked until
+          # this date", which is the claim an auditor actually tests.
+          # GetObjectVersion because Object Lock is per version.
+          #
+          # Three bucket families, replicas included by the wildcard:
+          # altdig-log-archive-* (trail, and digest send records under
+          # digest-evidence/), altdig-config-archive-*, altdig-flow-logs-*.
+          - Sid: ReadTheArchives
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:GetObjectRetention'
+              - 's3:GetObjectLegalHold'
+              - 's3:GetObjectAttributes'
+              - 's3:GetObjectVersionAttributes'
+              - 's3:ListBucket'
+              - 's3:ListBucketVersions'
+              - 's3:GetBucketLocation'
+            Resource:
+              - 'arn:aws:s3:::altdig-log-archive-*'
+              - 'arn:aws:s3:::altdig-log-archive-*/*'
+              - 'arn:aws:s3:::altdig-config-archive-*'
+              - 'arn:aws:s3:::altdig-config-archive-*/*'
+              - 'arn:aws:s3:::altdig-flow-logs-*'
+              - 'arn:aws:s3:::altdig-flow-logs-*/*'
+
+          # -----------------------------------------------------------------
+          # A2. Decrypt the archives, through S3 only
+          # -----------------------------------------------------------------
+          # Resource is every key; the alias condition narrows it to three.
+          # Key ARNs are random and differ per account and region, so an
+          # alias condition is the only way to name these keys without
+          # hardcoding an account id.
+          - Sid: DecryptArchivesThroughS3
+            Effect: Allow
+            Action:
+              - 'kms:Decrypt'
+            Resource: 'arn:aws:kms:*:*:key/*'
+            Condition:
+              'ForAnyValue:StringEquals':
+                'kms:ResourceAliases':
+                  - alias/platform-log-archive
+                  - alias/platform-archive-replica
+                  - alias/platform-audit-query
+              StringLike:
+                'kms:ViaService': 's3.*.amazonaws.com'
+
+          # -----------------------------------------------------------------
+          # A3. Query the trail: Athena workgroup platform-audit
+          # -----------------------------------------------------------------
+          # The workgroup, its Glue table and its results bucket are in
+          # security/50-trail-query.yaml in Log Archive. Scoped to that one
+          # workgroup: the account's `primary` workgroup has no enforced
+          # result location or encryption, and is not granted.
+          - Sid: QueryTheTrail
+            Effect: Allow
+            Action:
+              - 'athena:StartQueryExecution'
+              - 'athena:StopQueryExecution'
+              - 'athena:GetQueryExecution'
+              - 'athena:GetQueryResults'
+              - 'athena:GetQueryRuntimeStatistics'
+              - 'athena:ListQueryExecutions'
+              - 'athena:BatchGetQueryExecution'
+              - 'athena:GetWorkGroup'
+              - 'athena:ListNamedQueries'
+              - 'athena:GetNamedQuery'
+              - 'athena:BatchGetNamedQuery'
+            Resource: 'arn:aws:athena:*:*:workgroup/platform-audit'
+
+          # Catalog-level reads Athena makes before it reaches a workgroup.
+          # They have no workgroup resource to scope to.
+          - Sid: AthenaCatalogReads
+            Effect: Allow
+            Action:
+              - 'athena:ListWorkGroups'
+              - 'athena:ListDataCatalogs'
+              - 'athena:GetDataCatalog'
+              - 'athena:ListDatabases'
+              - 'athena:GetDatabase'
+              - 'athena:ListTableMetadata'
+              - 'athena:GetTableMetadata'
+              - 'athena:ListEngineVersions'
+            Resource: '*'
+
+          - Sid: GlueTableReads
+            Effect: Allow
+            Action:
+              - 'glue:GetDatabase'
+              - 'glue:GetDatabases'
+              - 'glue:GetTable'
+              - 'glue:GetTables'
+              - 'glue:GetPartition'
+              - 'glue:GetPartitions'
+            Resource:
+              - 'arn:aws:glue:*:*:catalog'
+              - 'arn:aws:glue:*:*:database/platform_audit'
+              - 'arn:aws:glue:*:*:table/platform_audit/*'
+
+          # The one write this set holds: Athena writes the caller's query
+          # results, as the caller, into the results bucket. Scoped to that
+          # bucket's results/ prefix. Encrypting them needs GenerateDataKey
+          # on the results key, through S3, and nothing else.
+          - Sid: WriteOwnQueryResults
+            Effect: Allow
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+              - 's3:AbortMultipartUpload'
+              - 's3:ListMultipartUploadParts'
+            Resource: 'arn:aws:s3:::altdig-audit-query-*/results/*'
+
+          - Sid: ListQueryResultsBucket
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetBucketLocation'
+            Resource: 'arn:aws:s3:::altdig-audit-query-*'
+
+          - Sid: EncryptQueryResultsThroughS3
+            Effect: Allow
+            Action:
+              - 'kms:GenerateDataKey'
+            Resource: 'arn:aws:kms:*:*:key/*'
+            Condition:
+              'ForAnyValue:StringEquals':
+                'kms:ResourceAliases': alias/platform-audit-query
+              StringLike:
+                'kms:ViaService': 's3.*.amazonaws.com'
+
+          # -----------------------------------------------------------------
+          # A4. Platform log contents
+          # -----------------------------------------------------------------
+          # Every platform function logs to /aws/lambda/platform-*, and the
+          # platform's own record streams sit under /aws/platform/. Step
+          # Functions under /aws/vendedlogs/states/platform-*. Tenant log
+          # groups match none of these, in any account.
+          - Sid: ReadPlatformLogs
+            Effect: Allow
+            Action:
+              - 'logs:GetLogEvents'
+              - 'logs:FilterLogEvents'
+              - 'logs:StartQuery'
+              - 'logs:GetLogGroupFields'
+              - 'logs:GetLogRecord'
+            Resource:
+              - 'arn:aws:logs:*:*:log-group:/aws/lambda/platform-*'
+              - 'arn:aws:logs:*:*:log-group:/aws/lambda/platform-*:log-stream:*'
+              - 'arn:aws:logs:*:*:log-group:/aws/platform/*'
+              - 'arn:aws:logs:*:*:log-group:/aws/platform/*:log-stream:*'
+              - 'arn:aws:logs:*:*:log-group:/aws/vendedlogs/states/platform-*'
+              - 'arn:aws:logs:*:*:log-group:/aws/vendedlogs/states/platform-*:log-stream:*'
+
+          # Query results and stop are keyed by query id, not by log group.
+          # Returning results needs the StartQuery above, which is scoped.
+          - Sid: LogsInsightsQueryLifecycle
+            Effect: Allow
+            Action:
+              - 'logs:GetQueryResults'
+              - 'logs:StopQuery'
+              - 'logs:DescribeQueries'
+            Resource: '*'
+
+          # -----------------------------------------------------------------
+          # A5. The evidence tables
+          # -----------------------------------------------------------------
+          # Enumerated by name, NOT `table/platform-*`: that pattern would
+          # include platform-registry, which this set must not read.
+          - Sid: ReadEvidenceTables
+            Effect: Allow
+            Action:
+              - 'dynamodb:GetItem'
+              - 'dynamodb:BatchGetItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+            Resource:
+              - 'arn:aws:dynamodb:*:*:table/platform-evidence-ledger'
+              - 'arn:aws:dynamodb:*:*:table/platform-evidence-ledger/index/*'
+              - 'arn:aws:dynamodb:*:*:table/platform-evidence-sequence'
+              - 'arn:aws:dynamodb:*:*:table/platform-change-events'
+              - 'arn:aws:dynamodb:*:*:table/platform-change-events/index/*'
+              - 'arn:aws:dynamodb:*:*:table/platform-quorum-evidence'
+              - 'arn:aws:dynamodb:*:*:table/platform-quorum-evidence/index/*'
+              - 'arn:aws:dynamodb:*:*:table/platform-security-incidents'
+              - 'arn:aws:dynamodb:*:*:table/platform-security-incidents/index/*'
+              - 'arn:aws:dynamodb:*:*:table/platform-hipaa-eligibility-state'
+              - 'arn:aws:dynamodb:*:*:table/platform-remediation-history'
+
+          # -----------------------------------------------------------------
+          # A6. Execution history: containment, quorum, restore, exercises
+          # -----------------------------------------------------------------
+          - Sid: ReadPlatformExecutions
+            Effect: Allow
+            Action:
+              - 'states:DescribeExecution'
+              - 'states:GetExecutionHistory'
+              - 'states:DescribeStateMachineForExecution'
+            Resource: 'arn:aws:states:*:*:execution:platform-*:*'
+
+          # -----------------------------------------------------------------
+          # A7. Published platform configuration
+          # -----------------------------------------------------------------
+          # Approver lists, the tier map, notification windows. Every
+          # parameter under /platform/ is a plain String today; the
+          # decryption denies below keep any SecureString added later
+          # unreadable, which is the job that deny was written for in
+          # 30-security-readonly.yaml.
+          - Sid: ReadPlatformParameters
+            Effect: Allow
+            Action:
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+              - 'ssm:GetParameterHistory'
+            Resource: 'arn:aws:ssm:*:*:parameter/platform/*'
+
+          # -----------------------------------------------------------------
+          # A8. Detail the managed policies stop short of
+          # -----------------------------------------------------------------
+          # macie2:GetFindings is the finding (where, what type, how many),
+          # not the matched values -- those are GetSensitiveDataOccurrences,
+          # denied below. The SSM reads are patch baselines and documents.
+          - Sid: FindingAndBaselineDetail
+            Effect: Allow
+            Action:
+              - 'macie2:GetFindings'
+              - 'ssm:GetPatchBaseline'
+              - 'ssm:GetDocument'
+            Resource: '*'
+
+          # =================================================================
+          # DENIES -- SecurityReadOnly's, plus what this set's Allows open
+          # =================================================================
+
+          # D1 and D2 are SecurityReadOnly's statements 1 and 1a verbatim. A
+          # second copy is a drift risk; it is accepted here because a
+          # permission set cannot reference another's inline policy, and
+          # because the alternative -- a customer-managed policy in every
+          # account -- would be a third thing to deploy per account. If one
+          # changes, change both.
+          - Sid: DenyIdentityAndOrganizationMutation
+            Effect: Deny
+            Action:
+              - 'iam:Create*'
+              - 'iam:Delete*'
+              - 'iam:Put*'
+              - 'iam:Update*'
+              - 'iam:Attach*'
+              - 'iam:Detach*'
+              - 'iam:Add*'
+              - 'iam:Remove*'
+              - 'iam:Set*'
+              - 'iam:Change*'
+              - 'iam:Upload*'
+              - 'iam:Enable*'
+              - 'iam:Deactivate*'
+              - 'iam:Reset*'
+              - 'iam:Tag*'
+              - 'iam:Untag*'
+              - 'sso:Create*'
+              - 'sso:Delete*'
+              - 'sso:Put*'
+              - 'sso:Update*'
+              - 'sso:Attach*'
+              - 'sso:Detach*'
+              - 'sso:Provision*'
+              - 'sso:Tag*'
+              - 'sso:Untag*'
+              - 'identitystore:Create*'
+              - 'identitystore:Delete*'
+              - 'identitystore:Update*'
+              - 'organizations:Create*'
+              - 'organizations:Delete*'
+              - 'organizations:Update*'
+              - 'organizations:Attach*'
+              - 'organizations:Detach*'
+              - 'organizations:Move*'
+              - 'organizations:Enable*'
+              - 'organizations:Disable*'
+              - 'organizations:Remove*'
+              - 'organizations:Invite*'
+              - 'organizations:Accept*'
+              - 'organizations:Decline*'
+              - 'organizations:Leave*'
+              - 'organizations:Register*'
+              - 'organizations:Deregister*'
+              - 'organizations:Close*'
+              - 'organizations:Tag*'
+              - 'organizations:Untag*'
+              - 'sso-directory:*'
+            Resource: '*'
+
+          - Sid: DenyDisablingTheControls
+            Effect: Deny
+            Action:
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DisableKey'
+              - 'kms:DisableKeyRotation'
+              - 'kms:PutKeyPolicy'
+              - 'cloudtrail:StopLogging'
+              - 'cloudtrail:DeleteTrail'
+              - 'cloudtrail:UpdateTrail'
+              - 'config:StopConfigurationRecorder'
+              - 'config:DeleteConfigurationRecorder'
+              - 'config:DeleteDeliveryChannel'
+              - 'guardduty:DeleteDetector'
+              - 'guardduty:DisassociateFromMasterAccount'
+              - 'securityhub:DisableSecurityHub'
+              - 'securityhub:DeleteMembers'
+              - 'access-analyzer:DeleteAnalyzer'
+              - 'macie2:DisableMacie'
+              - 'inspector2:Disable'
+              - 'backup:DeleteBackupVault'
+              - 'backup:DeleteBackupPlan'
+              - 'backup:DeleteRecoveryPoint'
+              - 'backup:DeleteBackupVaultLockConfiguration'
+              - 's3:PutBucketPolicy'
+              - 's3:DeleteBucketPolicy'
+              - 's3:BypassGovernanceRetention'
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+              - 's3:PutObjectRetention'
+              - 's3:PutObjectLegalHold'
+              - 'logs:DeleteLogGroup'
+              - 'logs:DeleteRetentionPolicy'
+            Resource: '*'
+
+          - Sid: DenySecretValues
+            Effect: Deny
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:BatchGetSecretValue'
+              - 'macie2:GetSensitiveDataOccurrences'
+            Resource: '*'
+
+          # Decryption, part 1: only the listed keys, ever. ForAllValues over
+          # an empty alias set evaluates true, so a key with NO alias is
+          # denied too -- which is the safe direction.
+          - Sid: DenyDecryptionOutsideTheArchiveKeys
+            Effect: Deny
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:GenerateDataKeyWithoutPlaintext'
+              - 'kms:GenerateDataKeyPair'
+              - 'kms:GenerateDataKeyPairWithoutPlaintext'
+              - 'kms:ReEncryptFrom'
+              - 'kms:ReEncryptTo'
+            Resource: '*'
+            Condition:
+              'ForAllValues:StringNotEquals':
+                'kms:ResourceAliases':
+                  - alias/platform-log-archive
+                  - alias/platform-archive-replica
+                  - alias/platform-audit-query
+                  - alias/aws/dynamodb
+
+          # Decryption, part 2: never directly. Only S3 or DynamoDB may make
+          # the call on this set's behalf. A request with no kms:ViaService
+          # at all -- a direct API call -- does not match StringLike, so it
+          # is denied.
+          - Sid: DenyDirectDecryption
+            Effect: Deny
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:GenerateDataKeyWithoutPlaintext'
+              - 'kms:GenerateDataKeyPair'
+              - 'kms:GenerateDataKeyPairWithoutPlaintext'
+              - 'kms:ReEncryptFrom'
+              - 'kms:ReEncryptTo'
+            Resource: '*'
+            Condition:
+              StringNotLike:
+                'kms:ViaService':
+                  - 's3.*.amazonaws.com'
+                  - 'dynamodb.*.amazonaws.com'
+
+          - Sid: DenyRoleAssumption
+            Effect: Deny
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:AssumeRoleWithSAML'
+              - 'sts:AssumeRoleWithWebIdentity'
+              - 'sts:GetFederationToken'
+            Resource: '*'
+
+          # The registry holds client contact details. Not granted above;
+          # denied here so it stays unreadable if a later Allow is written
+          # as `table/platform-*`.
+          - Sid: DenyRegistryReads
+            Effect: Deny
+            Action:
+              - 'dynamodb:GetItem'
+              - 'dynamodb:BatchGetItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+              - 'dynamodb:GetRecords'
+              - 'dynamodb:PartiQLSelect'
+              - 'dynamodb:ExportTableToPointInTime'
+            Resource:
+              - 'arn:aws:dynamodb:*:*:table/platform-registry'
+              - 'arn:aws:dynamodb:*:*:table/platform-registry/*'
+
+  PermissionSetArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/audit-evidence-reader'
+      Type: String
+      Value: !GetAtt AuditEvidenceReaderPermissionSet.PermissionSetArn
+      Description: >-
+        AuditEvidenceReader permission set ARN. Read by
+        scripts/deploy-audit-access.sh.
+
+  GroupIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/audit-evidence-reader/group'
+      Type: String
+      Value: !Ref GroupId
+      Description: >-
+        Identity Center group assigned AuditEvidenceReader. A group id is not
+        personal data; its membership is, and lives in config/identity.env.
+
+Outputs:
+
+  PermissionSetArn:
+    Description: Read by scripts/deploy-audit-access.sh.
+    Value: !GetAtt AuditEvidenceReaderPermissionSet.PermissionSetArn
+    Export:
+      Name: !Sub '${AWS::StackName}-PermissionSetArn'
+
+  GroupId:
+    Description: The group this permission set is assigned to.
+    Value: !Ref GroupId

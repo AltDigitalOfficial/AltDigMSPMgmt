@@ -9,8 +9,8 @@ document before implementing against it. The build sequence is
 [design/claude-code-prompts.md](design/claude-code-prompts.md).
 
 Note: several documents the package cross-references are **not yet present** —
-05 (Resilience), the Truveon functional assumptions, and four of six diagrams
-(only `account-topology` and `entity-chain` exist). Where a prompt cites a
+the Truveon functional assumptions, and four of six diagrams (only
+`account-topology` and `entity-chain` exist). Where a prompt cites a
 missing document, say so rather than inventing its contents.
 
 Supplied 2026-09-17: 01 (Design Principles), 06 (Observability),
@@ -25,10 +25,11 @@ the evidence pipeline's four completeness controls in prose; the
 is present, including the four-outcome reconciliation table and the five quorum
 conditions, so Phase 8 needed nothing invented.
 
-**05 is the one that still hurts.** Phase 6 was built against its absence:
-`recovery/` carries `DESIGN 05` markers where its content would have gone, and
-B-043 (no backup infrastructure), B-044 (in-guest validation) and open item V4
-(what "isolated" means for a restore test VPC) are all waiting on it.
+Supplied 2026-09-22: 05 (Resilience). Phase 6 had been built against its
+absence; the `DESIGN 05` markers in `recovery/` were resolved when it arrived
+(`b6b8c1c`). It defined open item V4 (a restore-test VPC is isolated *and* a
+test restore cannot reach production) and unblocked B-043, which is still only
+partly built. It did not unblock B-044 (in-guest restore validation).
 
 ## Hard rules
 

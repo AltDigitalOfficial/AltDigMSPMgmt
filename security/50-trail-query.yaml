@@ -1,0 +1,441 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - a queryable view of the organization trail, in
+  the Log Archive account. Athena workgroup platform-audit, a Glue table over
+  the archive with partition projection, an encrypted results bucket, and the
+  queries an auditor asks first.
+
+# ---------------------------------------------------------------------------
+# Why it exists
+# ---------------------------------------------------------------------------
+# The org trail is retained for six years under COMPLIANCE Object Lock, and
+# until this template nobody could search it. CloudTrail is not delivered to
+# CloudWatch Logs (B-005), and LookupEvents reaches ninety days, one account
+# and one region at a time. So six years of retention bought ninety days of
+# answerable questions -- and "show me every use of OrganizationAccountAccess-
+# Role over the period" was not one of them.
+#
+# Built for the SOC 2 / HIPAA dress rehearsal (docs/auditor-guide.md §1.3),
+# used through the AuditEvidenceReader permission set
+# (identity/40-audit-evidence-reader.yaml). Nothing here writes to the archive
+# or changes it; the trail bucket is read, never touched.
+#
+# ---------------------------------------------------------------------------
+# Partition projection, and why the account list is a parameter
+# ---------------------------------------------------------------------------
+# An org trail writes
+#
+#     AWSLogs/<org-id>/<account-id>/CloudTrail/<region>/yyyy/MM/dd/
+#
+# Projection computes partitions from that template at query time, so there
+# is no crawler and no MSCK REPAIR to forget. But an `account` partition needs
+# the set of values, and a template must not hardcode account ids.
+#
+# So AccountIds is supplied by scripts/deploy-audit-access.sh, derived from
+# Organizations at deploy time -- the same derive-don't-copy rule as the
+# SecurityReadOnly assignments. A newly vested account is invisible to this
+# table until the next deploy, and the script says so. Queries that filter on
+# `account` scan only those prefixes, which is what keeps them cheap.
+#
+# Regions are every commercial region, not the three allowed ones. The trail
+# is multi-region, so a call attempted in a denied region IS recorded -- as a
+# denial -- and an auditor testing the region SCP wants to find exactly those.
+#
+# ---------------------------------------------------------------------------
+# Cost
+# ---------------------------------------------------------------------------
+# Athena bills per byte scanned. A query with no `dt` filter scans six
+# years of the estate. The workgroup enforces a per-query cutoff so one
+# careless query cannot run up an unbounded bill; raise it deliberately for a
+# whole-period query rather than by default. Trail objects move to Glacier
+# Instant Retrieval at 90 days, which Athena reads directly, with a per-GB
+# retrieval charge on top of the scan.
+
+Parameters:
+
+  OrganizationId:
+    Type: String
+    Description: Organization id, from organizations describe-organization. Part of every trail object key.
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+
+  AccountIds:
+    Type: CommaDelimitedList
+    Description: >-
+      Every account in the Organization, any status, derived from Organizations
+      by scripts/deploy-audit-access.sh. Accounts that have since closed still
+      have trail history, so status is not filtered.
+
+  TrailRegions:
+    Type: CommaDelimitedList
+    Default: 'us-east-1,us-east-2,us-west-1,us-west-2,ca-central-1,ca-west-1,eu-west-1,eu-west-2,eu-west-3,eu-central-1,eu-central-2,eu-north-1,eu-south-1,eu-south-2,ap-south-1,ap-south-2,ap-southeast-1,ap-southeast-2,ap-southeast-3,ap-southeast-4,ap-southeast-5,ap-northeast-1,ap-northeast-2,ap-northeast-3,ap-east-1,sa-east-1,me-south-1,me-central-1,il-central-1,af-south-1,mx-central-1'
+    Description: >-
+      Regions projected. All commercial regions, deliberately: denied-region
+      attempts are recorded by the multi-region trail and are evidence for the
+      region SCP.
+
+  TrailStartDate:
+    Type: String
+    Default: '2026/09/01'
+    Description: First day projected, yyyy/MM/dd. Earlier than the trail's first object is harmless.
+    AllowedPattern: '^[0-9]{4}/[0-9]{2}/[0-9]{2}$'
+
+  BytesScannedCutoffPerQuery:
+    Type: Number
+    Default: 53687091200
+    MinValue: 10000000
+    Description: >-
+      Per-query scan limit in bytes. Default 50 GiB. A query over the cutoff
+      is cancelled, not billed further.
+
+  ResultRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
+    Description: >-
+      Days a query result is kept. Results are working copies derived from
+      the archive, not evidence -- the archive is the evidence, and it is
+      locked. An auditor who needs a result kept puts it in the working
+      papers.
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Results key and bucket
+  # -------------------------------------------------------------------------
+  # A key of its own rather than the log archive key. Results are written by
+  # the auditor's own identity, which therefore needs GenerateDataKey on the
+  # results key. Granting that on the log archive key would let an auditor
+  # identity encrypt objects as though they were archive content -- a small
+  # thing, and an unnecessary one.
+  QueryResultsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts Athena query results over the platform log archive
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # Root delegation, for the reason recorded at length on the log
+          # archive key in 10-log-archive.yaml: a key whose policy omits
+          # something needed later can become permanently unmanageable.
+          # Access is then decided by IAM in this account -- which is where
+          # AuditEvidenceReader's alias-and-ViaService conditions apply.
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+
+  QueryResultsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-audit-query
+      TargetKeyId: !Ref QueryResultsKey
+
+  QueryResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-audit-query-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref QueryResultsKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      # Expiry of derived working copies, by S3, on a schedule. Not
+      # remediation and not a deletion anybody performs: the archive these
+      # results are computed from is untouched and locked.
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-query-results
+            Status: Enabled
+            Prefix: results/
+            ExpirationInDays: !Ref ResultRetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  QueryResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref QueryResultsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt QueryResultsBucket.Arn
+              - !Sub '${QueryResultsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # -------------------------------------------------------------------------
+  # Workgroup
+  # -------------------------------------------------------------------------
+  # EnforceWorkGroupConfiguration: a client cannot point results somewhere
+  # else or turn encryption off. Without it the result location is a client
+  # setting, and results of a query over the trail could be written to any
+  # bucket the caller can write.
+  AuditWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: platform-audit
+      Description: Queries over the organization trail, for audit. Results expire; the archive does not.
+      State: ENABLED
+      RecursiveDeleteOption: false
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: !Ref BytesScannedCutoffPerQuery
+        EngineVersion:
+          SelectedEngineVersion: AUTO
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${QueryResultsBucket}/results/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_KMS
+            KmsKey: !GetAtt QueryResultsKey.Arn
+
+  # -------------------------------------------------------------------------
+  # Catalog
+  # -------------------------------------------------------------------------
+  AuditDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: platform_audit
+        Description: Read-only views over the platform log archive.
+
+  # Column set follows AWS's documented CloudTrail table for Athena. Field
+  # names inside structs are lowercase because Glue stores types lowercase;
+  # the JSON SerDe matches them case-insensitively.
+  CloudTrailTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref AuditDatabase
+      TableInput:
+        Name: cloudtrail
+        Description: !Sub 'Organization trail ${OrganizationId}, partitioned by account, region and day.'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: cloudtrail
+          projection.enabled: 'true'
+          projection.account.type: enum
+          projection.account.values: !Join [',', !Ref AccountIds]
+          projection.region.type: enum
+          projection.region.values: !Join [',', !Ref TrailRegions]
+          projection.dt.type: date
+          projection.dt.format: yyyy/MM/dd
+          projection.dt.range: !Sub '${TrailStartDate},NOW'
+          projection.dt.interval: '1'
+          projection.dt.interval.unit: DAYS
+          storage.location.template: !Sub 's3://altdig-log-archive-${AWS::AccountId}/AWSLogs/${OrganizationId}/${!account}/CloudTrail/${!region}/${!dt}'
+        # `dt`, not `timestamp` as AWS's own example has it: TIMESTAMP is a
+        # type keyword in Athena's SQL, and an unquoted `timestamp` in a WHERE
+        # clause is the first thing an auditor typing a query would trip on.
+        PartitionKeys:
+          - { Name: account, Type: string }
+          - { Name: region, Type: string }
+          - { Name: dt, Type: string }
+        StorageDescriptor:
+          Location: !Sub 's3://altdig-log-archive-${AWS::AccountId}/AWSLogs/${OrganizationId}/'
+          InputFormat: com.amazon.emr.cloudtrail.CloudTrailInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hive.hcatalog.data.JsonSerDe
+          Columns:
+            - { Name: eventversion, Type: string }
+            - Name: useridentity
+              Type: >-
+                struct<type:string,principalid:string,arn:string,accountid:string,invokedby:string,accesskeyid:string,username:string,onbehalfof:struct<userid:string,identitystorearn:string>,sessioncontext:struct<attributes:struct<mfaauthenticated:string,creationdate:string>,sessionissuer:struct<type:string,principalid:string,arn:string,accountid:string,username:string>,sourceidentity:string,ec2roledelivery:string,webidfederationdata:struct<federatedprovider:string,attributes:map<string,string>>>>
+            - { Name: eventtime, Type: string }
+            - { Name: eventsource, Type: string }
+            - { Name: eventname, Type: string }
+            - { Name: awsregion, Type: string }
+            - { Name: sourceipaddress, Type: string }
+            - { Name: useragent, Type: string }
+            - { Name: errorcode, Type: string }
+            - { Name: errormessage, Type: string }
+            - { Name: requestparameters, Type: string }
+            - { Name: responseelements, Type: string }
+            - { Name: additionaleventdata, Type: string }
+            - { Name: requestid, Type: string }
+            - { Name: eventid, Type: string }
+            - { Name: readonly, Type: string }
+            - { Name: resources, Type: 'array<struct<arn:string,accountid:string,type:string>>' }
+            - { Name: eventtype, Type: string }
+            - { Name: apiversion, Type: string }
+            - { Name: recipientaccountid, Type: string }
+            - { Name: serviceeventdetails, Type: string }
+            - { Name: sharedeventid, Type: string }
+            - { Name: vpcendpointid, Type: string }
+            - { Name: vpcendpointaccountid, Type: string }
+            - { Name: eventcategory, Type: string }
+            - { Name: tlsdetails, Type: 'struct<tlsversion:string,ciphersuite:string,clientprovidedhostheader:string>' }
+            # "true" when the call was made from a console session. The
+            # digest's ClickOps signal reads it (ADR-004).
+            - { Name: sessioncredentialfromconsole, Type: string }
+
+  # -------------------------------------------------------------------------
+  # The first questions
+  # -------------------------------------------------------------------------
+  # Each answers a question docs/auditor-guide.md tells the auditor to ask.
+  # Every one filters on `dt`, so each scans a bounded window. Change
+  # the 90 to widen it.
+
+  QueryRootActivity:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: root-user-activity
+      Description: Every call made as an account root user. Guide §3. Member roots are denied by SCP 03, so expect denials there.
+      WorkGroup: !Ref AuditWorkGroup
+      Database: !Ref AuditDatabase
+      QueryString: |
+        SELECT eventtime, recipientaccountid, awsregion, eventname, errorcode, sourceipaddress, useragent
+        FROM cloudtrail
+        WHERE useridentity.type = 'Root'
+          AND dt >= date_format(current_date - interval '90' day, '%Y/%m/%d')
+        ORDER BY eventtime DESC
+
+  QueryOaarUse:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: organization-account-access-role-use
+      Description: Who assumed OrganizationAccountAccessRole, into which account, when. Guide §3 and §4 -- the role is SCP-exempt.
+      WorkGroup: !Ref AuditWorkGroup
+      Database: !Ref AuditDatabase
+      QueryString: |
+        SELECT eventtime,
+               useridentity.arn AS caller,
+               recipientaccountid AS target_account,
+               json_extract_scalar(requestparameters, '$.roleSessionName') AS session_name,
+               errorcode
+        FROM cloudtrail
+        WHERE eventsource = 'sts.amazonaws.com'
+          AND eventname = 'AssumeRole'
+          AND json_extract_scalar(requestparameters, '$.roleArn') LIKE '%:role/OrganizationAccountAccessRole'
+          AND dt >= date_format(current_date - interval '90' day, '%Y/%m/%d')
+        ORDER BY eventtime DESC
+
+  QueryIdentityCenterSignIns:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: identity-center-authentication
+      Description: Identity Center sign-in and credential events with the credential type used. Evidence for or against MFA on every sign-in. Guide §3.
+      WorkGroup: !Ref AuditWorkGroup
+      Database: !Ref AuditDatabase
+      QueryString: |
+        SELECT eventtime, eventsource, eventname, errorcode,
+               useridentity.username AS username,
+               json_extract_scalar(additionaleventdata, '$.CredentialType') AS credential_type,
+               sourceipaddress
+        FROM cloudtrail
+        WHERE eventsource IN ('signin.amazonaws.com', 'sso.amazonaws.com')
+          AND eventname IN ('UserAuthentication', 'CredentialChallenge', 'CredentialVerification', 'Authenticate', 'ConsoleLogin')
+          AND dt >= date_format(current_date - interval '90' day, '%Y/%m/%d')
+        ORDER BY eventtime DESC
+
+  QueryAccessChanges:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: access-grants-and-revocations
+      Description: Permission set, assignment, group membership and user changes. The joiner/mover/leaver trail. Guide §3.
+      WorkGroup: !Ref AuditWorkGroup
+      Database: !Ref AuditDatabase
+      QueryString: |
+        SELECT eventtime, eventsource, eventname, errorcode,
+               useridentity.arn AS actor,
+               requestparameters
+        FROM cloudtrail
+        WHERE eventsource IN ('sso.amazonaws.com', 'identitystore.amazonaws.com', 'iam.amazonaws.com')
+          AND eventname IN (
+            'CreateAccountAssignment', 'DeleteAccountAssignment',
+            'CreatePermissionSet', 'DeletePermissionSet', 'UpdatePermissionSet',
+            'PutInlinePolicyToPermissionSet', 'DeleteInlinePolicyFromPermissionSet',
+            'AttachManagedPolicyToPermissionSet', 'DetachManagedPolicyFromPermissionSet',
+            'ProvisionPermissionSet',
+            'CreateGroupMembership', 'DeleteGroupMembership',
+            'CreateUser', 'DeleteUser', 'CreateGroup', 'DeleteGroup',
+            'CreateAccessKey', 'CreateLoginProfile')
+          AND dt >= date_format(current_date - interval '90' day, '%Y/%m/%d')
+        ORDER BY eventtime DESC
+
+  QueryControlTampering:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: control-tampering-attempts
+      Description: Attempts to stop, delete or weaken a control, allowed or denied, and by whom. Anything not by PlatformQuorumExecutor deserves a question. Guide §4 and §5.
+      WorkGroup: !Ref AuditWorkGroup
+      Database: !Ref AuditDatabase
+      QueryString: |
+        SELECT eventtime, recipientaccountid, eventsource, eventname, errorcode,
+               useridentity.arn AS actor,
+               useridentity.sessioncontext.sessionissuer.username AS role_name
+        FROM cloudtrail
+        WHERE eventname IN (
+            'StopLogging', 'DeleteTrail', 'UpdateTrail', 'PutEventSelectors',
+            'StopConfigurationRecorder', 'DeleteConfigurationRecorder', 'DeleteDeliveryChannel',
+            'DeleteDetector', 'DisassociateFromMasterAccount', 'DisableSecurityHub',
+            'ScheduleKeyDeletion', 'DisableKey', 'DisableKeyRotation', 'PutKeyPolicy',
+            'DeleteBackupVault', 'DeleteRecoveryPoint', 'DeleteBackupVaultLockConfiguration',
+            'DetachPolicy', 'DeletePolicy', 'UpdatePolicy',
+            'PutBucketPolicy', 'DeleteBucketPolicy', 'PutObjectRetention',
+            'DeleteLogGroup', 'DeleteRetentionPolicy', 'DeleteAlarms')
+          AND dt >= date_format(current_date - interval '90' day, '%Y/%m/%d')
+        ORDER BY eventtime DESC
+
+  QueryGuardrailDenials:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: guardrail-denials-by-account
+      Description: Calls refused by an SCP or RCP, counted by account, principal and action. Evidence the preventive controls are operating, not only configured. Guide §5.
+      WorkGroup: !Ref AuditWorkGroup
+      Database: !Ref AuditDatabase
+      QueryString: |
+        SELECT recipientaccountid, awsregion, eventname,
+               useridentity.sessioncontext.sessionissuer.username AS role_name,
+               CASE WHEN errormessage LIKE '%resource control policy%' THEN 'RCP' ELSE 'SCP' END AS policy_type,
+               count(*) AS denials,
+               min(eventtime) AS first_seen,
+               max(eventtime) AS last_seen
+        FROM cloudtrail
+        WHERE errorcode IN ('AccessDenied', 'AccessDeniedException', 'Client.UnauthorizedOperation', 'UnauthorizedOperation')
+          AND (errormessage LIKE '%service control policy%' OR errormessage LIKE '%resource control policy%')
+          AND dt >= date_format(current_date - interval '90' day, '%Y/%m/%d')
+        GROUP BY 1, 2, 3, 4, 5
+        ORDER BY denials DESC
+
+Outputs:
+
+  WorkGroupName:
+    Description: Athena workgroup. Select it in the Athena console before running a query.
+    Value: !Ref AuditWorkGroup
+
+  ResultsBucketName:
+    Value: !Ref QueryResultsBucket
+
+  QueryResultsKeyArn:
+    Value: !GetAtt QueryResultsKey.Arn
+
+  ProjectedAccounts:
+    Description: Accounts the table can see. Compare with the Organization after vesting.
+    Value: !Join [',', !Ref AccountIds]

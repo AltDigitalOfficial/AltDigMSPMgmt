@@ -518,8 +518,8 @@ You can see all of these. You cannot change, delete or recreate any of them:
 - The roles `TenantAppDeployer-*`, `OrganizationAccountAccessRole` and
   `stacksets-exec-*`
 - CloudTrail, the AWS Config recorder and rules, GuardDuty, Security Hub,
-  Macie, Inspector, Access Analyzer, VPC flow logs, DNS query logging and the
-  account-level log data protection policy
+  Macie, Inspector, Access Analyzer, the account-level log data protection
+  policy, and VPC flow logs and DNS query logging wherever they are enabled
 - The baseline VPC: its route tables, NACLs, subnets, VPC endpoints and
   platform-managed security groups
 - The account-level S3 public access block

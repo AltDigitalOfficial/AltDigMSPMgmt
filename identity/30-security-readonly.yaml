@@ -404,7 +404,7 @@ Resources:
   # A template with a fixed list of target accounts would be a second copy of
   # the account list, maintained by hand, and would silently stop covering the
   # estate the first time somebody vested a tenant and forgot. So assignment is
-  # derived from Organizations by scripts/assign-security-readonly.sh, which is
+  # derived from Organizations by scripts/deploy-security-access.sh (step 4), which is
   # the same rule cost_categories.py follows: derive from the source of truth,
   # do not keep a second copy of it.
   PermissionSetArnParameter:
@@ -415,7 +415,7 @@ Resources:
       Value: !GetAtt SecurityReadOnlyPermissionSet.PermissionSetArn
       Description: >-
         SecurityReadOnly permission set ARN. Read by
-        scripts/assign-security-readonly.sh.
+        scripts/deploy-security-access.sh.
 
   GroupIdParameter:
     Type: AWS::SSM::Parameter
@@ -430,7 +430,7 @@ Resources:
 Outputs:
 
   PermissionSetArn:
-    Description: Pass to scripts/assign-security-readonly.sh.
+    Description: Read by scripts/deploy-security-access.sh.
     Value: !GetAtt SecurityReadOnlyPermissionSet.PermissionSetArn
     Export:
       Name: !Sub '${AWS::StackName}-PermissionSetArn'
