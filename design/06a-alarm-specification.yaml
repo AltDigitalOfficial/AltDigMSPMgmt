@@ -217,6 +217,23 @@ resource_types_no_alarms:
   # would not supply them.
   - AWS::Backup::RecoveryPoint
 
+  # --- found in Arc8 dev, 2026-10-10 ---------------------------------------------
+  # The 2026-10-10 digest listed both as running with no monitoring. CloudTrail
+  # (SecurityReadOnly, LookupEvents) shows nobody built them: a developer
+  # opened the console home page on 2026-10-09 and Resource Explorer onboarded
+  # itself. The service-linked role AWSServiceRoleForResourceExplorer, session
+  # `onboarding`, ran CreateIndex, CreateView and AssociateDefaultView within
+  # ten seconds. Every tenant account will do the same the first time a person
+  # signs in to the console.
+  #
+  # Listed by type rather than in aws_default_resources, because the ids are
+  # random UUIDs, so there is no name to match. Nothing is lost either way:
+  # Resource Explorer publishes no CloudWatch metrics, so a tenant's own index
+  # or view would be just as unalarmable as AWS's. It holds metadata only (ARNs
+  # and tags), visible to principals who could already list those resources.
+  - AWS::ResourceExplorer2::Index
+  - AWS::ResourceExplorer2::View
+
 # =============================================================================
 # AWS DEFAULT RESOURCES -- known by NAME, not by type
 # =============================================================================
