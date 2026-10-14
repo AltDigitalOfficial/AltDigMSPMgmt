@@ -7730,3 +7730,42 @@ is correct to fail while evidence cannot reach Forensics.
 
 **To close:** the containment exercise passes, run on demand, with a target
 volume encrypted under `aws/ebs`.
+
+## B-171 · Build the manager digest design 11 specified and the developer guide promised
+
+**Open — designed 2026-10-14.** Design in
+[digest-design.md](digest-design.md); rulings in ADR-003 (Jamie), mechanism in
+ADR-004 (ratified by Jamie 2026-10-14).
+
+B-155 recorded that the digest carries alarms and exceptions only, while
+developer guide §4.15–4.16 tells Arc8's developers it lists services enabled,
+roles created, guardrail denials, telemetry gaps and HIPAA-eligibility lines.
+The 2026-10-10 Arc8 dev digest showed the cost: two "could not instrument"
+lines with a raw ARN and no creator. They turned out to be Resource Explorer,
+self-onboarded by AWS when a developer signed in to the console. One
+SecurityReadOnly `LookupEvents` call found that; the digest should have.
+
+**Scope:** gatherer in Audit, facts bucket, `PlatformDigestFactsQuery` in Log
+Archive, manager render (§7), CLIENT `timezone` attribute and its
+`dynamodb:Attributes` grant, tzdata bundled, `AccountsFactsMissing` and
+`platform-digest-facts-missing`, developer guide §4.15 aligned with what ships.
+
+**Blocked on:** `security/50-trail-query.yaml` deployed and proved, with a
+`sessioncredentialfromconsole` column added.
+
+**To close:** a manager digest for Arc8 dev whose resource lines carry
+who/what/when/how, checked against the 2026-10-09 Resource Explorer events,
+and a run with the facts document deliberately absent that still sends and
+says so.
+
+## B-172 · Platform digest: AltDigital's daily cross-tenant read
+
+**Open — designed 2026-10-14.** [digest-design.md §8](digest-design.md);
+ADR-003. Pipeline health, spec gaps with age and creator class, guardrail
+friction, ClickOps counts and trend, missing layer tag. Mountain time, to
+`DigestCc`, always sent. Builds on B-171's facts. Absorbs B-128's audience
+question: the layer-tag report goes to both readers.
+
+**To close:** one week of platform digests received, with the Resource
+Explorer pair shown as an aged spec gap carrying the AWS-created hint (or, if
+06a has classified it first, absent for that reason).
