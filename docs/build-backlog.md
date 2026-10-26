@@ -7853,3 +7853,57 @@ question: the layer-tag report goes to both readers.
 **To close:** one week of platform digests received, with the Resource
 Explorer pair shown as an aged spec gap carrying the AWS-created hint (or, if
 06a has classified it first, absent for that reason).
+
+---
+
+## B-174 · Security Hub's real findings, after 15.6b separates them from the noise
+
+**Observed** — 2026-10-26: every active failed control in all three regions,
+read from Audit and grouped by control and by whether the failing resource is
+the platform's. ADR-011 handles the noise by disabling controls no account can
+satisfy and suppressing platform-only findings per resource. What remains is
+real, and is listed here so it is not suppressed later by mistake.
+
+**Tenant (Arc8 dev, `624606539840`). Raise with the tenant, do not fix for them:**
+- EC2.19 (CRITICAL), EC2.13, EC2.18: three security groups allow unrestricted
+  inbound traffic, including to high-risk ports.
+- EC2.9, SSM.1: an instance with a public IPv4 address that Systems Manager
+  does not manage.
+
+**Platform, cheap:**
+- Account settings never applied outside Sandbox and Arc8 (B-139): SSM.7,
+  EC2.182, EC2.7, S3.1, IAM.7 and EC2.2 in the five platform accounts and the
+  management account. `apply-account-settings.sh` refuses the management
+  account by design; that account needs its own decision.
+- Account.1, the security alternate contact, in 9 accounts (B-139's open item:
+  Organizations trusted access for Account Management).
+- DynamoDB.6: deletion protection on `platform-registry` and the
+  `platform-remediation-history` tables. The registry above all.
+- SES.3: TLS required on the `platform-digest` configuration set.
+- SSM.6: CloudWatch logging for SSM Automation, an account-level setting in
+  every account. A candidate for `apply-account-settings.sh`.
+
+**Platform, needs a look:**
+- Audit's own detector: GuardDuty.5–.13 protection plans and Inspector.3/.4
+  Lambda scanning are not enabled on the delegated administrator itself. The
+  members get them through auto-enable; the admin is its own case (the B-008
+  shape again).
+- KMS.4: key rotation off on a management-account multi-region key and two
+  Canary keys, one of which is the harness fixture.
+- KMS.1, KMS.2: platform roles whose policies allow decrypt broadly. Narrow
+  them where the key is known.
+- S3.9: server access logging off on the canary-artifacts buckets. Decide
+  whether access logging is wanted on any platform bucket, given CloudTrail.
+- EC2.6 (flow logs, B-012) and EC2.15 (public IP on launch). Much of both is
+  the AWS default VPCs in every region, plus B-047's public subnets. Decide
+  whether default VPCs are removed from accounts at vesting.
+
+**Also, in the same unit as deploying 15.6b:**
+`scripts/enable-security-services.sh` still runs `enable-security-hub
+--enable-default-standards` and sets organization auto-enable with DEFAULT
+standards. Under central configuration both conflict with the policy. The
+Security Hub steps must change to "enable the service; the policy decides
+standards".
+
+**Build when** — the cheap items alongside 15.6b's deploy. The tenant items at
+the next Arc8 contact. The rest as 15.6 continues.

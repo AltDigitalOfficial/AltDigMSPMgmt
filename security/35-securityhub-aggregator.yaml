@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - Security Hub finding aggregator in the home
+  region, the prerequisite for central configuration. Deployed to the Audit
+  account. Phase 15.6b, step 1 of 3 (scripts/enable-securityhub-central.sh).
+
+# ---------------------------------------------------------------------------
+# Why central configuration (ADR-011)
+# ---------------------------------------------------------------------------
+# Until 15.6b Security Hub was configured LOCALLY. scripts/enable-security-
+# services.sh ran enable-security-hub --enable-default-standards in Audit and
+# the management account, and organization auto-enable gave every member
+# AWS's DEFAULT standards: FSBP and CIS 1.2.0. That had three consequences:
+#
+#   * The standards were whatever AWS's default happened to be, not a
+#     decision. CIS 1.2.0 contributed 14 CloudWatch metric-filter controls that
+#     fail in every account by design (B-147).
+#   * A member's own administrator could change its standards and controls,
+#     and nothing would put them back.
+#   * Findings stayed in the region they came from. Audit had no single view.
+#
+# Central configuration makes one policy (security/36-securityhub-policy.yaml)
+# the source of truth for every account.
+#
+# ---------------------------------------------------------------------------
+# Three steps, and why the middle one is not CloudFormation
+# ---------------------------------------------------------------------------
+#   1. This stack: the aggregator. AWS requires one before CENTRAL.
+#   2. An API call: switch the organization configuration to CENTRAL.
+#   3. security/36-securityhub-policy.yaml: the policy and its root
+#      association. Security Hub accepts a policy only once CENTRAL is on.
+#
+# Step 2 was a resource here (AWS::SecurityHub::OrganizationConfiguration),
+# and the first deploy, on 2026-10-26, failed with "Organization Configuration
+# resource already exists". The organization configuration is a singleton
+# that always exists, LOCAL by default, so CloudFormation cannot create it.
+# The stack rolled back cleanly, and the configuration stayed LOCAL with
+# auto-enable intact. The switch is now one idempotent call in
+# scripts/enable-securityhub-central.sh. verify-security-coverage.sh checks
+# that it holds, because CloudFormation drift detection cannot see it.
+
+Parameters:
+
+  LinkedRegions:
+    Type: CommaDelimitedList
+    Description: >-
+      The allowed regions OTHER than the home region, whose findings aggregate
+      into this one. From PLATFORM_ALLOWED_REGIONS minus PLATFORM_HOME_REGION.
+      Central configuration then applies in the home region and every linked
+      region.
+
+Resources:
+
+  # Also the single cross-region view Audit never had.
+  FindingAggregator:
+    Type: AWS::SecurityHub::FindingAggregator
+    Properties:
+      RegionLinkingMode: SPECIFIED_REGIONS
+      Regions: !Ref LinkedRegions
+
+Outputs:
+  AggregatorArn:
+    Description: Home-region finding aggregator.
+    Value: !GetAtt FindingAggregator.FindingAggregatorArn

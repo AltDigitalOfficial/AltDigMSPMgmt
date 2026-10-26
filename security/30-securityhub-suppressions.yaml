@@ -22,10 +22,22 @@ Description: >-
 # recorded, still exported, and reappears if the rule is removed. Nothing is
 # deleted.
 #
-# Suppressions for the wider B-147 list (CIS 3.x, CloudFormation.3/.4, the
-# endpoint and flow-log mediums) belong to phase 15.6's central configuration,
-# where several are better handled by disabling the control for member
-# accounts than by suppressing each finding.
+# Disabling a control and suppressing its findings are different tools
+# (ADR-011). A control is disabled in security/36-securityhub-policy.
+# yaml only when a platform decision makes it unsatisfiable in EVERY account,
+# tenants included. A finding is suppressed here when the control is right in
+# general and wrong only for the platform's own resources, so a tenant's
+# resource still raises it. CIS 3.x needs neither: CIS is no longer an enabled
+# standard (D-032).
+
+Parameters:
+
+  ManagementAccountId:
+    Type: String
+    Description: >-
+      The Organization management account, from PLATFORM_MGMT_ACCOUNT_ID in
+      config/platform.env. Scopes the IAM.6 suppression to that one root.
+    AllowedPattern: '^[0-9]{12}$'
 
 Resources:
 
@@ -80,6 +92,81 @@ Resources:
       #     --tags platform-managed=true,platform-layer=infrastructure
       # so the CLAUDE.md layer-tag rule holds. A redeploy does not remove them:
       # CloudFormation leaves alone tags it does not manage.
+
+  # CloudFormation.3 (termination protection) and .4 (a service role) are
+  # sound for stacks someone deploys by hand. The platform's stacks are
+  # deployed by StackSets and by deploy-to-account.sh. Where developers and
+  # tenant pipelines work (Sandbox and Members), SCP 08 denies deleting or
+  # changing StackSet-platform-* and platform-* stacks to all but the deployment
+  # principals. In the Security and Infrastructure accounts no developer or
+  # tenant principal has access at all, and SCP 08 is not attached. Termination
+  # protection on a StackSet instance would also block the StackSet's own
+  # updates and removals. 65 findings across 7 accounts on 2026-10-26, every
+  # one a platform stack. A tenant's stack still raises both.
+  SuppressPlatformStacksCloudFormation:
+    Type: AWS::SecurityHub::AutomationRule
+    Properties:
+      RuleName: platform-suppress-cfn3-cfn4-platform-stacks
+      RuleOrder: 20
+      RuleStatus: ENABLED
+      IsTerminal: false
+      Description: >-
+        CloudFormation.3/.4 on the platform's own stacks, deployed by
+        StackSets and protected by SCP 08 where developers work (ADR-011).
+      Criteria:
+        ComplianceSecurityControlId:
+          - { Value: CloudFormation.3, Comparison: EQUALS }
+          - { Value: CloudFormation.4, Comparison: EQUALS }
+        ResourceId:
+          - { Value: ':stack/StackSet-platform-', Comparison: CONTAINS }
+          - { Value: ':stack/platform-', Comparison: CONTAINS }
+        RecordState:
+          - { Value: ACTIVE, Comparison: EQUALS }
+      Actions:
+        - Type: FINDING_FIELDS_UPDATE
+          FindingFieldsUpdate:
+            Workflow:
+              Status: SUPPRESSED
+            Note:
+              Text: >-
+                Suppressed by platform-suppress-cfn3-cfn4-platform-stacks. A
+                platform stack, deployed by StackSet or deploy-to-account.sh.
+                SCP 08 protects it where developers work; elsewhere no tenant
+                principal has access. See ADR-011.
+              UpdatedBy: platform-automation-rule
+
+  # IAM.6 (hardware MFA on the root) on the management account is an accepted
+  # deviation: D-006 records that the root uses a virtual authenticator and why
+  # hardware tokens are not being ordered. Scoped to that one account by id, so
+  # a member account's root still raises it. Member roots are denied outright
+  # by SCP 03 in any case.
+  SuppressManagementRootIam6:
+    Type: AWS::SecurityHub::AutomationRule
+    Properties:
+      RuleName: platform-suppress-iam6-management-root
+      RuleOrder: 30
+      RuleStatus: ENABLED
+      IsTerminal: false
+      Description: >-
+        IAM.6 on the management account root: virtual MFA is accepted
+        deviation D-006.
+      Criteria:
+        ComplianceSecurityControlId:
+          - { Value: IAM.6, Comparison: EQUALS }
+        AwsAccountId:
+          - { Value: !Ref ManagementAccountId, Comparison: EQUALS }
+        RecordState:
+          - { Value: ACTIVE, Comparison: EQUALS }
+      Actions:
+        - Type: FINDING_FIELDS_UPDATE
+          FindingFieldsUpdate:
+            Workflow:
+              Status: SUPPRESSED
+            Note:
+              Text: >-
+                Suppressed by platform-suppress-iam6-management-root. Virtual
+                MFA on the management root is accepted deviation D-006.
+              UpdatedBy: platform-automation-rule
 
 Outputs:
   BoundaryIam1RuleArn:

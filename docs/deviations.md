@@ -1827,3 +1827,40 @@ the hourly attachment check.
 
 **Closes if** — the OU tree gains tier-level OUs for some other reason, at
 which point a child OU costs nothing extra.
+
+---
+
+## D-032 · Security Hub runs FSBP and NIST 800-53 r5, not CIS and PCI
+
+**Design position** — [04-security-controls-and-evidence.md](../design/04-security-controls-and-evidence.md)
+lists Security Hub with *"CIS/PCI standards"*.
+
+**Actual** — the central configuration policy (`security/35-securityhub-central-config.yaml`,
+ADR-011) enables AWS Foundational Security Best Practices v1.0.0 and NIST
+800-53 r5. CIS and PCI DSS are not enabled. Until 15.6b, every account ran
+FSBP and CIS 1.2.0, because those are AWS's defaults, not because anyone chose
+them.
+
+**Reason** — Jamie, 2026-10-26, option A of three:
+- NIST 800-53 r5 is what the HIPAA control mapping is built on (design 04's
+  HIPAA conformance pack, phase 15.6 step 4), and HIPAA is the framework the
+  first tenant brings.
+- FSBP covers the services themselves.
+- CIS adds little that FSBP does not already check. CIS 1.2.0's distinctive
+  controls are 14 CloudWatch metric filters that fail in every account by
+  design: the organization trail does not deliver to per-account CloudWatch
+  Logs, and detection is EventBridge to the router (B-147).
+- PCI DSS is out of scope. The founders' Phase 15 scope decisions put it
+  there, and D-025 halts PCI tenants at vesting.
+
+Option B (also CIS v3.0) was rejected as mostly duplicate findings for a
+recognisable name. Option C (keep CIS 1.2.0) was rejected because it keeps
+exactly the noise B-147 exists to remove.
+
+**Cost** — a client or auditor who asks for "the CIS benchmark" by name gets
+FSBP and NIST, plus a mapping, not a CIS score. If that becomes a commercial
+requirement, CIS v3.0 can be added to the policy without changing anything
+else.
+
+**Closing condition** — design 04 amended to name FSBP and NIST 800-53, or a
+tenant framework requires CIS or PCI. The PCI half would also close D-025.

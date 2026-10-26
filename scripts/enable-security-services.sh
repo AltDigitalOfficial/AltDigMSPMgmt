@@ -170,7 +170,10 @@ enable_in_management() {
     --query 'DetectorIds[0]' --output text 2>/dev/null | no_cr | sed 's/^None$//')"
   [[ -n "${d}" ]] || aws guardduty create-detector --enable --region "${region}" \
     --finding-publishing-frequency FIFTEEN_MINUTES >/dev/null 2>&1 || true
-  aws securityhub enable-security-hub --enable-default-standards \
+  # No default standards: the central configuration policy decides them
+  # (ADR-011, D-032). Under LOCAL configuration this used to subscribe AWS's
+  # defaults, FSBP and CIS 1.2.0, which were nobody's decision.
+  aws securityhub enable-security-hub --no-enable-default-standards \
     --region "${region}" >/dev/null 2>&1 || true
   aws macie2 enable-macie --status ENABLED \
     --finding-publishing-frequency FIFTEEN_MINUTES --region "${region}" >/dev/null 2>&1 || true
@@ -207,12 +210,25 @@ for region in "${REGIONS[@]}"; do
   fi
 
   # --- Security Hub -------------------------------------------------------
+  # Enabled without default standards, and standards are not auto-enabled.
+  # Under CENTRAL configuration (security/36-securityhub-policy.yaml,
+  # ADR-011) the policy associated at the root decides the standards and
+  # controls for every account, new ones included, and
+  # update-organization-configuration --auto-enable conflicts with it. So that
+  # step runs only while the organization is still LOCAL, and says so when it
+  # skips.
   step "securityhub: enable" "${region}" \
     audit "${region}" aws securityhub enable-security-hub \
-      --enable-default-standards
-  step "securityhub: auto-enable members" "${region}" \
-    audit "${region}" aws securityhub update-organization-configuration \
-      --auto-enable --auto-enable-standards DEFAULT
+      --no-enable-default-standards
+  SH_CONFIG_TYPE="$(audit "${region}" aws securityhub describe-organization-configuration \
+    --query 'OrganizationConfiguration.ConfigurationType' --output text 2>/dev/null | no_cr)"
+  if [[ "${SH_CONFIG_TYPE}" == "CENTRAL" ]]; then
+    skip "securityhub: auto-enable members (CENTRAL: the root policy decides, ADR-011)"
+  else
+    step "securityhub: auto-enable members" "${region}" \
+      audit "${region}" aws securityhub update-organization-configuration \
+        --auto-enable --auto-enable-standards DEFAULT
+  fi
 
   # --- Macie --------------------------------------------------------------
   # Inventory and public-access findings only. Automated sensitive data

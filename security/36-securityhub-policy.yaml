@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - the organization's Security Hub configuration
+  policy (standards and disabled controls), associated at the Organization
+  root. Deployed to the Audit account once central configuration is on.
+  Phase 15.6b, step 3 of 3 (scripts/enable-securityhub-central.sh).
+
+# ---------------------------------------------------------------------------
+# Standards: FSBP and NIST 800-53 r5. Not CIS, not PCI (D-032)
+# ---------------------------------------------------------------------------
+# Jamie, 2026-10-26, option A. NIST 800-53 r5 is what the HIPAA mapping is
+# built on (design 04's HIPAA conformance pack, 15.6 step 4). FSBP is AWS's
+# baseline for the services themselves. CIS is dropped: its useful controls
+# largely overlap FSBP, and 1.2.0's distinctive ones are the 14 metric filters
+# that fail by design here. PCI is out of scope (founders, Phase 15 scope
+# decisions; D-025 halts PCI tenants at vesting). Design 04 says "CIS/PCI
+# standards", so this is a recorded deviation.
+#
+# ---------------------------------------------------------------------------
+# Disabled controls: wrong for EVERY account, by design (ADR-011)
+# ---------------------------------------------------------------------------
+# A control is disabled here only when it cannot be satisfied in any account
+# without contradicting a platform decision. Disabling it removes the control
+# for tenants too, so the reason must hold for tenants too. Noise that is
+# platform-only (CloudFormation.3/.4 on StackSet stacks, IAM.6 on the
+# management root) is suppressed per resource in
+# security/30-securityhub-suppressions.yaml instead, so a tenant's own stack
+# or account still gets the finding.
+#
+#   CloudTrail.5   "trails should be integrated with CloudWatch Logs". The
+#                  organization trail writes to the Log Archive, and detection
+#                  is EventBridge to the router. A per-account log group of
+#                  the whole trail would be a second, unprotected copy.
+#   EC2.172        VPC Block Public Access blocking IGW traffic. Not enforced
+#                  on purpose (15.4): bidirectional mode breaks NAT egress for
+#                  the controlled, dns-filtered and public-facing egress
+#                  profiles (baseline/40-network.yaml).
+#   EC2.10, EC2.55, EC2.56, EC2.57, EC2.58, EC2.60
+#                  "use VPC endpoints". Whether a VPC has interface endpoints
+#                  is decided per egress profile (design 02), and each one is a
+#                  per-AZ charge. Every VPC in a member account is the
+#                  platform's (SCP 07 denies a tenant creating its own network
+#                  paths), so this is never a tenant's choice to fix.
+#
+# Everything else stays enabled, including controls that fail today for real
+# reasons. Those are work (B-174), not suppressions.
+
+Parameters:
+
+  OrganizationRootId:
+    Type: String
+    Description: >-
+      The Organization root, from SSM /platform/org/root-id. The policy is
+      associated at the root, so every account, current and future, inherits
+      it.
+    AllowedPattern: '^r-[0-9a-z]{4,32}$'
+
+Resources:
+
+  PlatformPolicy:
+    Type: AWS::SecurityHub::ConfigurationPolicy
+    Properties:
+      Name: platform-security-hub
+      # Security Hub restricts this field to ^[a-zA-Z0-9_/(),.?! -]*$, so no
+      # colons or semicolons. The first deploy, 2026-10-26, failed on exactly
+      # that, after CENTRAL had already been switched on.
+      Description: >-
+        AltDigital platform policy. FSBP and NIST 800-53 r5 (D-032). Controls
+        disabled only where a platform decision makes them unsatisfiable in
+        every account (ADR-011). Applied at the root.
+      ConfigurationPolicy:
+        SecurityHub:
+          ServiceEnabled: true
+          EnabledStandardIdentifiers:
+            - !Sub 'arn:${AWS::Partition}:securityhub:${AWS::Region}::standards/aws-foundational-security-best-practices/v/1.0.0'
+            - !Sub 'arn:${AWS::Partition}:securityhub:${AWS::Region}::standards/nist-800-53/v/5.0.0'
+          SecurityControlsConfiguration:
+            DisabledSecurityControlIdentifiers:
+              - CloudTrail.5
+              - EC2.172
+              - EC2.10
+              - EC2.55
+              - EC2.56
+              - EC2.57
+              - EC2.58
+              - EC2.60
+
+  RootAssociation:
+    Type: AWS::SecurityHub::PolicyAssociation
+    Properties:
+      ConfigurationPolicyId: !GetAtt PlatformPolicy.Id
+      TargetType: ROOT
+      TargetId: !Ref OrganizationRootId
+
+Outputs:
+  PolicyId:
+    Description: The organization's Security Hub configuration policy.
+    Value: !GetAtt PlatformPolicy.Id

@@ -106,6 +106,27 @@ for region in "${REGIONS[@]}"; do
 done
 hr
 
+# --- Security Hub: CENTRAL configuration, in every region -----------------
+#
+# The switch to CENTRAL is an API call, not a CloudFormation resource: the
+# organization configuration is a singleton CloudFormation cannot create
+# (ADR-011). So drift detection cannot see it reverted to LOCAL, and this
+# check does. LOCAL would mean members choose their own standards again.
+log "Security Hub configuration"
+for region in "${REGIONS[@]}"; do
+  t="$(a "${region}" aws securityhub describe-organization-configuration \
+         --query 'OrganizationConfiguration.ConfigurationType' --output text)"
+  if [[ "${t}" == "CENTRAL" ]]; then
+    printf '%s  ok%s  %-12s %-10s CENTRAL\n' "${C_GREEN}" "${C_RESET}" "sh-config" "${region}"
+    ROWS+=("PASS|securityhub-central|${region}|1|1")
+  else
+    printf '%s GAP%s  %-12s %-10s %s (expected CENTRAL)\n' "${C_RED}" "${C_RESET}" "sh-config" "${region}" "${t:-unreadable}"
+    ROWS+=("GAP|securityhub-central|${region}|0|1")
+    GAPS=$((GAPS+1))
+  fi
+done
+hr
+
 # --- AWS Config: a recorder that is RECORDING, per account, per region ------
 #
 # Config has no member list to count, so the arithmetic above does not apply.
