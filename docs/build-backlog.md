@@ -6458,6 +6458,21 @@ the harness):**
 
 ---
 
+
+**Config.1 fixed at the cause, 2026-10-25 (15.6a, ADR-010).** Every recorder
+now runs as `AWSServiceRoleForConfig`. The custom `PlatformConfigRecorderRole`
+is removed. The same change took Config from 4 of 30 account-regions to 30 of
+30. One home-region stack per account configures us-east-1, us-east-2 and
+us-west-2, recording global types in us-east-2 only:
+- Sandbox, then Members (Arc8), through `platform-config`;
+- the Security and Infrastructure OUs through `--add-ou`;
+- the management account through a plain stack.
+
+Every account-region was proved with a forced snapshot delivered SUCCESS to
+the Config archive. `verify-security-coverage.sh` now checks Config per
+account and region, and passes with zero gaps. Config.1 / CIS 2.5 should clear
+as Security Hub re-evaluates; re-check before closing that row.
+
 ## B-149 · Developers could rewrite or switch off the platform's monitoring
 
 **Observed** — 2026-10-01, defining the Arc8 developer and read-only roles.
