@@ -86,7 +86,12 @@ Usage: deploy-stackset.sh --name <stackset> --template <path> --ou <target>
                     The stack set takes the new template; its other instances
                     stay on the old one and read OUTDATED until a later run
                     updates them. This is how Sandbox goes first when a stack
-                    set also targets Members.
+                    set also targets Members. Each OU-only update marks the
+                    OTHER OUs' instances OUTDATED too, even with identical
+                    content, because it creates a new stack set version. So a
+                    staged rollout ENDS with one run without this flag, which
+                    is a no-op ("No updates are to be performed") and brings
+                    every instance back to CURRENT. Seen 2026-10-25.
   --add-ou          Add an OU to an EXISTING stack set and nothing else. No
                     template, no parameters, no update-stack-set: instances
                     for the new OU are created from the stack set as it stands.
