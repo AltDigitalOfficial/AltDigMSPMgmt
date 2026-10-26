@@ -2,8 +2,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 
 Description: >-
   AltDigital Managed Platform — AWS Config recorder, delivery channel and
-  start, driven by a single custom resource. Part of the member baseline,
-  deployed to every account by StackSet.
+  start in every allowed region, driven by a single custom resource in the
+  home region. Part of the member baseline, deployed to every account by
+  StackSet.
 
 # ---------------------------------------------------------------------------
 # Why this is a custom resource and not three CloudFormation resources
@@ -35,9 +36,54 @@ Description: >-
 #
 # The cost of this choice, stated plainly: Config settings are no longer
 # visible to CloudFormation drift detection. Drift on Config is instead caught
-# by the platform's own conformance checks, and the custom resource re-runs on
-# every stack update, so a recorder stopped by hand is corrected by the next
-# baseline deployment.
+# by the platform's own conformance checks and verify-security-coverage.sh, and
+# the custom resource re-runs on every stack update, so a recorder stopped by
+# hand is corrected by the next baseline deployment.
+#
+# ---------------------------------------------------------------------------
+# One stack per account configures every region (ADR-010)
+# ---------------------------------------------------------------------------
+# Until 2026-10-25 Config recorded in the home region only, in 4 of 30
+# account-regions. 06-region-restriction allows three regions, so two thirds
+# of what a developer could do was invisible to Config, and therefore to every
+# conformance check (design 04: "in every environment, without exception";
+# F-6: continuous, everywhere).
+#
+# The obvious fix, one StackSet instance per region, collides with itself.
+# This template creates fixed-name IAM roles, IAM is global, and the second
+# region's stack fails "already exists". Region-suffixed role names would avoid
+# that, but they would need SCP 01's exemption widened to a pattern, on a
+# policy object attached to every OU.
+#
+# So the home-region stack's function calls Config in EACH region in
+# RecordRegions, the regions 06 allows. One stack, one setup role, no ordering
+# between regions, no SCP change. The cost is the same as before: a recorder
+# stopped by hand in any region is corrected on the next stack update, not
+# immediately.
+#
+# ---------------------------------------------------------------------------
+# The recorder runs as Config's service-linked role (ADR-010)
+# ---------------------------------------------------------------------------
+# It ran as a custom role, PlatformConfigRecorderRole, and that cost three
+# things:
+#
+#   * Security Hub control Config.1 (and CIS 2.5) requires the service-linked
+#     role AWSServiceRoleForConfig, so every account opened on a CRITICAL
+#     finding the platform caused (B-147).
+#   * A custom role is subject to SCPs. SCP 09 (HIPAA-eligible services only)
+#     has no exemptions, so in a HIPAA account it would deny the recorder's
+#     describes of non-eligible services, leaving recording holes exactly where
+#     evidence matters most. A service-linked role is outside SCPs entirely.
+#   * One more Platform* role to protect and keep in step with the SCP lists.
+#
+# Delivery is unchanged in effect. With the service-linked role, Config writes
+# to the archive as the config.amazonaws.com service. The Config archive
+# bucket and the Log Archive KMS key already grant that service, scoped to the
+# organization by aws:SourceOrgID (security/10-log-archive.yaml), so no Log
+# Archive change is needed.
+#
+# The setup function creates the service-linked role if it does not exist.
+# That call is idempotent: "has been taken" means it already exists.
 #
 # ---------------------------------------------------------------------------
 # Recording scope is the bill
@@ -52,20 +98,18 @@ Description: >-
 #
 # 2. WHERE GLOBAL RESOURCES ARE RECORDED. IAM users, roles, policies and groups
 #    are global. Recording them in every region records the same item three
-#    times and pays three times. Enabled only in the home region.
+#    times and pays three times. Recorded in GlobalTypesRegion only.
 #
 # Conformance packs are not attached here. Design doc 02 derives them per
 # tenant from questionnaire section 2.1, and rule evaluations bill separately.
 #
 # ---------------------------------------------------------------------------
-# Role names begin Platform on purpose
+# The setup role's name begins Platform on purpose
 # ---------------------------------------------------------------------------
-# SCP 03 denies creating any role named Platform* except to
-# OrganizationAccountAccessRole and stacksets-exec-*. The StackSet is
-# permitted, and the resulting Platform* names place these roles inside the
-# exclusions in SCPs 01 and 02 — so Config is not denied by the policies that
-# protect Config. A role named anything else would be created and then blocked
-# from doing its job.
+# SCP 03 denies creating any role named Platform* except to the deployment
+# principals, and SCP 01 v2 exempts PlatformConfigSetupRole by exact name from
+# the deny on changing Config. A role named anything else would be created and
+# then blocked from doing its job.
 
 Parameters:
 
@@ -83,13 +127,19 @@ Parameters:
     Description: KMS key ARN used to encrypt delivered configuration snapshots.
     AllowedPattern: '^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/.+$'
 
-  IsHomeRegion:
-    Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
+  RecordRegions:
+    Type: CommaDelimitedList
     Description: >-
-      Only the home region records global resource types, so IAM configuration
-      items are paid for once rather than once per region.
+      Every region to record in. Pass PLATFORM_ALLOWED_REGIONS from
+      config/platform.env, the same list SCP 06 allows. No default, because a
+      default would be a second copy of the list that nothing keeps in step.
+
+  GlobalTypesRegion:
+    Type: String
+    Description: >-
+      The one region that records global resource types (IAM). Pass
+      PLATFORM_HOME_REGION. Must be one of RecordRegions.
+    AllowedPattern: '^[a-z]{2}-[a-z]+-[0-9]$'
 
   DeliveryFrequency:
     Type: String
@@ -101,38 +151,6 @@ Parameters:
       change regardless. Snapshots are periodic full states; daily suffices.
 
 Resources:
-
-  ConfigRecorderRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: PlatformConfigRecorderRole
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: config.amazonaws.com }
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
-      Policies:
-        - PolicyName: DeliverToLogArchive
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: 's3:PutObject'
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ConfigArchiveBucketName}/AWSLogs/${AWS::AccountId}/Config/*'
-                Condition:
-                  StringEquals:
-                    's3:x-amz-acl': 'bucket-owner-full-control'
-              - Effect: Allow
-                Action: 's3:GetBucketAcl'
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ConfigArchiveBucketName}'
-              - Effect: Allow
-                Action: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:DescribeKey']
-                Resource: !Ref LogArchiveKeyArn
-      Tags:
-        - { Key: platform-managed, Value: 'true' }
 
   ConfigSetupRole:
     Type: AWS::IAM::Role
@@ -151,6 +169,9 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # Resource * because Config's recorder and channel APIs take no
+              # resource ARN. The function calls them in every RecordRegions
+              # region; SCP 06 limits that to the allowed regions anyway.
               - Effect: Allow
                 Action:
                   - 'config:PutConfigurationRecorder'
@@ -160,17 +181,27 @@ Resources:
                   - 'config:DescribeConfigurationRecorderStatus'
                   - 'config:DescribeDeliveryChannels'
                 Resource: '*'
-              # Config assumes the recorder role, so this function must be able
-              # to hand it over. Scoped to that one role: iam:PassRole with a
-              # wildcard resource is how a Lambda becomes an escalation path.
+              # Create Config's service-linked role if it is missing, and
+              # nothing else's. The condition is what keeps this from being a
+              # general role-creation grant.
+              - Effect: Allow
+                Action: 'iam:CreateServiceLinkedRole'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig'
+                Condition:
+                  StringEquals:
+                    'iam:AWSServiceName': 'config.amazonaws.com'
+              # Handing the recorder its role. Scoped to the one role, and only
+              # to Config: iam:PassRole with a wildcard resource is how a Lambda
+              # becomes an escalation path.
               - Effect: Allow
                 Action: 'iam:PassRole'
-                Resource: !GetAtt ConfigRecorderRole.Arn
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig'
                 Condition:
                   StringEquals:
                     'iam:PassedToService': 'config.amazonaws.com'
       Tags:
         - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
 
   ConfigSetupFunction:
     Type: AWS::Lambda::Function
@@ -178,18 +209,25 @@ Resources:
       FunctionName: platform-config-setup
       Runtime: python3.12
       Handler: index.handler
-      Timeout: 120
+      # Three regions, each up to ~30 s to verify recording, plus the
+      # service-linked role. 300 s leaves room without letting a hung call run
+      # to CloudFormation's own one-hour custom-resource timeout.
+      Timeout: 300
       Role: !GetAtt ConfigSetupRole.Arn
       Tags:
         - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
       Code:
         ZipFile: |
           import boto3, json, time, urllib.request
 
+          NAME = "platform-config-recorder"
+          CHANNEL = "platform-config-delivery"
+
           def send(event, context, status, reason=""):
               body = json.dumps({
                   "Status": status,
-                  "Reason": reason or "see CloudWatch Logs",
+                  "Reason": (reason or "see CloudWatch Logs")[:3500],
                   "PhysicalResourceId": event.get("PhysicalResourceId") or context.log_stream_name,
                   "StackId": event["StackId"], "RequestId": event["RequestId"],
                   "LogicalResourceId": event["LogicalResourceId"], "Data": {},
@@ -199,54 +237,84 @@ Resources:
                   headers={"content-type": "", "content-length": str(len(body))})
               urllib.request.urlopen(req)
 
+          def ensure_service_linked_role(account):
+              iam = boto3.client("iam")
+              try:
+                  iam.create_service_linked_role(AWSServiceName="config.amazonaws.com")
+              except iam.exceptions.InvalidInputException as e:
+                  # "has been taken in this account": it already exists, which
+                  # is the state we want. Anything else is a real failure.
+                  if "has been taken" not in str(e):
+                      raise
+              return (f"arn:aws:iam::{account}:role/aws-service-role/"
+                      "config.amazonaws.com/AWSServiceRoleForConfig")
+
+          def configure(region, role_arn, p):
+              cfg = boto3.client("config", region_name=region)
+              # Order is not a preference. PutDeliveryChannel fails with
+              # NoAvailableConfigurationRecorderException if no recorder exists,
+              # and StartConfigurationRecorder fails without a channel.
+              cfg.put_configuration_recorder(ConfigurationRecorder={
+                  "name": NAME,
+                  "roleARN": role_arn,
+                  "recordingGroup": {
+                      "allSupported": True,
+                      "includeGlobalResourceTypes": region == p["GlobalTypesRegion"],
+                  },
+              })
+              cfg.put_delivery_channel(DeliveryChannel={
+                  "name": CHANNEL,
+                  "s3BucketName": p["BucketName"],
+                  "s3KmsKeyArn": p["KeyArn"],
+                  "configSnapshotDeliveryProperties": {
+                      "deliveryFrequency": p["DeliveryFrequency"]},
+              })
+              cfg.start_configuration_recorder(ConfigurationRecorderName=NAME)
+              # Verify rather than assume. A successful API call is not the
+              # same as a recorder that is recording, and the whole point of
+              # this resource is that the difference is invisible otherwise.
+              st = {}
+              for _ in range(10):
+                  st = cfg.describe_configuration_recorder_status(
+                      ConfigurationRecorderNames=[NAME])["ConfigurationRecordersStatus"][0]
+                  if st.get("recording"):
+                      return None
+                  time.sleep(3)
+              return ("not recording: " + st.get("lastErrorMessage", "no error reported"))
+
           def handler(event, context):
               try:
-                  # Delete is deliberately a no-op. Tearing down the recorder on
+                  # Delete is deliberately a no-op. Tearing down the recorders on
                   # stack removal would silently end evidence capture, which is
                   # not a decision a stack deletion should take by itself.
                   if event["RequestType"] == "Delete":
                       return send(event, context, "SUCCESS", "delete is a no-op by design")
 
                   p = event["ResourceProperties"]
-                  cfg = boto3.client("config")
-                  name = "platform-config-recorder"
+                  regions = [r for r in p["RecordRegions"].split(",") if r]
+                  if p["GlobalTypesRegion"] not in regions:
+                      return send(event, context, "FAILED",
+                                  f"GlobalTypesRegion {p['GlobalTypesRegion']} is not in "
+                                  f"RecordRegions {regions}; IAM would be recorded nowhere")
+                  account = context.invoked_function_arn.split(":")[4]
+                  role_arn = ensure_service_linked_role(account)
 
-                  # Order is not a preference. PutDeliveryChannel fails with
-                  # NoAvailableConfigurationRecorderException if no recorder
-                  # exists, and StartConfigurationRecorder fails without a
-                  # channel.
-                  cfg.put_configuration_recorder(ConfigurationRecorder={
-                      "name": name,
-                      "roleARN": p["RecorderRoleArn"],
-                      "recordingGroup": {
-                          "allSupported": True,
-                          "includeGlobalResourceTypes": p["IsHomeRegion"] == "true",
-                      },
-                  })
-
-                  cfg.put_delivery_channel(DeliveryChannel={
-                      "name": "platform-config-delivery",
-                      "s3BucketName": p["BucketName"],
-                      "s3KmsKeyArn": p["KeyArn"],
-                      "configSnapshotDeliveryProperties": {
-                          "deliveryFrequency": p["DeliveryFrequency"]},
-                  })
-
-                  cfg.start_configuration_recorder(ConfigurationRecorderName=name)
-
-                  # Verify rather than assume. A successful API call is not the
-                  # same as a recorder that is recording, and the whole point of
-                  # this resource is that the difference is invisible otherwise.
-                  for _ in range(10):
-                      st = cfg.describe_configuration_recorder_status(
-                          ConfigurationRecorderNames=[name])["ConfigurationRecordersStatus"][0]
-                      if st.get("recording"):
-                          return send(event, context, "SUCCESS")
-                      time.sleep(3)
-
-                  return send(event, context, "FAILED",
-                              "recorder did not reach recording=true: "
-                              + st.get("lastErrorMessage", "no error reported"))
+                  # Every region is attempted, and the stack fails if ANY did
+                  # not reach recording=true, naming which. A partial success
+                  # reported as success is the green-and-empty state this
+                  # resource exists to prevent.
+                  problems = {}
+                  for region in regions:
+                      try:
+                          err = configure(region, role_arn, p)
+                      except Exception as e:
+                          err = str(e)
+                      if err:
+                          problems[region] = err
+                  if problems:
+                      return send(event, context, "FAILED", "; ".join(
+                          f"{r}: {m}" for r, m in sorted(problems.items())))
+                  return send(event, context, "SUCCESS")
               except Exception as e:
                   send(event, context, "FAILED", str(e))
 
@@ -254,18 +322,22 @@ Resources:
     Type: AWS::CloudFormation::CustomResource
     Properties:
       ServiceToken: !GetAtt ConfigSetupFunction.Arn
-      RecorderRoleArn: !GetAtt ConfigRecorderRole.Arn
+      RecordRegions: !Join [',', !Ref RecordRegions]
+      GlobalTypesRegion: !Ref GlobalTypesRegion
       BucketName: !Ref ConfigArchiveBucketName
       KeyArn: !Ref LogArchiveKeyArn
-      IsHomeRegion: !Ref IsHomeRegion
       DeliveryFrequency: !Ref DeliveryFrequency
 
 Outputs:
 
   RecorderRoleArn:
-    Description: Role assumed by AWS Config in this account
-    Value: !GetAtt ConfigRecorderRole.Arn
+    Description: Config's service-linked role, which every recorder in this account uses
+    Value: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig'
 
-  RecordsGlobalTypes:
-    Description: Whether this instance records global resource types
-    Value: !Ref IsHomeRegion
+  RecordRegions:
+    Description: Regions this account records in
+    Value: !Join [',', !Ref RecordRegions]
+
+  GlobalTypesRegion:
+    Description: The one region that records global resource types
+    Value: !Ref GlobalTypesRegion

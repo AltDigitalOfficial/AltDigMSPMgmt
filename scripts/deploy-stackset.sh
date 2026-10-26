@@ -61,7 +61,7 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 NAME=""; TEMPLATE=""; OU=""; REGIONS="${PLATFORM_HOME_REGION}"; PARAMS=()
-MAX_CONCURRENT=1; FAILURE_TOLERANCE=0; ADD_OU=0; REGIONS_GIVEN=0
+MAX_CONCURRENT=1; FAILURE_TOLERANCE=0; ADD_OU=0; REGIONS_GIVEN=0; UPDATE_ONLY_OU=0
 
 usage() {
   cat <<'USAGE'
@@ -82,6 +82,11 @@ Usage: deploy-stackset.sh --name <stackset> --template <path> --ou <target>
   --max-concurrent  Accounts updated in parallel. Default 1 — a bad baseline
                     reaching one account is recoverable; reaching forty at once
                     is an incident.
+  --update-only-ou  On an UPDATE, redeploy only the --ou instances (in --regions).
+                    The stack set takes the new template; its other instances
+                    stay on the old one and read OUTDATED until a later run
+                    updates them. This is how Sandbox goes first when a stack
+                    set also targets Members.
   --add-ou          Add an OU to an EXISTING stack set and nothing else. No
                     template, no parameters, no update-stack-set: instances
                     for the new OU are created from the stack set as it stands.
@@ -98,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --ou)                 OU="$2"; shift 2 ;;
     --regions)            REGIONS="$2"; REGIONS_GIVEN=1; shift 2 ;;
     --add-ou)             ADD_OU=1; shift ;;
+    --update-only-ou)     UPDATE_ONLY_OU=1; shift ;;
     --max-concurrent)     MAX_CONCURRENT="$2"; shift 2 ;;
     --dry-run)            DRY_RUN=1; shift ;;
     --confirm-production) CONFIRM_PRODUCTION=1; shift ;;
@@ -337,6 +343,16 @@ if [[ -z "${EXISTS}" ]]; then
     --query 'StackSetId' --output text | no_cr
   ok "stack set created"
 else
+  # --update-only-ou: without it, update-stack-set redeploys EVERY instance,
+  # so a stack set targeting Sandbox and Members cannot go Sandbox-first.
+  # Found 2026-10-25, about to change platform-config, whose Members
+  # instances include Arc8's accounts.
+  ONLY_OU_ARGS=()
+  if [[ ${UPDATE_ONLY_OU} -eq 1 ]]; then
+    ONLY_OU_ARGS=(--deployment-targets "OrganizationalUnitIds=${TARGET_OU}"
+                  --regions $(printf '%s' "${REGIONS}" | tr ',' ' '))
+    info "Redeploying only the ${OU} OU's instances (${REGIONS}); others stay on the previous template"
+  fi
   info "Updating stack set ${NAME}"
   cfn_ss update-stack-set \
     --stack-set-name "${NAME}" \
@@ -346,6 +362,7 @@ else
     --capabilities CAPABILITY_NAMED_IAM \
     ${PARAM_JSON:+--parameters "${PARAM_JSON}"} \
     --tags "${STACKSET_TAGS[@]}" \
+    "${ONLY_OU_ARGS[@]}" \
     --operation-preferences "MaxConcurrentCount=${MAX_CONCURRENT},FailureToleranceCount=${FAILURE_TOLERANCE},RegionConcurrencyType=SEQUENTIAL" \
     --query 'OperationId' --output text | no_cr
   ok "stack set updated"
