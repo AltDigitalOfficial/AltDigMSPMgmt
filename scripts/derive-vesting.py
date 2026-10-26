@@ -540,9 +540,14 @@ def derive(q, rules):
                 packs.append(p)
     d["conformance_packs"] = packs
     # Named, and nothing applied for it. `other` and `hitrust` today. Said per
-    # framework because "hipaa, hitrust" derives the HIPAA pack, and a warning
-    # that fired only when NO pack was derived would stay silent about HITRUST.
-    d["frameworks_without_pack"] = [f for f in fw if not rules["conformance_packs"].get(f)]
+    # framework, because a warning that fired only when NO pack was derived
+    # would stay silent about HITRUST alongside SOC 2. A framework whose rules
+    # run in every account (hipaa, ADR-012) has nothing to apply and is not a
+    # gap, so it is reported as covered instead.
+    everywhere = rules.get("covered_in_every_account", [])
+    d["frameworks_covered_everywhere"] = [f for f in fw if f in everywhere]
+    d["frameworks_without_pack"] = [
+        f for f in fw if not rules["conformance_packs"].get(f) and f not in everywhere]
 
     # 2.8 — retention floor. "Union of applicable frameworks" means the
     # LONGEST, not the sum. Sum would be arithmetic on unrelated obligations.
@@ -707,17 +712,20 @@ def warnings_for(q, d):
             "    Not automated: create each by hand, then add the roster's people in the\n"
             "    roles named. Membership is by role, so re-check it whenever the roster changes.\n"
             + listed)
-    if d["frameworks_without_pack"] and d["conformance_packs"]:
+    if d["frameworks_without_pack"]:
         w.append(
             f"No conformance pack is applied for: {', '.join(d['frameworks_without_pack'])}.\n"
             "    The framework is recorded and passed to Truveon, but no AWS Config rules\n"
             "    specific to it are deployed. Confirm the client's assessor accepts that,\n"
             "    and confirm Truveon recognises the framework name."
         )
-    if not d["conformance_packs"]:
+    # Only when no framework at all was named. A named framework with nothing
+    # applied is warned per framework above; a covered one is not a gap.
+    if not d["conformance_packs"] and not d["frameworks_without_pack"] \
+            and not d["frameworks_covered_everywhere"]:
         w.append(
-            "No conformance packs derived. Either frameworks is ['none'] or only 'other' was\n"
-            "    named. The account still gets the full baseline; it just gets no\n"
+            "No conformance packs derived: frameworks is ['none']. The account still\n"
+            "    gets the full baseline and the platform conformance pack; it gets no\n"
             "    framework-specific Config rules, which is worth confirming rather than\n"
             "    discovering at audit."
         )
@@ -776,6 +784,9 @@ def main():
     print(f"  environments          : {', '.join(d['environments'])}")
     print(f"  retention floor       : {d['retention_floor_days']} days  (driver: {d['retention_floor_driver']})")
     print(f"  conformance packs     : {', '.join(d['conformance_packs']) or '(none)'}")
+    if d["frameworks_covered_everywhere"]:
+        print(f"  rules in every account: {', '.join(d['frameworks_covered_everywhere'])}"
+              "  (Security Hub plus the platform pack, ADR-012)")
     print(f"  egress profile        : {d['egress_profile']}"
           f"{'  [OVERRIDES ' + d['egress_profile_default'] + ']' if d['egress_profile_overridden'] else '  (derived)'}")
     print(f"  dedicated host        : {d['dedicated_host_required']}"

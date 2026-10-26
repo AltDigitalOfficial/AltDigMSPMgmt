@@ -266,6 +266,33 @@ class Frameworks(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("No conformance pack is applied for: hitrust", out)
 
+    def test_hipaa_is_covered_everywhere_not_a_gap(self):
+        # ADR-012: HIPAA's rules run in every account, so nothing is derived
+        # for it, and neither "nothing applied" warning may fire. Arc8 is
+        # exactly this questionnaire.
+        q = copy.deepcopy(self.base)
+        q["compliance"]["frameworks"] = ["hipaa"]
+        rc, d = run_json(q)
+        self.assertEqual(rc, 0, d)
+        self.assertEqual(d["conformance_packs"], [])
+        self.assertEqual(d["frameworks_without_pack"], [])
+        self.assertEqual(d["frameworks_covered_everywhere"], ["hipaa"])
+        rc, out = run_report(q)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("No conformance pack", out)
+        self.assertIn("rules in every account: hipaa", out)
+
+    def test_hitrust_alone_still_warns_with_no_packs(self):
+        # Before ADR-012 this warning required at least one derived pack, so
+        # hipaa + hitrust (now no packs) would have gone silent about HITRUST.
+        q = copy.deepcopy(self.base)
+        q["compliance"]["frameworks"] = ["hipaa", "hitrust"]
+        rc, d = run_json(q)
+        self.assertEqual(d["conformance_packs"], [])
+        rc, out = run_report(q)
+        self.assertIn("No conformance pack is applied for: hitrust", out)
+        self.assertNotIn("frameworks is ['none']", out)
+
 
 class MaintenanceWindows(unittest.TestCase):
     """Form 5.6 / 5.7: two windows, each in its own timezone, compared in UTC."""

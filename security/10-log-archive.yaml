@@ -859,6 +859,21 @@ Resources:
               StringLike:
                 'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cloudtrail:*:${ManagementAccountId}:trail/*'
 
+          # The S3 data events trail (org/31-s3-data-events-trail.yaml, ADR-013)
+          # writes under its own prefix, so the readers of AWSLogs/ never scan
+          # its volume. Named exactly rather than trail/*: only that trail
+          # writes here.
+          - Sid: CloudTrailWriteDataEvents
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogArchiveBucket.Arn}/data-events/AWSLogs/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+              StringLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cloudtrail:*:${ManagementAccountId}:trail/platform-s3-data-events'
+
           # s3:ListBucket for the evidence pipeline's custody role, and NOTHING
           # else -- no GetObject. Custody attests that objects arrived (key,
           # size, ETag, time); reading their contents is not its job, and raw

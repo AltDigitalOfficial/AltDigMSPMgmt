@@ -39,16 +39,22 @@
 # which is the right order, because a typo here should not block a
 # questionnaire review.
 conformance_packs:
-  hipaa:
-    - Operational-Best-Practices-for-HIPAA-Security
+  # Nothing framework-specific, by design (ADR-012). AWS's sample HIPAA pack
+  # is 129 rules, and 110 of them already run in every account as Security
+  # Hub controls (FSBP plus NIST 800-53 r5). Deploying the pack would evaluate
+  # each of those twice and report every failure twice. The rest run in every
+  # account as the platform conformance pack
+  # (security/60-platform-conformance-pack.yaml). See
+  # covered_in_every_account below and docs/hipaa-control-mapping.md.
+  hipaa: []
   pci-dss:
     - Operational-Best-Practices-for-PCI-DSS-3.2.1
   soc2:
     - Operational-Best-Practices-for-SOC-2
   # HITRUST CSF. No pack is mapped: this file does not know of an AWS sample
   # pack for it, and naming one that may not resolve would fail the deploy.
-  # HITRUST is largely a superset of HIPAA controls, so a tenant naming it
-  # alongside `hipaa` still gets the HIPAA pack. derive-vesting.py warns that
+  # HITRUST is largely a superset of HIPAA controls, and the HIPAA rules run
+  # in every account (covered_in_every_account). derive-vesting.py warns that
   # nothing HITRUST-specific is applied. Listed as its own framework so the
   # question is asked every time (added 2026-09-30).
   hitrust: []
@@ -56,6 +62,12 @@ conformance_packs:
   # have a pack derived for it, and silently applying a default would be worse
   # than applying none — it would look like coverage.
   other: []
+
+# Frameworks whose Config rules already run in every account, so an empty
+# entry above is coverage, not a gap. derive-vesting.py does not warn about
+# them, and reports them separately so "(none)" is never read as nothing.
+covered_in_every_account:
+  - hipaa
 
 # ---------------------------------------------------------------------------
 # 2.8 — Log retention floor, derived from 2.1

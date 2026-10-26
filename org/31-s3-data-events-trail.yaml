@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — S3 object-access logging. A second organization
+  trail recording S3 data events in every account, delivered to the log archive
+  under its own prefix. Deploys to the management account only. ADR-013.
+
+# ---------------------------------------------------------------------------
+# Why a second trail, not data events on the first
+# ---------------------------------------------------------------------------
+# HIPAA 164.312(b) asks who accessed ePHI. The organization trail
+# (30-organization-trail.yaml) records management events only, so an S3 object
+# read in any account went unrecorded (auditor guide §6). Jamie, 2026-10-26:
+# object-access logging in every account, through an organization trail.
+#
+# A separate trail rather than event selectors added to the first, because:
+#   - its files land under their own prefix (data-events/), so the Athena
+#     table and the digest-facts gatherer that read AWSLogs/ (ADR-004, ADR-008)
+#     do not start scanning data-event volume they never asked for;
+#   - the management trail's stack is the one detective control that does not
+#     depend on the baseline, and this change never touches it;
+#   - if volume forces a narrower scope later, it is this trail's selectors
+#     that change, with the management trail left alone.
+#
+# This trail selects NO management events. The first copy of management
+# events is free and the management trail already has it; a second copy would
+# be charged and would duplicate every record.
+#
+# ---------------------------------------------------------------------------
+# The log archive's own writes are excluded, because they would loop
+# ---------------------------------------------------------------------------
+# This trail delivers into altdig-log-archive-<acct>, which replicates to
+# altdig-log-archive-replica-<acct>. A delivery is an S3 PutObject, and so is
+# the replication write it causes. Logging either one generates a data event,
+# which is delivered, which is logged: a loop whose volume grows on its own.
+#
+# So writes to both buckets are excluded (one prefix covers both, and nothing
+# else, because bucket names are global and these are ours). READS of them are
+# still recorded, by the second selector: who read the audit logs is exactly
+# the access worth evidencing, and nothing the trail does is a read.
+#
+# Retention is the archive's: Object Lock COMPLIANCE, 2190 days, bucket-wide.
+# Whatever volume this writes is kept for six years and cannot be removed. The
+# only lever on that cost is narrowing these selectors going forward.
+
+Parameters:
+
+  LogArchiveBucketName:
+    Type: String
+    Description: >-
+      Bucket in the Log Archive account, the same one the organization trail
+      uses. Its policy must admit this trail under data-events/
+      (security/10-log-archive.yaml, CloudTrailWriteDataEvents).
+    MinLength: 3
+
+  LogArchiveKeyArn:
+    Type: String
+    Description: KMS key ARN in the Log Archive account used to encrypt trail objects.
+    AllowedPattern: '^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/.+$'
+
+  TrailName:
+    Type: String
+    Default: platform-s3-data-events
+    Description: >-
+      Trail name. The log archive bucket policy names it, so a rename must
+      change both.
+
+Resources:
+
+  DataEventsTrail:
+    Type: AWS::CloudTrail::Trail
+    # Retain, for the same reason as the organization trail: deleting it would
+    # stop object-access capture in every account at once.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TrailName: !Ref TrailName
+      IsOrganizationTrail: true
+      IsLogging: true
+      # Every region, including ones the allow-list forbids, for the reason
+      # 30-organization-trail.yaml gives: activity in an unexpected region is
+      # the activity worth having.
+      IsMultiRegionTrail: true
+      # Required for a multi-region trail. It adds nothing here, because no
+      # management events are selected.
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      S3BucketName: !Ref LogArchiveBucketName
+      S3KeyPrefix: data-events
+      KMSKeyId: !Ref LogArchiveKeyArn
+
+      AdvancedEventSelectors:
+        - Name: S3 object access in every bucket except the log archive
+          FieldSelectors:
+            - { Field: eventCategory,  Equals: [Data] }
+            - { Field: resources.type, Equals: ['AWS::S3::Object'] }
+            - Field: resources.ARN
+              NotStartsWith:
+                - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-'
+        - Name: Reads of the log archive and its replica
+          FieldSelectors:
+            - { Field: eventCategory,  Equals: [Data] }
+            - { Field: resources.type, Equals: ['AWS::S3::Object'] }
+            - { Field: readOnly,       Equals: ['true'] }
+            - Field: resources.ARN
+              StartsWith:
+                - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-'
+
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+        - { Key: Purpose,          Value: s3-object-access-trail }
+
+Outputs:
+
+  TrailArn:
+    Description: S3 data events trail ARN
+    Value: !GetAtt DataEventsTrail.Arn
+
+  Destination:
+    Description: Where this trail's files land
+    Value: !Sub 's3://${LogArchiveBucketName}/data-events/AWSLogs/'

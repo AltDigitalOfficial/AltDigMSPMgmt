@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the platform conformance pack. The AWS HIPAA
+  Config rules that no enabled Security Hub control evaluates, applied to every
+  account in the Organization. Deployed to Audit, the Config delegated
+  administrator, once per allowed region. ADR-012.
+
+# ---------------------------------------------------------------------------
+# What is in it, and what is deliberately not
+# ---------------------------------------------------------------------------
+# docs/hipaa-control-mapping.md §5. AWS's HIPAA mapping names 129 Config rules.
+# Security Hub (FSBP plus NIST 800-53 r5, ADR-011) already runs 110 of them in
+# every account, so deploying AWS's full sample pack would evaluate each of
+# those twice, pay twice and report every failure twice. This pack is only
+# what nothing else runs.
+#
+# Every account, not only HIPAA accounts (Jamie, 2026-10-26). None of these
+# rules is specific to ePHI: backup coverage, certificates on load balancers,
+# instance credentials and routes to the internet are ordinary hygiene, and
+# detective controls are uniform across tiers (design 02, design 14).
+#
+# Left out, with reasons in the mapping document:
+#   iam-no-inline-policy-check           every platform role uses stack-scoped
+#                                        inline policies by design; KMS.2 covers
+#                                        the dangerous case
+#   internet-gateway-authorized-vpc-only needs a per-account list of authorised
+#                                        VPCs; it belongs with the registry
+#   dynamodb-throughput-limit-check      capacity, not a safeguard
+#
+# ---------------------------------------------------------------------------
+# Two packs, because one rule is account-level
+# ---------------------------------------------------------------------------
+# cloudtrail-s3-dataevents-enabled asks whether the ACCOUNT has a trail
+# logging S3 data events, and a multi-region organization trail looks the same
+# from every region. Run in three regions it would raise three findings for one
+# fact. It goes in its own pack, created only in the home region. Everything
+# else concerns regional resources and runs everywhere.
+#
+# Organization conformance packs reach accounts that join later without any
+# further action, which is why this is not a StackSet.
+#
+# Deploy, once per allowed region:
+#   scripts/deploy-to-account.sh --account altdig-security-audit \
+#     --template security/60-platform-conformance-pack.yaml \
+#     --stack platform-conformance-pack --region <region> \
+#     HomeRegion=us-east-2
+
+Parameters:
+
+  HomeRegion:
+    Type: String
+    AllowedValues: [us-east-1, us-east-2, us-west-2]
+    Description: >-
+      The platform home region. The account-level pack is created only there.
+
+Conditions:
+
+  IsHomeRegion: !Equals [!Ref 'AWS::Region', !Ref HomeRegion]
+
+Resources:
+
+  RegionalPack:
+    Type: AWS::Config::OrganizationConformancePack
+    Properties:
+      OrganizationConformancePackName: platform-conformance-regional
+      TemplateBody: |
+        Resources:
+          # Frequency and retention are AWS's defaults, stated rather than
+          # implied. They match recovery/30-backup-policy.yaml's daily rule
+          # (RetentionDays 35). Every plan fails until B-043's organization
+          # backup policy exists, which is accurate.
+          BackupPlanMinFrequencyAndMinRetentionCheck:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-backup-plan-min-frequency-and-retention
+              Scope:
+                ComplianceResourceTypes: [AWS::Backup::BackupPlan]
+              InputParameters:
+                requiredFrequencyValue: '1'
+                requiredFrequencyUnit: days
+                requiredRetentionDays: '35'
+              Source:
+                Owner: AWS
+                SourceIdentifier: BACKUP_PLAN_MIN_FREQUENCY_AND_MIN_RETENTION_CHECK
+          BackupRecoveryPointManualDeletionDisabled:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-backup-recovery-point-manual-deletion-disabled
+              Scope:
+                ComplianceResourceTypes: [AWS::Backup::BackupVault]
+              Source:
+                Owner: AWS
+                SourceIdentifier: BACKUP_RECOVERY_POINT_MANUAL_DELETION_DISABLED
+          # Security Hub checks EBS volumes (EC2.28); this checks the instance.
+          Ec2ResourcesProtectedByBackupPlan:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-ec2-resources-protected-by-backup-plan
+              Scope:
+                ComplianceResourceTypes: [AWS::EC2::Instance]
+              Source:
+                Owner: AWS
+                SourceIdentifier: EC2_RESOURCES_PROTECTED_BY_BACKUP_PLAN
+          # ELB.2 covers Classic Load Balancers only.
+          Elbv2AcmCertificateRequired:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-elbv2-acm-certificate-required
+              Source:
+                Owner: AWS
+                SourceIdentifier: ELBV2_ACM_CERTIFICATE_REQUIRED
+          Ec2InstanceProfileAttached:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-ec2-instance-profile-attached
+              Scope:
+                ComplianceResourceTypes: [AWS::EC2::Instance]
+              Source:
+                Owner: AWS
+                SourceIdentifier: EC2_INSTANCE_PROFILE_ATTACHED
+          # RDS.46 covers RDS subnets only. B-047's public subnets fail this,
+          # which is the point of it.
+          NoUnrestrictedRouteToIgw:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-no-unrestricted-route-to-igw
+              Scope:
+                ComplianceResourceTypes: [AWS::EC2::RouteTable]
+              Source:
+                Owner: AWS
+                SourceIdentifier: NO_UNRESTRICTED_ROUTE_TO_IGW
+          # The next three evaluate nothing until a tenant runs the service.
+          EcsTaskDefinitionUserForHostModeCheck:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-ecs-task-definition-user-for-host-mode
+              Scope:
+                ComplianceResourceTypes: [AWS::ECS::TaskDefinition]
+              Source:
+                Owner: AWS
+                SourceIdentifier: ECS_TASK_DEFINITION_USER_FOR_HOST_MODE_CHECK
+          EmrKerberosEnabled:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-emr-kerberos-enabled
+              Source:
+                Owner: AWS
+                SourceIdentifier: EMR_KERBEROS_ENABLED
+          SagemakerEndpointConfigurationKmsKeyConfigured:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-sagemaker-endpoint-config-kms-key
+              Source:
+                Owner: AWS
+                SourceIdentifier: SAGEMAKER_ENDPOINT_CONFIGURATION_KMS_KEY_CONFIGURED
+
+  AccountLevelPack:
+    Type: AWS::Config::OrganizationConformancePack
+    Condition: IsHomeRegion
+    Properties:
+      OrganizationConformancePackName: platform-conformance-account
+      TemplateBody: |
+        Resources:
+          # Satisfied by org/31-s3-data-events-trail.yaml (ADR-013).
+          CloudtrailS3DataeventsEnabled:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: platform-cloudtrail-s3-dataevents-enabled
+              Source:
+                Owner: AWS
+                SourceIdentifier: CLOUDTRAIL_S3_DATAEVENTS_ENABLED
+
+Outputs:
+
+  RegionalPackName:
+    Value: platform-conformance-regional

@@ -204,9 +204,23 @@ for region in "${REGIONS[@]}"; do
   if [[ -n "${DETECTOR}" && "${DRY_RUN}" != "1" ]]; then
     # AUTO_ENABLE_ORG_MEMBERS=ALL is the line that matters: without it,
     # accounts vested tomorrow have no detector and nothing reports the gap.
-    step "guardduty: auto-enable members" "${region}" \
+    #
+    # S3 Protection and Lambda Protection for every account (ADR-014, Jamie,
+    # 2026-10-26). S3 because the evidence, the logs and every tenant's data
+    # live there. Lambda because the platform is built of it. AutoEnable ALL
+    # reaches existing members as well as new ones. Features this call does
+    # not name keep their current setting.
+    step "guardduty: auto-enable members, with S3 and Lambda protection" "${region}" \
       audit "${region}" aws guardduty update-organization-configuration \
-        --detector-id "${DETECTOR}" --auto-enable-organization-members ALL
+        --detector-id "${DETECTOR}" --auto-enable-organization-members ALL \
+        --features '[{"Name":"S3_DATA_EVENTS","AutoEnable":"ALL"},{"Name":"LAMBDA_NETWORK_LOGS","AutoEnable":"ALL"}]'
+    # The administrator is not a member of itself, so organization auto-enable
+    # never reaches Audit's own detector. That gap is what Security Hub
+    # reported as GuardDuty.6 and GuardDuty.10 on Audit (B-174), the B-008
+    # shape again.
+    step "guardduty: S3 and Lambda protection on Audit's own detector" "${region}" \
+      audit "${region}" aws guardduty update-detector --detector-id "${DETECTOR}" \
+        --features '[{"Name":"S3_DATA_EVENTS","Status":"ENABLED"},{"Name":"LAMBDA_NETWORK_LOGS","Status":"ENABLED"}]'
   fi
 
   # --- Security Hub -------------------------------------------------------
@@ -263,4 +277,6 @@ log "Deliberately NOT enabled:"
 log "  * Macie automated sensitive data discovery — charged per GB scanned."
 log "    Per-tenant, driven by questionnaire data classification."
 log "  * Inspector Lambda scanning — per-function, per-tenant decision."
-log "  * GuardDuty Malware Protection, EKS and RDS plans — only where used."
+log "  * GuardDuty Malware Protection, EKS, ECS and EC2 runtime and RDS plans —"
+log "    per-tenant, where the workload exists (ADR-014). S3 and Lambda"
+log "    protection ARE enabled, in every account."
