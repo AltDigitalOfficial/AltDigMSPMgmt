@@ -292,6 +292,84 @@ Resources:
         # owed.
         maxReceiveCount: 10
 
+  # B-156 item 3. Until these existed, retries moved to the DLQ silently: 20,468
+  # messages accumulated over three days and nothing said so. Both are
+  # urgency=low because neither failure loses evidence -- the ledger still
+  # holds every owed row and the replay re-queues it. What they report is that
+  # delivery has stopped working, which is a working-hours problem, not a 3am
+  # one. The gap detector is what reports evidence actually owed.
+  #
+  # 06a's sqs-message-age, prod values. It catches the failure the DLQ alarm
+  # cannot: a consumer that has stopped receiving at all (a disabled event
+  # source mapping, a sender that cannot start). Those messages are never
+  # received, so never retried, so never dead-lettered. While the sender is
+  # consuming, retries bound a message's age at about an hour (ten receives at
+  # the 360s visibility timeout), so this also fires on a Truveon outage of
+  # more than about fifteen minutes. That is intended.
+  EvidenceQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-evidence-queue-stalled
+      AlarmDescription: >-
+        Evidence has waited more than fifteen minutes for delivery. Either
+        Truveon is refusing or unreachable, or platform-evidence-sender has
+        stopped consuming the queue. Nothing is lost: the ledger holds every
+        owed record and the hourly replay re-queues it once delivery recovers.
+
+        [platform-routing] routing=pagerduty layer=infrastructure urgency=low
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt EvidenceQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      # D-028: no direct action. Delivered by the router through
+      # alerting/60-alarm-forwarding.yaml in this account.
+
+  # D-033: growth, not 06a's depth. Depth > 0 would hold ALARM until the
+  # messages expire, because the DLQ is left to expire rather than purged by
+  # hand (Jamie, 2026-10-04). For up to fourteen days a second failure wave
+  # would then raise nothing new. DIFF of the depth fires on each period the
+  # queue grows and clears when it stops, so every new wave is a new incident.
+  EvidenceDlqGrowingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-evidence-dlq-growing
+      AlarmDescription: >-
+        Evidence deliveries are exhausting all ten retries and dead-lettering.
+        The ledger rows behind them stay pending and the gap detector reports
+        them; the DLQ copy is diagnostic only. Read a message for the failure
+        reason. Do not purge -- the queue expires its own messages after 14 days.
+
+        [platform-routing] routing=pagerduty layer=infrastructure urgency=low
+      Metrics:
+        - Id: depth
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: ApproximateNumberOfMessagesVisible
+              Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt EvidenceDlq.QueueName
+            Period: 300
+            Stat: Maximum
+        - Id: growth
+          Label: Messages added to the DLQ in the period
+          Expression: DIFF(depth)
+          ReturnData: true
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      # D-028: no direct action. Delivered by the router through
+      # alerting/60-alarm-forwarding.yaml in this account.
+
   # -------------------------------------------------------------------------
   # Collection
   # -------------------------------------------------------------------------

@@ -1835,7 +1835,7 @@ which point a child OU costs nothing extra.
 **Design position** — [04-security-controls-and-evidence.md](../design/04-security-controls-and-evidence.md)
 lists Security Hub with *"CIS/PCI standards"*.
 
-**Actual** — the central configuration policy (`security/35-securityhub-central-config.yaml`,
+**Actual** — the central configuration policy (`security/36-securityhub-policy.yaml`,
 ADR-011) enables AWS Foundational Security Best Practices v1.0.0 and NIST
 800-53 r5. CIS and PCI DSS are not enabled. Until 15.6b, every account ran
 FSBP and CIS 1.2.0, because those are AWS's defaults, not because anyone chose
@@ -1864,3 +1864,33 @@ else.
 
 **Closing condition** — design 04 amended to name FSBP and NIST 800-53, or a
 tenant framework requires CIS or PCI. The PCI half would also close D-025.
+
+---
+
+## D-033 · The evidence DLQ alarms on growth, not depth
+
+**Design position** — [06a-alarm-specification.yaml](../design/06a-alarm-specification.yaml)
+`sqs-dlq-depth`: `ApproximateNumberOfMessagesVisible` greater than 0 in prod.
+
+**Actual** — `platform-evidence-dlq-growing` (`evidence/10-evidence.yaml`,
+B-156 item 3) alarms when `DIFF` of that metric is greater than 0 over a
+five-minute period. The main queue follows 06a's `sqs-message-age` unchanged.
+
+**Reason** — the DLQ is left to expire, not purged by hand (Jamie,
+2026-10-04). Under a depth alarm, the first message to dead-letter holds the
+alarm in ALARM for up to fourteen days. A second failure wave inside that
+window then raises nothing: the incident is already open, and may already
+have been acknowledged as the first wave. A growth alarm opens an incident
+for each wave and resolves when it stops.
+
+Losing a DLQ message loses nothing here. Every message has a pending ledger
+row behind it, and the gap detector reports owed evidence whatever the
+queue holds, so leaving the DLQ to expire is the right policy. The alarm
+has to fit that policy, not the other way round.
+
+**Cost** — a slow trickle of one message per period looks the same as a
+burst, and a DLQ that stops growing reads OK while it still holds messages.
+The second is intended: what is still owed is the gap detector's job.
+
+**Closing condition** — 06a gains a growth variant for DLQs that are
+diagnostic copies, or the no-purge ruling changes.

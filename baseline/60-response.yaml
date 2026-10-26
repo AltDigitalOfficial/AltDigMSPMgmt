@@ -141,6 +141,10 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       TableName: platform-remediation-history
+      # Retain covers a stack delete; this covers a direct DeleteTable call.
+      # Losing this table resets the circuit breaker's memory, which the
+      # comment above calls the worst case (DynamoDB.6, B-174).
+      DeletionProtectionEnabled: true
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - { AttributeName: resource_action,  AttributeType: S }

@@ -6997,7 +6997,7 @@ routing log). Under discussion with Jamie, 2026-10-07.
 
 ## B-156 · Runaway page: one finding cost five invocations, and OEight evidence is reaching no tenant
 
-**Open** — 2026-10-03.
+**Closed** — 2026-10-26 (opened 2026-10-03).
 
 **What happened.** `platform-lambda-invocation-runaway` (Audit) paged at
 09:29Z and again at 09:36Z. It was OK by 09:39Z. Security Hub imported
@@ -7174,6 +7174,22 @@ runaway alarms are OK, enabled, at 500, and notify `platform-alerts`.
 until the DLQ (20,830, no longer growing) expires around 2026-10-18. Item 7
 (the `/org/account` lookup) is answered: the alias is
 `altdig-security-audit`, not `audit`. Nothing to fix.
+
+**Item 3 done, 2026-10-26. B-156 is closed.** The DLQ had expired: 0 visible,
+0 in flight. Two alarms were added to `evidence/10-evidence.yaml` and
+deployed to Audit (the live stack matched HEAD, so nothing else shipped).
+Both carry the routing marker with `urgency=low` and have no direct action
+(D-028):
+- `platform-evidence-queue-stalled`: 06a's `sqs-message-age` at prod values
+  (more than 900 s for two periods). It catches a consumer that has stopped
+  receiving, which never dead-letters.
+- `platform-evidence-dlq-growing`: `DIFF` of the DLQ depth greater than 0.
+  This uses growth rather than 06a's depth, because the DLQ is left to
+  expire and a depth alarm would hold ALARM for 14 days (D-033).
+
+Not proved by a forced state change. Forcing either alarm would open a
+low-urgency incident on AltDigital Platform. The marker-to-router path is
+the one D-028 group 2 proved in this account.
 
 ## B-157 · Build D-029: evidence destinations by layer, client destination declared
 
@@ -7907,3 +7923,36 @@ standards".
 
 **Build when** — the cheap items alongside 15.6b's deploy. The tenant items at
 the next Arc8 contact. The rest as 15.6 continues.
+
+### Progress 2026-10-26
+
+**The cheap items are done.**
+- **Account settings (B-139 values plus SSM.6):** applied, then `--verify`
+  clean, in Log Archive, Audit, Forensics, Backup, Infra Tooling, Sandbox
+  Exercise and both Arc8 accounts. There were no refusals. SSM.6 is now one
+  of the script's per-region settings.
+- **Account.1:** trusted access for Account Management was already enabled
+  by the bootstrap. Nothing set the contacts on members, and all nine
+  lacked one. `apply-account-settings.sh` now sets the security, operations
+  and billing contacts from `config/contacts.env`, as the management account
+  with `--account-id`. Vesting and account creation already call that
+  script, so new accounts get the contacts too. The same AltDigital contacts
+  go on tenant accounts, because AWS's notices concern infrastructure
+  AltDigital operates.
+- **DynamoDB.6:** `DeletionProtectionEnabled` is on `platform-registry`
+  (Tooling) and on `platform-remediation-history` (the platform-response
+  StackSet: Sandbox, then Members, then a full no-op; all four instances
+  CURRENT). Verified true in every account.
+- **SES.3:** `TlsPolicy: REQUIRE` on the `platform-digest` configuration set.
+  The live stack matched HEAD, so nothing else shipped.
+
+**Corrected: Audit's GuardDuty.5–13 and Inspector.3/4 are a recorded choice,
+not a gap.** The entry above says members get these through auto-enable.
+They do not. `enable-security-services.sh` deliberately leaves the
+GuardDuty Malware, EKS and RDS plans and Inspector Lambda scanning off
+organization-wide, as per-tenant decisions. Which plans the platform should
+carry is a cost decision for Jamie: either enable them, or record the choice
+and suppress the findings.
+
+**Still open:** the tenant items (Arc8 contact), the management account's
+own settings, KMS.4/.1/.2, S3.9, and EC2.6/.15 (default VPCs).

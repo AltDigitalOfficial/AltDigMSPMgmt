@@ -18,10 +18,12 @@
 #   per region  EBS encryption by default                     EC2.7
 #               EBS snapshot public sharing blocked           EC2.182
 #               SSM document public sharing disabled          SSM.7
+#               SSM Automation script output to CloudWatch    SSM.6 (B-174)
 #               default security groups carry no rules        EC2.2, CIS 4.3
 #   global      account-level S3 Block Public Access          S3.1
 #               IAM password policy                           IAM.7, CIS 1.5-1.11
 #               a role for AWS Support incidents              CIS 1.20
+#               alternate contacts                            Account.1 (B-174)
 #
 # Only SSM.7, EC2.182 and the Support role have CloudFormation resources. Two
 # homes for one list of account settings would be two lists that drift, so
@@ -32,10 +34,11 @@
 # Called from vest-client.sh and create-platform-account.sh, so a new account
 # is not created without them.
 #
-# Not here: the security alternate contact (Account.1). For member accounts
-# it is set from the management account through Organizations trusted access
-# for Account Management, which is a management-account change of its own.
-# B-139 carries it.
+# The alternate contacts are the one setting made from the MANAGEMENT account
+# rather than inside the target. They need Organizations trusted access for
+# Account Management, which bootstrap-management-account.sh enables. The
+# values are personal data from the gitignored config/contacts.env, and only
+# the contact type and email domain are ever printed.
 #
 # ---------------------------------------------------------------------------
 # Refusals
@@ -153,6 +156,22 @@ for R in "${REGIONS[@]}"; do
         --setting-id /ssm/documents/console/public-sharing-permission --setting-value Disable
   fi
 
+  # SSM.6: output of scripts that SSM Automation runs goes to CloudWatch Logs.
+  # Without it, a runbook's executeScript output exists only in the Automation
+  # execution history, which is not retained like logs and is not under the
+  # account's log data protection policy. That matters when Automation is
+  # what the response runbooks use. SSM writes to its default log group,
+  # /aws/ssm/automation/executeScript, which it creates on first use.
+  v="$(as_t aws ssm get-service-setting --region "${R}" \
+         --setting-id /ssm/automation/customer-script-log-destination \
+         --query ServiceSetting.SettingValue --output text | no_cr)"
+  if [[ "${v}" == "CloudWatch" ]]; then have "${R} SSM Automation output to CloudWatch"; else
+    gap "${R} SSM Automation output to CloudWatch (was ${v})"
+    run "send SSM Automation script output to CloudWatch Logs in ${R}" \
+      as_t aws ssm update-service-setting --region "${R}" \
+        --setting-id /ssm/automation/customer-script-log-destination --setting-value CloudWatch
+  fi
+
   # Default security groups. Every VPC has one, including the AWS-created
   # default VPC, and any resource launched without an explicit group lands in
   # it with its rules: all egress, and all ingress from itself.
@@ -262,6 +281,50 @@ if [[ "${DRY_RUN}" != "1" ]] || as_t aws iam get-role --role-name "${SUPPORT_ROL
       as_t aws iam attach-role-policy --role-name "${SUPPORT_ROLE}" \
         --policy-arn arn:aws:iam::aws:policy/AWSSupportAccess
   fi
+fi
+
+# Account.1. AWS sends security, operations and billing notices to these.
+# Unset, they reach only the root mailbox, a plus-addressed alias that no
+# person reads as their own. The values are the same in every account: AWS's
+# notices concern the infrastructure, which AltDigital operates whichever
+# team owns the application.
+#
+# Set as the management account with --account-id, not through as_t. That is
+# the Organizations-native path, and it is not subject to any SCP on the
+# member. Not routed through run(): its dry-run line echoes the full command,
+# which would print names, direct emails and phone numbers into the terminal
+# and anything it is pasted into.
+CONTACTS_FILE="${REPO_ROOT}/config/contacts.env"
+if [[ ! -f "${CONTACTS_FILE}" ]]; then
+  refuse "alternate contacts: config/contacts.env not found. Copy config/contacts.env.example and fill it in."
+else
+  # shellcheck source=/dev/null
+  source "${CONTACTS_FILE}"
+  for type in SECURITY OPERATIONS BILLING; do
+    name_var="CONTACT_${type}_NAME";   email_var="CONTACT_${type}_EMAIL"
+    phone_var="CONTACT_${type}_PHONE"; title_var="CONTACT_${type}_TITLE"
+    if [[ -z "${!name_var:-}" || -z "${!email_var:-}" || -z "${!phone_var:-}" || -z "${!title_var:-}" ]] \
+       || ! phone="$(normalise_phone "${!phone_var}")"; then
+      refuse "${type} alternate contact: incomplete in contacts.env, or the phone is not a resolvable number."
+      continue
+    fi
+    domain="@${!email_var##*@}"
+    cur="$(aws account get-alternate-contact --account-id "${TARGET_ACCOUNT}" \
+             --alternate-contact-type "${type}" \
+             --query 'AlternateContact.[Name,EmailAddress,PhoneNumber,Title]' \
+             --output text 2>/dev/null | no_cr || true)"
+    if [[ "${cur}" == "${!name_var}"$'\t'"${!email_var}"$'\t'"${phone}"$'\t'"${!title_var}" ]]; then
+      have "${type} alternate contact (${domain})"
+    else
+      gap "${type} alternate contact (${domain}; was $([[ -n "${cur}" ]] && echo different || echo unset))"
+      if [[ "${DRY_RUN}" != "1" ]]; then
+        aws account put-alternate-contact --account-id "${TARGET_ACCOUNT}" \
+          --alternate-contact-type "${type}" \
+          --name "${!name_var}" --email-address "${!email_var}" \
+          --phone-number "${phone}" --title "${!title_var}"
+      fi
+    fi
+  done
 fi
 
 hr

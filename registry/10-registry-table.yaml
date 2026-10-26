@@ -92,6 +92,11 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       TableName: !Ref TableName
+      # Retain only protects against a STACK delete. A direct DeleteTable call,
+      # by a person or a script with the wrong table name, would still take it.
+      # Deletion protection refuses that call until someone turns protection
+      # off first, which is a deliberate second step (DynamoDB.6, B-174).
+      DeletionProtectionEnabled: true
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - { AttributeName: PK,               AttributeType: S }

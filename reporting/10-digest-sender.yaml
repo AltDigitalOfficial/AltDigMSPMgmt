@@ -184,6 +184,13 @@ Resources:
         ReputationMetricsEnabled: true
       SendingOptions:
         SendingEnabled: true
+      # The digest names a tenant's accounts and what is monitored in them.
+      # REQUIRE means SES will not fall back to cleartext when the receiving
+      # server lacks TLS; it bounces instead, and the bounce path above turns
+      # that into a finding rather than a silent plaintext delivery (SES.3,
+      # B-174).
+      DeliveryOptions:
+        TlsPolicy: REQUIRE
 
   BounceTopic:
     Type: AWS::SNS::Topic
