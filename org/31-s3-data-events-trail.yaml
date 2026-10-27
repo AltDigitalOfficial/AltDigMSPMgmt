@@ -39,6 +39,13 @@ Description: >-
 # still recorded, by the second selector: who read the audit logs is exactly
 # the access worth evidencing, and nothing the trail does is a read.
 #
+# Except one reader: S3 replication. It reads every delivered file twice
+# (GetObject, GetObjectAcl) to copy it to the replica, and those reads are
+# themselves delivered and replicated. That does not run away, since it scales
+# with file count, but on the first day it was 931 of the 1,125 data events in
+# Log Archive, burying the human reads this selector exists for. Measured
+# 2026-10-26; the replication identity was read from those records.
+#
 # Retention is the archive's: Object Lock COMPLIANCE, 2190 days, bucket-wide.
 # Whatever volume this writes is kept for six years and cannot be removed. The
 # only lever on that cost is narrowing these selectors going forward.
@@ -57,6 +64,14 @@ Parameters:
     Type: String
     Description: KMS key ARN in the Log Archive account used to encrypt trail objects.
     AllowedPattern: '^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/.+$'
+
+  LogArchiveAccountId:
+    Type: String
+    Description: >-
+      The Log Archive account, where the replication roles whose reads are
+      excluded live. Read from /platform/org/account/altdig-security-logarchive
+      at deploy time; not hardcoded.
+    AllowedPattern: '^[0-9]{12}$'
 
   TrailName:
     Type: String
@@ -97,7 +112,7 @@ Resources:
             - Field: resources.ARN
               NotStartsWith:
                 - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-'
-        - Name: Reads of the log archive and its replica
+        - Name: Reads of the log archive and its replica, except replication
           FieldSelectors:
             - { Field: eventCategory,  Equals: [Data] }
             - { Field: resources.type, Equals: ['AWS::S3::Object'] }
@@ -105,6 +120,10 @@ Resources:
             - Field: resources.ARN
               StartsWith:
                 - !Sub 'arn:${AWS::Partition}:s3:::altdig-log-archive-'
+            - Field: userIdentity.arn
+              NotStartsWith:
+                - !Sub 'arn:${AWS::Partition}:sts::${LogArchiveAccountId}:assumed-role/PlatformArchiveReplication/'
+                - !Sub 'arn:${AWS::Partition}:sts::${LogArchiveAccountId}:assumed-role/PlatformArchiveBatchReplication/'
 
       Tags:
         - { Key: platform-managed, Value: 'true' }

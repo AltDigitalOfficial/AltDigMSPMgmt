@@ -161,6 +161,38 @@ for acct in $(aws organizations list-accounts \
 done
 hr
 
+# --- S3 object access: the data events trail (ADR-013) ----------------------
+#
+# The conformance pack's Guard rule proves the trail is configured and logging
+# from Config's record of it. That record cannot see two things, so they are
+# checked here: a DELETED trail (nothing left to evaluate) and the selectors
+# themselves (Config records only that custom selectors exist). The selector
+# check is exact: the main selector must cover every S3 object and exclude only
+# the log archive. A second exclusion would silently stop evidencing a bucket.
+log "S3 object access trail"
+DE_TRAIL="platform-s3-data-events"
+DE_MAIN="S3 object access in every bucket except the log archive"
+de_logging="$(aws cloudtrail get-trail-status --region "${PLATFORM_HOME_REGION}" --name "${DE_TRAIL}" \
+                --query IsLogging --output text 2>/dev/null | no_cr || true)"
+de_type="$(aws cloudtrail get-event-selectors --region "${PLATFORM_HOME_REGION}" --trail-name "${DE_TRAIL}" \
+             --query "AdvancedEventSelectors[?Name=='${DE_MAIN}'] | [0].FieldSelectors[?Field=='resources.type'] | [0].Equals" \
+             --output text 2>/dev/null | no_cr || true)"
+de_excl="$(aws cloudtrail get-event-selectors --region "${PLATFORM_HOME_REGION}" --trail-name "${DE_TRAIL}" \
+             --query "AdvancedEventSelectors[?Name=='${DE_MAIN}'] | [0].FieldSelectors[?Field=='resources.ARN'] | [0].NotStartsWith" \
+             --output text 2>/dev/null | no_cr || true)"
+if [[ "${de_logging}" == "True" && "${de_type}" == "AWS::S3::Object" \
+      && "${de_excl}" == "arn:aws:s3:::altdig-log-archive-" ]]; then
+  printf '%s  ok%s  %-12s %-10s %s\n' "${C_GREEN}" "${C_RESET}" "s3-access" "org" \
+    "${DE_TRAIL} logging; every bucket but the log archive"
+  ROWS+=("PASS|s3-data-events|org|1|1")
+else
+  printf '%s GAP%s  %-12s %-10s %s logging=%s type=%s exclusions=%s\n' "${C_RED}" "${C_RESET}" \
+    "s3-access" "org" "${DE_TRAIL}" "${de_logging:-absent}" "${de_type:-none}" "${de_excl:-none}"
+  ROWS+=("GAP|s3-data-events|org|0|1")
+  GAPS=$((GAPS+1))
+fi
+hr
+
 if [[ ${OUTPUT_JSON} -eq 1 ]]; then
   printf '{"expected":%s,"gaps":%s,"results":[' "${EXPECTED}" "${GAPS}"
   first=1
@@ -179,5 +211,7 @@ fi
       idempotent and enrols existing accounts as well as future ones.
       Config: a member account is missing the platform-config stack set (its OU
       is not targeted, or its instance is not CURRENT; settle-baseline.sh
-      shows which). The management account needs its own stack (ADR-010)."
+      shows which). The management account needs its own stack (ADR-010).
+      S3 object access: org/31-s3-data-events-trail.yaml in the management
+      account (ADR-013); an exclusion beyond the log archive is a gap."
 ok "Every account is covered by every service in every region."

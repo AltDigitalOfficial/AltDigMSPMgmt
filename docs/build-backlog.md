@@ -7956,3 +7956,29 @@ and suppress the findings.
 
 **Still open:** the tenant items (Arc8 contact), the management account's
 own settings, KMS.4/.1/.2, S3.9, and EC2.6/.15 (default VPCs).
+
+## B-175 · The management account forwards no events: organization trail tampering pages nobody
+
+**Open** — 2026-10-26. Found while building ADR-013.
+
+Both organization trails (`platform-organization-trail` and, since ADR-013,
+`platform-s3-data-events`) can only be stopped, deleted or re-scoped from the
+management account. The protected-action forwarding rule
+(`baseline/70-event-forwarding.yaml`, `platform-forward-protected-actions`) is
+a StackSet resource, and StackSets cannot reach the management account. That
+account's only EventBridge rules are Inspector's. So a `StopLogging`,
+`DeleteTrail`, `UpdateTrail` or `PutEventSelectors` on either trail reaches the
+router from nowhere. It is visible only after the fact, through the
+`control-tampering-attempts` Athena query (`security/50-trail-query.yaml`).
+
+The management account is not subject to SCPs. Nothing preventive applies
+there either.
+
+Also: the member rule lists `StopLogging`, `DeleteTrail` and `UpdateTrail`
+but not `PutEventSelectors`, which is how a trail is narrowed without being
+stopped. Add it there too.
+
+**Build with** 15.5 step 2 (root-use detection, phase 15 plan finding 12).
+That needs a management-account forwarding stack for root `ConsoleLogin`, and
+this is the same stack. Until then, `verify-security-coverage.sh` checks the
+S3 data events trail's logging state and selectors whenever it runs.

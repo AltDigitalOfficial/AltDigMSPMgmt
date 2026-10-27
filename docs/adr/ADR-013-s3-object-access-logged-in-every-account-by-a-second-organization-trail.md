@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-26
 **Deciders:** Jamie (object-access logging, every account, organization trail, 2026-10-26); Claude (session), unreviewed (the separate trail, the prefix, the loop exclusion)
-**Status:** Accepted — not built (templates committed; log archive policy and trail not yet deployed)
+**Status:** Accepted (deployed 2026-10-26/27; verified: delivering from every account, archive writes absent, replication reads excluded, `verify-security-coverage.sh` passes)
 **Tags:** cloudtrail, s3, data-events, hipaa, log-archive, phase-15.6
 
 ---
@@ -114,3 +114,53 @@ reader and the management trail untouched.
 
 ADR-004, ADR-008, ADR-012, D-024, B-005, docs/hipaa-control-mapping.md,
 auditor guide §6.
+
+## Amendment — 2026-10-26
+
+**Deployed the same day**, and two things learned from the first files.
+
+1. **AWS's managed rule cannot recognise this trail.** In every account,
+   including the management account that owns the trail,
+   `CLOUDTRAIL_S3_DATAEVENTS_ENABLED` reported *"No AWS CloudTrail Trail is
+   configured to log data events for Amazon S3"* while the trail was logging
+   and delivering. Member accounts could read the trail's selectors, so the
+   cause is the ARN exclusion, not visibility. This was the unverified risk
+   under *Consequences*.
+
+   Jamie, 2026-10-26: keep the exclusion and replace the managed rule with a
+   check of what was built (option 1 of three). The alternatives were:
+   - dropping the exclusion: a loop risk, with every byte locked for six
+     years and no non-production trail to test on;
+   - suppressing the finding, which would also hide a real stop.
+
+   The replacement has two parts:
+   - `platform-s3-data-events-trail-configured`, a Guard policy rule in the
+     account-level pack (ADR-012 amendment). It checks Config's record of the
+     trail: logging, organization-wide, multi-region, validated, under
+     `data-events`, with custom selectors.
+   - `verify-security-coverage.sh`, which checks what the record cannot see:
+     the trail's absence, and the exact selectors.
+
+2. **Replication reads were most of the archive's volume.** In the first
+   twenty minutes, 931 of the 1,125 data events in Log Archive were S3
+   replication reading each delivered file (`GetObject` and `GetObjectAcl` by
+   `PlatformArchiveReplication`). This is bounded, because it scales with file
+   count, but it buried the human reads. The reads selector now excludes both
+   replication roles by `userIdentity.arn`. The template takes a new
+   parameter, `LogArchiveAccountId`.
+
+   Writes to the archive and its replica were confirmed absent, so the
+   exclusion works.
+
+**Verified after the change:**
+- Replication reads of the log archive fell from about 1,900 in the hour
+  before to none.
+- Events with no ARN are kept. The hourly cross-account `ListObjects` burst
+  from Audit (identity type `AWSAccount`, no ARN; 60 on the archive, 30 on
+  the Config archive) was recorded at 03:00 UTC as it was at 02:00, under the
+  new selector.
+- `platform-s3-data-events-trail-configured` is COMPLIANT in the management
+  account.
+
+**Found:** the management account forwards no events, so tampering with
+either organization trail pages nobody (B-175).

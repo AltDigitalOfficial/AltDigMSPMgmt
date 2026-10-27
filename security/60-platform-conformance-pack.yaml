@@ -166,16 +166,51 @@ Resources:
     Condition: IsHomeRegion
     Properties:
       OrganizationConformancePackName: platform-conformance-account
+      # Not AWS's CLOUDTRAIL_S3_DATAEVENTS_ENABLED. That rule accepts only a
+      # trail logging every bucket unfiltered, and ours must exclude the log
+      # archive's own writes or its deliveries log themselves (ADR-013). On
+      # 2026-10-26 it reported NON_COMPLIANT in every account, including the
+      # management account that owns the trail, while the trail was logging
+      # and delivering. A control that fails by design either gets suppressed
+      # (and then hides a real stop) or teaches people to ignore it.
+      #
+      # So this checks what was built, from Config's record of the trail.
+      # That record carries isLogging and hasCustomEventSelectors but NOT the
+      # selectors themselves, and a deleted trail leaves nothing to evaluate.
+      # verify-security-coverage.sh checks both of those directly, and B-175
+      # covers the management account forwarding nothing at all.
+      #
+      # The trail is recorded only in the management account, so that is the
+      # one account where this evaluates. Elsewhere it has nothing to judge.
       TemplateBody: |
         Resources:
-          # Satisfied by org/31-s3-data-events-trail.yaml (ADR-013).
-          CloudtrailS3DataeventsEnabled:
+          S3DataEventsTrailConfigured:
             Type: AWS::Config::ConfigRule
             Properties:
-              ConfigRuleName: platform-cloudtrail-s3-dataevents-enabled
+              ConfigRuleName: platform-s3-data-events-trail-configured
+              Description: The S3 object-access organization trail (ADR-013) is logging, organization-wide, multi-region and validated.
+              Scope:
+                ComplianceResourceTypes: [AWS::CloudTrail::Trail]
               Source:
-                Owner: AWS
-                SourceIdentifier: CLOUDTRAIL_S3_DATAEVENTS_ENABLED
+                Owner: CUSTOM_POLICY
+                SourceDetails:
+                  - EventSource: aws.config
+                    MessageType: ConfigurationItemChangeNotification
+                  - EventSource: aws.config
+                    MessageType: OversizedConfigurationItemChangeNotification
+                CustomPolicyDetails:
+                  PolicyRuntime: guard-2.x.x
+                  EnableDebugLogDelivery: false
+                  PolicyText: |
+                    rule s3_data_events_trail when configuration.name == "platform-s3-data-events" {
+                      configuration.isOrganizationTrail == true
+                      configuration.isMultiRegionTrail == true
+                      configuration.logFileValidationEnabled == true
+                      configuration.hasCustomEventSelectors == true
+                      configuration.s3KeyPrefix == "data-events"
+                      supplementaryConfiguration.isLogging == "true" or
+                      supplementaryConfiguration.isLogging == true
+                    }
 
 Outputs:
 

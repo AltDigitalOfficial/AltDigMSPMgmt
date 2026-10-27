@@ -115,3 +115,17 @@ pack.
 
 ADR-011, ADR-013, D-032, design 04, docs/hipaa-control-mapping.md, B-043,
 B-047, phase 15 plan 15.6.
+
+## Amendment — 2026-10-26
+
+The account-level pack no longer runs AWS's `CLOUDTRAIL_S3_DATAEVENTS_ENABLED`.
+That rule cannot recognise a trail that excludes any bucket, and ADR-013's
+trail must exclude the log archive's own writes. The rule failed in every
+account while the trail was working (ADR-013 amendment). The pack now holds
+`platform-s3-data-events-trail-configured`, a Guard policy rule over Config's
+record of the trail. It evaluates only in the management account, the one
+account where Config records an organization trail. Elsewhere it has nothing
+to judge.
+
+Of the 13 rules in the HIPAA delta, 9 are AWS managed rules in this pack. The
+tenth safeguard is met by a rule of the platform's own.
