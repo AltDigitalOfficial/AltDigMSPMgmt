@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-26
 **Deciders:** Jamie (every account, 2026-10-26); Claude (session), unreviewed (the rule list and the two-pack split)
-**Status:** Accepted — not built (templates committed; not yet deployed from Audit)
+**Status:** Accepted (deployed 2026-10-26: platform-conformance-regional in every account in all three regions, platform-conformance-account in every account in us-east-2, the management account included)
 **Tags:** config, conformance-pack, hipaa, phase-15.6, security-hub
 
 ---

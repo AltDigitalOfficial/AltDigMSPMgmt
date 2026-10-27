@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-26
 **Deciders:** Jamie (accepted the recommendation, 2026-10-26)
-**Status:** Accepted — not built (script changed; not yet run)
+**Status:** Accepted (applied 2026-10-26 in all three regions; verified on the organization configuration, Audit, Arc8 dev and the management account)
 **Tags:** guardduty, security-hub, phase-15.6, b-174, cost
 
 ---

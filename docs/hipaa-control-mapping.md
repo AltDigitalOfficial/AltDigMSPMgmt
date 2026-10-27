@@ -176,10 +176,12 @@ exercises. The guide's §17 lists what the repository does not hold.
 
 Step 4 asked for "only the delta as the platform conformance pack". These are
 the 13 rules in AWS's HIPAA mapping that no enabled Security Hub control or
-platform rule runs. A proposed disposition is given for each. **Nothing here
-is deployed yet** (section 7).
+platform rule runs, and what was done with each. The adopted rules are
+deployed as the platform conformance pack
+([security/60-platform-conformance-pack.yaml](../security/60-platform-conformance-pack.yaml),
+ADR-012) in every account and region since 2026-10-26.
 
-| Rule | Citations | Proposed | Why |
+| Rule | Citations | Disposition | Why |
 |---|---|---|---|
 | `backup-plan-min-frequency-and-min-retention-check` | 164.312(a)(2)(ii) | Adopt | Backup plans exist; nothing checks their frequency and retention. Fails until B-043's organization backup policy exists, which is accurate |
 | `backup-recovery-point-manual-deletion-disabled` | 164.312(a)(2)(ii) | Adopt | Vault Lock is on the platform's copy vault; this checks every vault, including tenants' |
@@ -190,7 +192,7 @@ is deployed yet** (section 7).
 | `ecs-task-definition-user-for-host-mode-check` | 164.308(a)(3), (a)(4), 164.312(a)(1) | Adopt | Evaluates nothing until a tenant runs ECS in host mode |
 | `emr-kerberos-enabled` | 164.308(a)(3), (a)(4), 164.312(a)(1) | Adopt | Evaluates nothing until a tenant runs EMR |
 | `sagemaker-endpoint-configuration-kms-key-configured` | 164.312(a)(2)(iv), (e)(2)(ii) | Adopt | Evaluates nothing until a tenant runs SageMaker endpoints |
-| `cloudtrail-s3-dataevents-enabled` | 164.308(a)(3)(ii)(A), 164.312(b) | **Decision** | Fails in every account, because data events are off (§6). Whether ePHI buckets record object access is a cost decision, and it is the most material HIPAA gap here. Adopt the rule with whatever is decided |
+| `cloudtrail-s3-dataevents-enabled` | 164.308(a)(3)(ii)(A), 164.312(b) | Adopt, account-level pack | Satisfied by the S3 data events organization trail (ADR-013). Before it, this was the most material HIPAA gap here |
 | `iam-no-inline-policy-check` | 164.308(a)(3), (a)(4), 164.312(a)(1) | Do not adopt | Platform roles use stack-scoped inline policies by design, so it would flag every one of them. KMS.2 already covers the dangerous case, inline decrypt on all keys |
 | `internet-gateway-authorized-vpc-only` | 164.308(a)(1)(ii)(B), (a)(3), (a)(4), 164.312(a)(1), (e)(1) | Not now | Needs a per-account list of authorised VPCs. It belongs with the registry, once a tenant has more than one VPC |
 | `dynamodb-throughput-limit-check` | 164.308(a)(1)(ii)(B), 164.312(b) | Do not adopt | A capacity check, not a safeguard. 06a's DynamoDB alarms cover it |
@@ -203,11 +205,10 @@ is deployed yet** (section 7).
   by default, and Security Hub retired the equivalent control.
 - `ec2-instances-in-vpc`: EC2-Classic is retired, so the rule cannot fail.
 
-**Effect on vesting.** `derivation-rules.yaml` maps `hipaa` to AWS's full
-sample pack. Deployed as is, it would re-run 110 rules that Security Hub
-already evaluates in that account, paying for each evaluation twice and
-reporting each failure twice. Nothing deploys it today (phase 15 plan,
-15.6 finding 6). The delta pack should replace it.
+**Effect on vesting.** `derivation-rules.yaml` used to map `hipaa` to AWS's
+full sample pack, which would have re-run 110 rules Security Hub already
+evaluates, paying and reporting twice. It now maps `hipaa` to no pack and
+lists it under `covered_in_every_account` (ADR-012).
 
 ---
 
@@ -224,20 +225,22 @@ The delta pack's own marginal cost is small. It adds 9 rules beside the
 381 Security Hub already runs per account-region, and 3 of the 9 have
 nothing to evaluate today.
 
+Two decisions taken with this mapping are not small. S3 data events in every
+account (ADR-013) and GuardDuty S3 Protection (ADR-014) both scale with
+tenant S3 request volume, and data-event files are kept six years under
+Object Lock. They are measured with the rest.
+
 ---
 
-## 7. Open decisions
+## 7. Decisions taken (Jamie, 2026-10-26)
 
-1. **Where the delta pack applies.** Either an organization conformance
-   pack from Audit for every account (detective controls are uniform across
-   tiers, design 02 and 14), or only accounts whose `compliance_scope`
-   includes `hipaa` (design 04: packs "driven by the tenant's frameworks").
-   **Recommended: every account.** Each of the nine is ordinary hygiene, and
-   none is specific to PHI. Either way, `derivation-rules.yaml` stops
-   mapping `hipaa` to AWS's full pack.
-2. **S3 data events for buckets holding ePHI**, which decides
-   `cloudtrail-s3-dataevents-enabled`. This is the gap an assessor is most
-   likely to press on under 164.312(b).
+1. **The delta pack applies to every account**, as an organization
+   conformance pack from Audit. ADR-012.
+2. **S3 object access is logged in every account**, by a second
+   organization trail. ADR-013. This closes the 164.312(b) gap in §3 once
+   the trail is delivering.
+3. **GuardDuty S3 and Lambda Protection in every account**; the other plans
+   per tenant. ADR-014.
 
 ---
 

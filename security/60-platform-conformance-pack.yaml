@@ -43,8 +43,14 @@ Description: >-
 # Deploy, once per allowed region:
 #   scripts/deploy-to-account.sh --account altdig-security-audit \
 #     --template security/60-platform-conformance-pack.yaml \
-#     --stack platform-conformance-pack --region <region> \
+#     --stack platform-conformance --region <region> \
 #     HomeRegion=us-east-2
+#
+# platform-conformance, not platform-conformance-pack. The first attempt
+# (2026-10-26) failed on the management account's missing service-linked
+# role (now created by bootstrap-management-account.sh, step 4c) and rolled
+# back. Its ROLLBACK_COMPLETE stack holds nothing and is left in place, as
+# failed artefacts are, rather than deleted by hand.
 
 Parameters:
 

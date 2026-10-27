@@ -203,6 +203,24 @@ else
 fi
 hr
 
+# --- 4c. Config multi-account service-linked role -------------------------
+#
+# Organization conformance packs and Config rules deployed from Audit run in
+# each account as AWSServiceRoleForConfigMultiAccountSetup. Trusted access
+# creates it in every MEMBER account, but not in the management account. There
+# the pack fails with UnableToAssumeServiceLinkedRoleException, while every
+# member succeeds (seen 2026-10-26 deploying ADR-012's packs). So the
+# management account would be the only account outside the pack, and nothing
+# but that one status line would say so.
+
+if aws iam get-role --role-name AWSServiceRoleForConfigMultiAccountSetup >/dev/null 2>&1; then
+  skip "Config multi-account service-linked role exists"
+else
+  run "Create the Config multi-account service-linked role" \
+    aws iam create-service-linked-role --aws-service-name config-multiaccountsetup.amazonaws.com
+fi
+hr
+
 # --- 5. account alias ------------------------------------------------------
 
 CURRENT_ALIAS="$(aws iam list-account-aliases --query 'AccountAliases[0]' \
