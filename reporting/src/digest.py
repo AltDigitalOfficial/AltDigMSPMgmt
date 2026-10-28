@@ -404,6 +404,22 @@ def render_attention(doc, facts_status, tz):
             "",
         ]
 
+    # Certificates and domains about to expire. Here rather than under the
+    # exposure section because an expiry is an outage with a date on it.
+    # Design 02: detection is AltDigital's under every service model; who
+    # renews follows the model.
+    expiring = (doc.get("exposure") or {}).get("expiring") or []
+    if expiring:
+        shown = True
+        lines.append(f"Expiring soon ({len(expiring)}):")
+        for e in expiring[:20]:
+            when = fmt_time(e.get("expires"), tz)
+            where = "" if e.get("where") in (None, "global") else f", {e['where']}"
+            lines.append(f"  - {e.get('kind')} {e.get('name')}{where}: expires {when}, "
+                         f"in {e.get('days')} days")
+            lines.append(f"    {e.get('cause')}")
+        lines.append("")
+
     if src.get("router") != "ok":
         lines += ["HIPAA eligibility and telemetry findings: could not be read today.", ""]
         shown = True
@@ -433,6 +449,78 @@ def render_attention(doc, facts_status, tz):
 
     if not shown:
         lines += ["Nothing needs your attention.", ""]
+    return lines
+
+
+def render_exposure(doc):
+    """What in the account can be reached from the internet. ADR-015.
+
+    Shown every day, including when empty, and never shortened silently. The
+    ruling it serves is that the team may build what it likes in dev and the
+    development manager decides what to do about public access. That only
+    works if the manager can see the access, every day, until something is
+    done about it, so a quiet section has to say what was checked.
+
+    The wording reports and never instructs. It names the gap, and the
+    decision stays with the team.
+    """
+    lines = _rule("Reachable from the internet")
+    if doc is None:
+        lines += ["Not available for this window (see above).", ""]
+        return lines
+    ex = doc.get("exposure")
+    if not ex:
+        lines += ["Not checked yet for this account.", ""]
+        return lines
+    status = ex.get("status") or ""
+    if status.startswith("error"):
+        lines += ["Could not be checked today: AltDigital could not read this account.",
+                  "AltDigital has been told.", ""]
+        return lines
+
+    findings = (ex.get("findings") or {}).get("items") or []
+    total = (ex.get("findings") or {}).get("total", len(findings))
+    risky = [f for f in findings if f.get("risks")]
+    other = [f for f in findings if not f.get("risks")]
+
+    if not findings:
+        lines.append("Nothing we check is reachable from the internet.")
+    else:
+        if risky:
+            lines.append(f"Reachable, with no protection in front of it ({len(risky)}):")
+            for f in risky[:25]:
+                where = "" if f.get("where") in (None, "global") else f", {f['where']}"
+                lines.append(f"  - {f.get('kind')} {f.get('name')}{where}")
+                for r in f["risks"]:
+                    lines.append(f"    ! {r}")
+                for n in f.get("notes") or []:
+                    lines.append(f"      {n}")
+            if len(risky) > 25:
+                lines.append(f"  ... and {len(risky) - 25} more")
+            lines += [
+                "",
+                "  Each line above is something anyone on the internet can reach.",
+                "  What to do about it is your team's decision. AltDigital reports it",
+                "  here every day and will not change it.",
+                "",
+            ]
+        if other:
+            lines.append(f"Also public ({len(other)}):")
+            for f in other[:25]:
+                where = "" if f.get("where") in (None, "global") else f", {f['where']}"
+                notes = "; ".join(f.get("notes") or [])
+                lines.append(f"  - {f.get('kind')} {f.get('name')}{where}"
+                             + (f" — {notes}" if notes else ""))
+            if len(other) > 25:
+                lines.append(f"  ... and {len(other) - 25} more")
+            lines.append("")
+        if total > len(findings):
+            lines.append(f"(The list is capped at {len(findings)} of {total}.)")
+    if ex.get("unchecked"):
+        lines.append("Could not be checked today: " + ", ".join(ex["unchecked"]) + ".")
+    if ex.get("not_checked"):
+        lines.append("Not checked at all: " + ", ".join(ex["not_checked"]) + ".")
+    lines.append("")
     return lines
 
 
@@ -513,6 +601,7 @@ def render(account, data, doc, facts_status, start, end, tz, tz_name, tz_note):
         "",
     ]
     lines += render_attention(doc, facts_status, tz)
+    lines += render_exposure(doc)
     lines += render_team(doc)
     lines += render_monitoring(data, tz)
     lines += _rule("Cost")

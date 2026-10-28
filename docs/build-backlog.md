@@ -7982,3 +7982,46 @@ stopped. Add it there too.
 That needs a management-account forwarding stack for root `ConsoleLogin`, and
 this is the same stack. Until then, `verify-security-coverage.sh` checks the
 S3 data events trail's logging state and selectors whenever it runs.
+
+---
+
+## B-176 · Internet exposure and expiry: the digest could not see what was public
+
+**Built 2026-10-28, not yet deployed.** ADR-015 (the ruling), ADR-016 (the
+mechanism).
+
+ADR-015 lets a tenant's team build anything in dev on condition that it shows
+up in the manager digest. On the day of the ruling, Arc8 dev had three
+CloudFront distributions with no web ACL, in front of an instance whose SSH
+port was open to `0.0.0.0/0`, and the digest said nothing about any of it.
+Design 02 also promises certificate expiry monitoring under every service
+model, and nothing provided it.
+
+**What it is:**
+- `reporting/00-exposure-reader.yaml`: `PlatformExposureReader`, list-only,
+  as StackSet `platform-exposure-reader` to sandbox, members, security and
+  infra;
+- `reporting/src/exposure.py`: reads and judges, shared by both callers;
+- `facts.py`: an `exposure` source in each facts document;
+- `digest.py`: *Reachable from the internet*, shown every day, with expiring
+  certificates and domains under *Needs your attention*;
+- `reporting/30-expiry-watch.yaml` and `reporting/src/expiry.py`:
+  `platform-expiry-watch`, daily at 14:00 UTC in Audit, sending
+  `expiry-warning` dossiers to the router, plus
+  `platform-expiry-watch-incomplete`;
+- `router.py`: the `expiry-warning` normaliser;
+- `scripts/test-exposure.py`.
+
+**To deploy, in order:** the StackSet to each OU; `publish-digest.sh`; then
+`platform-digest-facts`, `platform-expiry-watch` and `platform-digest`; then
+`publish-router.sh` and the router. Invoke facts and the expiry watch by hand,
+then run the digest with `{"dry_run": true}` and read Arc8 dev's body.
+
+**To close:** Arc8 dev's dry-run digest shows the three distributions and the
+SSH line. The expiry watch run is clean across every account in the tier map.
+An `expiry-warning` routed for a real or seeded certificate appears in the
+router log with `routing: digest` for a dev account.
+
+**Not covered** (listed in every digest): Lambda function URLs, public S3,
+ECS tasks with public IPs, App Runner, Elastic Beanstalk, Lightsail, Global
+Accelerator. Who created each public resource arrives with Stage B (B-171).

@@ -32,6 +32,14 @@ Sources, and what each one is for
              `platform-managed`: an untagged platform resource is AltDigital's
              gap and goes to the platform digest, not the client's.
 
+  exposure   What in each account can be reached from the internet, and which
+             certificates and domains are about to expire (exposure.py,
+             ADR-015, ADR-016). Read inside the account through
+             PlatformExposureReader, because Route 53 Domains and web ACL
+             associations are not in the Config aggregator. The one source
+             that crosses into member accounts, and the role it assumes can
+             only list and describe.
+
   trail      Not built. Recorded as such in every document, so the digest says
              "not available yet" rather than rendering an empty section that
              reads as a quiet day. Arrives with security/50 (B-171 stage B).
@@ -63,6 +71,8 @@ import os
 
 import boto3
 
+import exposure
+
 FACTS_BUCKET = os.environ.get("FACTS_BUCKET", "")
 ACCOUNT_TIER_PARAM = os.environ.get("ACCOUNT_TIER_PARAM", "/platform/routing/account-tiers")
 ROUTER_LOG_GROUP = os.environ.get("ROUTER_LOG_GROUP", "/aws/lambda/platform-router")
@@ -71,6 +81,10 @@ SPEC_PATH = os.environ.get("SPEC_PATH", "alarm-spec.json")
 WINDOW_END_HOUR = int(os.environ.get("WINDOW_END_HOUR", "12"))
 WINDOW_HOURS = int(os.environ.get("WINDOW_HOURS", "24"))
 METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "Platform/DigestFacts")
+EXPOSURE_ROLE = os.environ.get("EXPOSURE_ROLE_NAME", "PlatformExposureReader")
+# config/platform.env PLATFORM_ALLOWED_REGIONS, passed in by the template.
+EXPOSURE_REGIONS = [r for r in os.environ.get(
+    "EXPOSURE_REGIONS", "us-east-1,us-east-2,us-west-2").split(",") if r]
 
 # Digest-class decisions the MANAGER digest renders, by router source. Others
 # (Security Hub, GuardDuty, Config rule findings in dev) are counted, not
@@ -89,6 +103,7 @@ logs = boto3.client("logs")
 config = boto3.client("config")
 s3 = boto3.client("s3")
 cloudwatch = boto3.client("cloudwatch")
+sts = boto3.client("sts")
 
 
 def _now():
@@ -264,6 +279,56 @@ def classify_layer(rows):
 
 
 # ---------------------------------------------------------------------------
+# Exposure
+# ---------------------------------------------------------------------------
+
+
+def account_clients(account_id, session_name):
+    """A client factory, make(service, region), inside one account.
+
+    One assume per account, shared by every client the inventory needs.
+    expiry.py uses it too: the same role, read for the same facts.
+    """
+    creds = sts.assume_role(
+        RoleArn=f"arn:aws:iam::{account_id}:role/{EXPOSURE_ROLE}",
+        RoleSessionName=session_name)["Credentials"]
+    kw = {"aws_access_key_id": creds["AccessKeyId"],
+          "aws_secret_access_key": creds["SecretAccessKey"],
+          "aws_session_token": creds["SessionToken"]}
+    cache = {}
+
+    def make(service, region):
+        key = (service, region)
+        if key not in cache:
+            cache[key] = boto3.client(service, region_name=region, **kw)
+        return cache[key]
+    return make
+
+
+def read_exposure(account_id, start, end):
+    """{"status", "inventory", "findings", "expiring", "unchecked"}.
+
+    status   ok         every section read, or blocked by an SCP (which means
+                        nothing of that kind can exist in the account)
+             partial    some sections or regions could not be read; the email
+                        names them
+             error: ... the role could not be assumed; nothing was read
+    """
+    try:
+        make = account_clients(account_id, "platform-digest-exposure")
+    except Exception as exc:                          # noqa: BLE001
+        return {"status": f"error: {type(exc).__name__}: {exc}"[:300],
+                "inventory": None, "findings": [], "expiring": [], "unchecked": []}
+    inv = exposure.read_account(make, EXPOSURE_REGIONS, since=start)
+    missing = exposure.unchecked(inv)
+    return {"status": "partial" if missing else "ok",
+            "inventory": inv,
+            "findings": exposure.assess(inv),
+            "expiring": exposure.expiring(inv, now=end),
+            "unchecked": missing}
+
+
+# ---------------------------------------------------------------------------
 # Writing
 # ---------------------------------------------------------------------------
 
@@ -298,10 +363,24 @@ def gather(now=None):
 
     status["trail"] = "not-built: needs security/50 (B-171 stage B)"
 
+    # Per account, read inside the account. One account that cannot be read
+    # does not stop the others, and is named in the estate document.
+    exposed, exposure_problems = {}, {}
+    for acct in sorted(tiers):
+        exposed[acct] = read_exposure(acct, start, end)
+        st = exposed[acct]["status"]
+        if st == "partial":
+            exposure_problems[acct] = "partial: " + ", ".join(exposed[acct]["unchecked"])
+        elif st != "ok":
+            exposure_problems[acct] = st
+    status["exposure"] = ("ok" if not exposure_problems
+                          else f"incomplete for {len(exposure_problems)} account(s)")
+
     written, failed = [], []
     for acct, tier in sorted(tiers.items()):
         r = routed.get(acct) or {"findings": [], "other_sources": {}}
         lay = layer.get(acct) or {"tenant": [], "platform": [], "examined": 0}
+        ex = exposed.get(acct) or {}
         doc = {
             "schema": SCHEMA_VERSION,
             "account_id": acct,
@@ -314,6 +393,16 @@ def gather(now=None):
             "layer_tag": {"examined": lay["examined"],
                           "tenant": _capped(lay["tenant"]),
                           "platform": _capped(lay["platform"])},
+            "exposure": {
+                "status": ex.get("status"),
+                "unchecked": ex.get("unchecked") or [],
+                "findings": _capped(ex.get("findings") or []),
+                "expiring": ex.get("expiring") or [],
+                "not_checked": list(exposure.NOT_CHECKED),
+                # The raw read, so a line in the email can be traced to what
+                # the API said without anybody re-running anything.
+                "inventory": ex.get("inventory"),
+            },
         }
         try:
             _put(facts_key(end, acct), doc)
@@ -340,10 +429,16 @@ def gather(now=None):
                              for a, v in sorted(layer.items()) if a in tiers},
         "other_digest_decisions": {a: v["other_sources"] for a, v in sorted(routed.items())
                                    if v["other_sources"]},
+        "exposure_problems": exposure_problems,
+        "exposure_counts": {a: {"entries": len(v["findings"]),
+                                "with_risks": sum(1 for f in v["findings"] if f["risks"]),
+                                "expiring": len(v["expiring"])}
+                            for a, v in sorted(exposed.items())},
     }
     _put(f"facts/{end.strftime('%Y-%m-%d')}/estate.json", estate)
 
-    clean = (status["router"] == "ok" and status["layer"] == "ok" and not failed)
+    clean = (status["router"] == "ok" and status["layer"] == "ok"
+             and status["exposure"] == "ok" and not failed)
     return {"window_end": _iso(end), "written": len(written), "failed": failed,
             "sources": status, "unmapped": unmapped, "clean": clean}
 

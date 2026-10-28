@@ -1,0 +1,205 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - certificate and domain expiry watch. Once a
+  day, in the Audit account, reads every account's ACM certificates and Route
+  53 registered domains and sends a warning to the router for each one inside
+  its threshold. Design 02 (expiry monitoring is AltDigital's under every
+  service model), ADR-016, B-176.
+
+# ---------------------------------------------------------------------------
+# What this stack cannot do
+# ---------------------------------------------------------------------------
+# Renew, replace, re-validate or otherwise change a certificate or a domain.
+# It reads through PlatformExposureReader (reporting/00-exposure-reader.yaml),
+# which can only list, and its own write is one event per warning onto the
+# alert bus in this account. Remediation follows the service model, and under
+# model A it is the client's.
+#
+# ---------------------------------------------------------------------------
+# Same package as the digest
+# ---------------------------------------------------------------------------
+# expiry.py imports exposure.py and facts.py, so it ships in the digest package
+# from scripts/publish-digest.sh. The digest's "Expiring soon" lines and these
+# warnings then come from one judgment (exposure.expiring) and cannot disagree
+# about what is expiring.
+
+Parameters:
+
+  ArtifactBucket:
+    Type: String
+    Description: Artifact bucket holding the digest package (Infra Tooling).
+
+  ArtifactKey:
+    Type: String
+    Description: Content-addressed digest package key, from scripts/publish-digest.sh.
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  AccountTierParam:
+    Type: String
+    Default: /platform/routing/account-tiers
+    Description: The tier map the router reads. Every account in it is scanned.
+
+  ExposureReaderRoleName:
+    Type: String
+    Default: PlatformExposureReader
+
+  ExposureRegions:
+    Type: String
+    Default: 'us-east-1,us-east-2,us-west-2'
+    Description: >-
+      config/platform.env PLATFORM_ALLOWED_REGIONS. us-east-1 matters most:
+      every certificate CloudFront uses has to be there.
+
+  WatchSchedule:
+    Type: String
+    Default: 'cron(0 14 * * ? *)'
+    Description: >-
+      14:00 UTC, 08:00 Mountain. Daily, because the nearest threshold is days
+      away, not hours. Morning in Mountain time so a ticket or page raised by
+      it arrives in working hours for the people who act on it.
+
+  LogsKeyArn:
+    Type: String
+    Default: ''
+
+Conditions:
+  UseDefaultLogsKey: !Equals [!Ref LogsKeyArn, '']
+
+Resources:
+
+  WatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformExpiryWatch
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: WatchExpiry
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTierMap
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AccountTierParam}'
+              - Sid: ReadEachAccount
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${ExposureReaderRoleName}'
+              # The alert bus in this account, and no other. The router decides
+              # what happens next; this only says what it found.
+              - Sid: WarnThroughTheRouter
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+              - Sid: Completion
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals: { 'cloudwatch:namespace': Platform/ExpiryWatch }
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  WatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-expiry-watch
+      RetentionInDays: 365
+      KmsKeyId: !If
+        - UseDefaultLogsKey
+        - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/platform-logs'
+        - !Ref LogsKeyArn
+
+  WatchFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: WatchLogGroup
+    Properties:
+      FunctionName: platform-expiry-watch
+      Runtime: python3.13
+      Handler: expiry.handler
+      Role: !GetAtt WatchRole.Arn
+      # Two list calls per region per account. Seconds per account.
+      Timeout: 600
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          ALERT_BUS_NAME: !Ref AlertBusName
+          ACCOUNT_TIER_PARAM: !Ref AccountTierParam
+          EXPOSURE_ROLE_NAME: !Ref ExposureReaderRoleName
+          EXPOSURE_REGIONS: !Ref ExposureRegions
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  WatchScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-expiry-watch
+      Description: Daily certificate and domain expiry scan. ADR-016.
+      ScheduleExpression: !Ref WatchSchedule
+      State: ENABLED
+      Targets:
+        - Id: watch
+          Arn: !GetAtt WatchFunction.Arn
+
+  WatchSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt WatchFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WatchScheduleRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Silence is not "nothing is expiring"
+  # -------------------------------------------------------------------------
+  # expiry.py writes ExpiryWatchCompleted only when every account in the tier
+  # map was read in full. An account it could not read produces no warnings,
+  # which would otherwise look exactly like an account with nothing expiring.
+  # Ticketed, not paged: the nearest threshold is 14 days out, so a day's gap
+  # in the scan is not an emergency, but it must reach a person. Delivered by
+  # the router through alerting/60-alarm-forwarding.yaml in this account.
+  WatchIncompleteAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-expiry-watch-incomplete
+      AlarmDescription: >-
+        The certificate and domain expiry scan has not completed cleanly in the
+        last day, so some accounts' certificates and domains were not checked.
+        See /aws/lambda/platform-expiry-watch: the run record names each
+        account it could not read and why. The usual cause is
+        PlatformExposureReader missing from an account (StackSet
+        platform-exposure-reader).
+
+        [platform-routing] routing=digest_and_jira layer=infrastructure
+      Namespace: Platform/ExpiryWatch
+      MetricName: ExpiryWatchCompleted
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+Outputs:
+  WatchFunctionName:
+    Value: !Ref WatchFunction
+  WatchRoleArn:
+    Value: !GetAtt WatchRole.Arn

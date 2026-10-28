@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - the read-only role through which the digest
+  facts gatherer and the expiry scan see what in an account is reachable from
+  the internet, and what will expire. Lists and describes; changes nothing.
+  ADR-015, ADR-016, B-176.
+
+# ---------------------------------------------------------------------------
+# Why a role of its own
+# ---------------------------------------------------------------------------
+# telemetry/00-telemetry-reader.yaml sets the precedent and gives the reason:
+# each cross-account reader is minimal and named for what it reads, so that a
+# role's name keeps describing it. This one needs CloudFront, load balancers,
+# web ACL associations, security groups, public databases, API Gateway,
+# Route 53, Route 53 Domains and ACM. None of the existing readers holds those,
+# and widening PlatformTelemetryReader or PlatformDigestReader to hold them
+# would turn a narrow role into a general observation grant.
+#
+# Two callers, both in Audit and both reading the same facts:
+# platform-digest-facts (reporting/20) and platform-expiry-watch (reporting/30).
+# One role for both, because what each needs is identical.
+#
+# ---------------------------------------------------------------------------
+# Why every OU, not only Members
+# ---------------------------------------------------------------------------
+# The gatherer reads every account in the routing tier map, and the tier map
+# includes AltDigital's own accounts. A role present in tenant accounts only
+# would fail in eight accounts every day, and the failure alarm would fire on
+# a gap that was a deployment choice. More to the point, an AltDigital account
+# with something public in it is worth knowing about too.
+#
+# ---------------------------------------------------------------------------
+# Trust: the Audit account, narrowed to two role ARNs by condition
+# ---------------------------------------------------------------------------
+# The account principal with aws:PrincipalArn, rather than the role ARNs as
+# principals. IAM rejects a trust policy naming a role that does not exist yet,
+# which would tie this StackSet to the order the Audit stacks were deployed in.
+# Same reasoning as the facts key policy in reporting/20.
+
+Parameters:
+
+  AuditAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: >-
+      The Audit account, where both callers run. Passed at deploy time from
+      /platform/org/account/altdig-security-audit, never written here.
+
+Resources:
+
+  ExposureReaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformExposureReader
+      Description: >-
+        Read-only view of public entry points, DNS, domains and certificates,
+        for the manager digest and the expiry scan. Holds no permission to
+        change, attach, open or close anything.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OnlyTheDigestFactsAndTheExpiryScan
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              ArnEquals:
+                'aws:PrincipalArn':
+                  - !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:role/PlatformDigestFacts'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:role/PlatformExpiryWatch'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer, Value: infrastructure }
+
+  ExposureReaderPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ObservePublicExposure
+      Roles:
+        - !Ref ExposureReaderRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+
+          # One statement per question exposure.py asks. List and Describe
+          # only: every call here is a question, never an instruction. None of
+          # these APIs supports resource-level scoping for the calls used, so
+          # '*' is the only expressible resource and the action list is the
+          # narrowing.
+          - Sid: CloudFrontDistributions
+            Effect: Allow
+            Action: 'cloudfront:ListDistributions'
+            Resource: '*'
+
+          - Sid: InternetFacingLoadBalancersAndTheirWebAcls
+            Effect: Allow
+            Action:
+              - 'elasticloadbalancing:DescribeLoadBalancers'
+              - 'wafv2:GetWebACLForResource'
+            Resource: '*'
+
+          # Which running instances have a public address, and which of their
+          # inbound rules admit the whole internet. Prefix lists by name, so
+          # "limited to CloudFront" reads as that rather than as an id.
+          - Sid: PublicInstancesAndTheirInboundRules
+            Effect: Allow
+            Action:
+              - 'ec2:DescribeInstances'
+              - 'ec2:DescribeSecurityGroups'
+              - 'ec2:DescribeManagedPrefixLists'
+            Resource: '*'
+
+          - Sid: PubliclyAccessibleDatabases
+            Effect: Allow
+            Action: 'rds:DescribeDBInstances'
+            Resource: '*'
+
+          # GET on the API collections only. apigateway:GET on '*' would also
+          # read API keys, usage plans and client certificates. The two
+          # collection paths are where REST (v1) and HTTP or WebSocket (v2)
+          # APIs are listed, and nothing below them is reachable through this.
+          - Sid: ApiGatewayEndpointsOnly
+            Effect: Allow
+            Action: 'apigateway:GET'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:apigateway:*::/restapis'
+              - !Sub 'arn:${AWS::Partition}:apigateway:*::/apis'
+
+          # The zone list only, never the records in a zone. A record count
+          # answers "is there public DNS here"; the records themselves are the
+          # application's business.
+          - Sid: PublicHostedZones
+            Effect: Allow
+            Action: 'route53:ListHostedZones'
+            Resource: '*'
+
+          # Expiry, auto-renew and transfer lock from ListDomains, and the
+          # outcome of registrations from ListOperations. Not GetDomainDetail,
+          # which returns the registrant's name, address, email and phone. The
+          # digest has no use for those, and a role that cannot read personal
+          # data cannot leak it.
+          - Sid: RegisteredDomainsWithoutContacts
+            Effect: Allow
+            Action:
+              - 'route53domains:ListDomains'
+              - 'route53domains:ListOperations'
+            Resource: '*'
+
+          - Sid: CertificatesAndTheirExpiry
+            Effect: Allow
+            Action: 'acm:ListCertificates'
+            Resource: '*'
+
+Outputs:
+
+  ExposureReaderRoleArn:
+    Description: Assumed by platform-digest-facts and platform-expiry-watch in Audit.
+    Value: !GetAtt ExposureReaderRole.Arn

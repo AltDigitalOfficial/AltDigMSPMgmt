@@ -21,9 +21,15 @@ Description: >-
 # ---------------------------------------------------------------------------
 # What this stack cannot do
 # ---------------------------------------------------------------------------
-# Change anything anywhere. It reads one log group, queries the aggregator and
-# writes under facts/ in its own bucket. It never reaches into a member
-# account.
+# Change anything anywhere. It reads one log group, queries the aggregator,
+# reads each account through PlatformExposureReader, and writes under facts/
+# in its own bucket.
+#
+# The exposure read (ADR-015, ADR-016) is the one place it reaches into member
+# accounts. It does so because Route 53 Domains and web ACL associations are
+# not in the Config aggregator, so there is no way to answer "what here is
+# public" from Audit alone. The role it assumes lists and describes, and
+# nothing else (reporting/00-exposure-reader.yaml).
 
 Parameters:
 
@@ -58,6 +64,19 @@ Parameters:
   RouterLogGroup:
     Type: String
     Default: /aws/lambda/platform-router
+
+  ExposureReaderRoleName:
+    Type: String
+    Default: PlatformExposureReader
+    Description: The per-account read role from reporting/00-exposure-reader.yaml.
+
+  ExposureRegions:
+    Type: String
+    Default: 'us-east-1,us-east-2,us-west-2'
+    Description: >-
+      config/platform.env PLATFORM_ALLOWED_REGIONS. Every region a member
+      account may use, because a public entry point in a region nobody reads
+      is exactly the one nobody sees.
 
   GatherSchedule:
     Type: String
@@ -240,6 +259,12 @@ Resources:
                 Effect: Allow
                 Action: config:SelectAggregateResourceConfig
                 Resource: !Sub 'arn:${AWS::Partition}:config:${AWS::Region}:${AWS::AccountId}:config-aggregator/*'
+              # The exposure read. Every account's reader, by name, and no
+              # other role: the reader's own trust policy names this role back.
+              - Sid: ReadExposureInEachAccount
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${ExposureReaderRoleName}'
               - Sid: WriteFacts
                 Effect: Allow
                 Action: s3:PutObject
@@ -279,8 +304,11 @@ Resources:
       Handler: facts.handler
       Role: !GetAtt FactsRole.Arn
       # One filtered log read and one paginated aggregator query for the whole
-      # estate, then one small write per account. Seconds today.
-      Timeout: 300
+      # estate, then the exposure read: about thirty list calls per account
+      # across three regions, a few seconds each. Under two minutes at nine
+      # accounts. 900 is Lambda's ceiling, and past about sixty accounts the
+      # read has to fan out instead (ADR-016, Consequences).
+      Timeout: 900
       MemorySize: 512
       Code:
         S3Bucket: !Ref ArtifactBucket
@@ -292,6 +320,8 @@ Resources:
           ROUTER_LOG_GROUP: !Ref RouterLogGroup
           AGGREGATOR: !Ref AggregatorName
           SPEC_PATH: alarm-spec.json
+          EXPOSURE_ROLE_NAME: !Ref ExposureReaderRoleName
+          EXPOSURE_REGIONS: !Ref ExposureRegions
       Tags:
         - { Key: platform-managed, Value: 'true' }
         - { Key: platform-layer, Value: infrastructure }
@@ -332,8 +362,8 @@ Resources:
       AlarmName: platform-digest-facts-incomplete
       AlarmDescription: >-
         The digest facts gatherer has not completed cleanly in the last day.
-        Manager digests are going out without team activity, HIPAA eligibility,
-        telemetry-gap and layer-tag lines. See /aws/lambda/platform-digest-facts
+        Manager digests are going out without some of their HIPAA eligibility,
+        telemetry-gap, layer-tag or internet-exposure lines. See /aws/lambda/platform-digest-facts
         for the source that failed, then re-run the function by hand before
         13:00 UTC.
 

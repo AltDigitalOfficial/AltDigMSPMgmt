@@ -482,6 +482,13 @@ NORMALISERS = {
     # router looks the tier up from alarm.account_id itself: the emitter's
     # copy of a routing fact is not the one that decides.
     "telemetry-gap": from_dossier,
+    # reporting/src/expiry.py (ADR-016). Certificates and domains inside their
+    # warning threshold, one dossier per item per day under a stable name, so
+    # repeats update one ticket. Emitted from Audit, so the dossier's account
+    # is the subject, not the envelope. The scan declares digest in dev and
+    # pagerduty only for an urgent expiry in prod; the dossier rule honours
+    # downgrades and refuses a page the tier would not give.
+    "expiry-warning": from_dossier,
 }
 
 

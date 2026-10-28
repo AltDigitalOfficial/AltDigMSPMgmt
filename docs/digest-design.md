@@ -75,6 +75,8 @@ the internal section to the client.
 | Could not instrument (today's exception list) | ✓, now with who/what/when/how | | instrumentation exceptions |
 | New alarms, alarms in ALARM | ✓ (unchanged) | | CloudWatch, per account (unchanged) |
 | HIPAA eligibility lines, telemetry gaps | ✓ | | router log (digest class) |
+| Reachable from the internet: public entry points, open ports, domains, registrar operations (ADR-015) | ✓ every day, empty included (§7.5) | counts in the estate document | `PlatformExposureReader`, per account (ADR-016) |
+| Certificates and domains expiring | ✓ under *Needs your attention* | | the same read; the expiry scan routes them separately |
 | Cost against budget | ✓, as "no budget configured" until one exists | | not available (§7.4) |
 | Pipeline health: accounts not queryable, facts missing, digests failed or bounced, review-queue depth | | ✓ | gatherer, digest metrics |
 
@@ -268,6 +270,31 @@ budgets exist. `provisioning/src/saga.py` marks per-tenant budget creation as
 not built, and the developer guide (§4.15) promises a budget alarm. Building
 budgets is not part of this work. When budgets exist, this becomes
 month-to-date spend against budget.
+
+### 7.5 Reachable from the internet
+
+Added 2026-10-28 (B-176). ADR-015 lets the team build what it likes in dev, on
+condition that it appears here, and leaves the response to public-access risk
+with the development manager. This section is what makes that condition true.
+
+- **Shown every day.** An empty section says "Nothing we check is reachable
+  from the internet", and every run lists what is not checked at all. Without
+  that line, a quiet section would read as a clean account.
+- **Risks before facts.** Entries with something reachable and nothing the
+  team chose in front of it come first, with each risk on its own line.
+  Examples: no web ACL, plain HTTP, SSH or a database port open to the world,
+  an origin that is itself open, a publicly accessible database. Public things
+  without such a gap follow under *Also public*: zones, domains, APIs, and
+  load balancers with a web ACL.
+- **It reports and does not instruct.** The closing line says the decision is
+  the team's and that AltDigital will not change anything. This is ADR-015,
+  and also the hard rule on automated remediation.
+- **Registrar operations** in the window are listed with their outcome, so a
+  failed domain registration reaches the manager as well as the developer who
+  received the registrar's email.
+
+Read inside each account rather than from the Config aggregator, because
+domains and load-balancer web ACLs are not in Config (ADR-016).
 
 ## 8. Platform digest: content
 

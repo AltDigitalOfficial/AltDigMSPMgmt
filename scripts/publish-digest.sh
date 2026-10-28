@@ -37,12 +37,17 @@ trap 'rm -rf "${BUILD}"' EXIT
 
 PY="$(command -v python || command -v python3)" || die "python not found."
 
-# Two handlers, one package: digest.handler (Tooling, 10-digest-sender.yaml)
-# and facts.handler (Audit, 20-digest-facts.yaml). digest.py imports facts.py
-# for the window and the facts key layout, so the reader and the writer of a
-# facts document cannot disagree about where it is.
-cp "${REPO_ROOT}/reporting/src/digest.py" "${BUILD}/digest.py"
-cp "${REPO_ROOT}/reporting/src/facts.py"  "${BUILD}/facts.py"
+# Three handlers, one package: digest.handler (Tooling, 10-digest-sender.yaml),
+# facts.handler (Audit, 20-digest-facts.yaml) and expiry.handler (Audit,
+# 30-expiry-watch.yaml). digest.py imports facts.py for the window and the
+# facts key layout, so the reader and the writer of a facts document cannot
+# disagree about where it is. facts.py and expiry.py both import exposure.py,
+# so the digest's "Expiring soon" lines and the expiry warnings come from one
+# judgment (ADR-016).
+cp "${REPO_ROOT}/reporting/src/digest.py"   "${BUILD}/digest.py"
+cp "${REPO_ROOT}/reporting/src/facts.py"    "${BUILD}/facts.py"
+cp "${REPO_ROOT}/reporting/src/exposure.py" "${BUILD}/exposure.py"
+cp "${REPO_ROOT}/reporting/src/expiry.py"   "${BUILD}/expiry.py"
 
 # 06a, for the gatherer's list of alarmable types. Converted and validated by
 # the same script the instrumentation package uses, so both read one spec in
@@ -76,6 +81,8 @@ info "Checking the sources compile"
 "${PY}" -m py_compile \
   "$(win_path "${REPO_ROOT}/reporting/src/digest.py")" \
   "$(win_path "${REPO_ROOT}/reporting/src/facts.py")" \
+  "$(win_path "${REPO_ROOT}/reporting/src/exposure.py")" \
+  "$(win_path "${REPO_ROOT}/reporting/src/expiry.py")" \
   || die "reporting sources do not compile. Nothing packaged."
 
 info "Packaging"
@@ -116,6 +123,13 @@ fi
 
 hr
 info "Deploy with, in this order (the sender reads what the gatherer writes):"
+log "  Once, before the first deploy that carries exposure.py (B-176): the"
+log "  per-account read role, to sandbox, members (--confirm-production),"
+log "  security and infra. Re-run with --add-ou for each OU after the first:"
+log "  scripts/deploy-stackset.sh --name platform-exposure-reader \\"
+log "    --template reporting/00-exposure-reader.yaml --ou <ou> \\"
+log "    AuditAccountId=<audit-acct>"
+log ""
 log "  scripts/deploy-to-account.sh --account altdig-security-audit \\"
 log "    --template reporting/20-digest-facts.yaml --stack platform-digest-facts \\"
 log "    ArtifactBucket=${BUCKET} ArtifactKey=${KEY} ToolingAccountId=${TOOLING} \\"
@@ -127,6 +141,11 @@ log "  scripts/deploy-to-account.sh --account altdig-infra-tooling \\"
 log "    --template reporting/10-digest-sender.yaml --stack platform-digest \\"
 log "    ArtifactBucket=${BUCKET} ArtifactKey=${KEY} \\"
 log "    FactsBucket=altdig-digest-facts-<audit-acct>"
+log ""
+log "  scripts/deploy-to-account.sh --account altdig-security-audit \\"
+log "    --template reporting/30-expiry-watch.yaml --stack platform-expiry-watch \\"
+log "    ArtifactBucket=${BUCKET} ArtifactKey=${KEY} \\"
+log "    LogsKeyArn=<Audit alias/platform-alerts key ARN>"
 log ""
 log "Parameters not passed keep their current values (UsePreviousValue)."
 log "Then invoke platform-digest-facts once by hand, and platform-digest with"
