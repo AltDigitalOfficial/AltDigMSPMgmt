@@ -142,3 +142,46 @@ own that the exposure deserves a page.
 - design 02 *DNS and certificates*, design 11 *Manager digest*,
   `docs/digest-design.md` §3 and §7
 - `deferred_decisions.md`
+
+## Amendment — 2026-10-29
+
+**The Context above is wrong about the registration.** The developer did not
+stop short. CloudTrail in Arc8 dev shows `RegisterDomain` for `arc8-mvp.click`
+on 2026-10-20 at 14:18 UTC and again on 2026-10-28 at 19:19 UTC. The first is
+outside the 10-24 to 10-28 window that was checked. The second came after the
+check ran [verified 2026-10-29]. Both calls were accepted and both operations
+went to `FAILED` within one second with AWS's generic message, *"We can't
+finish registering your domain. Contact AWS Support."* No domain is registered
+and no hosted zone exists [verified 2026-10-29]. The failure is on AWS's side,
+not the platform's: the API call was authorised, and nothing in DeveloperDev or
+the SCPs refers to it. AWS gives no reason. A per-account hold on domain
+registration is the usual cause and has not been confirmed. Dev has no paid
+support plan, so only an account and billing case can resolve it.
+
+**Ruling.** Jamie, 2026-10-29: the developer may register `arc8-mvp.click` in
+Arc8 dev, as this ADR already permits. It is a **temporary** domain, to be used
+until AltDigital controls OEight's DNS. Getting that control is in progress.
+The platform does not take the registration over, and it does not open the
+support case on the team's behalf.
+
+**Alternative rejected:** register the domain centrally, in an account
+AltDigital controls or with whoever ends up holding OEight's DNS, and delegate a
+subdomain per environment (`dev.`, `test.`, later prod) to each account's
+hosted zone. This was recommended in the session because it matches what the
+developer asked for, one name per environment, and because nothing has to move
+when prod arrives. It lost because the name is a throwaway that is replaced once
+OEight's DNS is under control, so a central home for it would be built for a
+domain with no future.
+
+**Consequences added:**
+- `arc8-mvp.click` will be owned by the dev account and by whatever registrant
+  contact the developer enters, as the Negative consequences above already
+  accept. If that contact does not verify within 15 days the domain is
+  suspended, which for a temporary dev name is the team's problem, not the
+  platform's.
+- **"Temporary" is not enforced.** The registration auto-renews unless someone
+  turns that off, and nothing removes the domain when OEight's DNS arrives.
+  The revival trigger is AltDigital gaining control of OEight's DNS. At that
+  point the team moves its records to the OEight-controlled name, and
+  `arc8-mvp.click` is either left to lapse or kept deliberately.
+- Once registered, the domain is covered by the daily expiry scan (ADR-016).
