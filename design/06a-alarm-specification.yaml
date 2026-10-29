@@ -234,6 +234,20 @@ resource_types_no_alarms:
   - AWS::ResourceExplorer2::Index
   - AWS::ResourceExplorer2::View
 
+  # --- found in Arc8 dev, test and Sandbox, 2026-10-28 ---------------------------
+  # The platform conformance pack (ADR-012, deployed 2026-10-27) lands in every
+  # member account as OrgConformsPack-platform-conformance-*. Each one raised
+  # unrecognised-resource-type, and the 2026-10-28 Arc8 dev digest told the
+  # client that AltDigital's own compliance rules were "running with no
+  # platform monitoring", created by nobody it could name.
+  #
+  # Listed by type, not by name in aws_default_resources: AWS did not make
+  # these, and the suffix is random. Nothing is lost for a tenant's own pack
+  # either. A conformance pack is a set of Config rules with no CloudWatch
+  # metric of its own; what it finds arrives as compliance results through
+  # Config and Security Hub, not as something to alarm on.
+  - AWS::Config::ConformancePack
+
 # =============================================================================
 # AWS DEFAULT RESOURCES -- known by NAME, not by type
 # =============================================================================
