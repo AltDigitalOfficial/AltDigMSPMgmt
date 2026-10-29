@@ -7987,8 +7987,13 @@ S3 data events trail's logging state and selectors whenever it runs.
 
 ## B-176 · Internet exposure and expiry: the digest could not see what was public
 
-**Built 2026-10-28, not yet deployed.** ADR-015 (the ruling), ADR-016 (the
-mechanism).
+**Deployed 2026-10-28; one close condition open.** ADR-015 (the ruling),
+ADR-016 (the mechanism). The StackSet is in all nine tier-map accounts. The
+facts run was clean (9 written, exposure `ok`, 61 s) and so was the expiry
+watch (9 accounts, nothing unreadable, no warnings due, 7 s). Arc8 dev's
+dry-run digest shows the three distributions, the SSH line and the failed
+`arc8-mvp.click` registration. Still open: the routed `expiry-warning`
+condition, because no certificate or domain is within its threshold yet.
 
 ADR-015 lets a tenant's team build anything in dev on condition that it shows
 up in the manager digest. On the day of the ruling, Arc8 dev had three

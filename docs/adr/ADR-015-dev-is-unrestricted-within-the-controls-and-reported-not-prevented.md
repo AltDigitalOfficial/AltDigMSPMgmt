@@ -2,11 +2,12 @@
 
 **Date:** 2026-10-28
 **Deciders:** Jamie
-**Status:** Accepted — not built. The ruling is in force: nothing was
-restricted. What is pending is condition (b): the manager digest does not yet
-report either the team's activity (B-171 Stage B, blocked on
-`security/50-trail-query.yaml`, which is not deployed in Log Archive
-[verified 2026-10-28]) or what is reachable from the internet.
+**Status:** Accepted — partly built. The ruling is in force: nothing was
+restricted. Condition (b) is half met. What is reachable from the internet is
+in the manager digest from 2026-10-28 (B-176, ADR-016; Arc8 dev's dry run
+showed it [verified 2026-10-28]). The team's activity is not yet (B-171
+Stage B, blocked on `security/50-trail-query.yaml`, which is not deployed in
+Log Archive [verified 2026-10-28]).
 **Tags:** developer-access, digest, dns, ingress, tenant-responsibility
 
 ---
