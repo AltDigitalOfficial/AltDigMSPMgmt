@@ -8061,10 +8061,8 @@ Accelerator. Who created each public resource arrives with Stage B (B-171).
 - **Still owed from 15.6:**
   - The before-and-after cost of Config and Security Hub, as ratios, from a
     week of billing after 2026-10-26.
-  - The auditor guide: §6 still says "no data events", §7 still describes
-    Macie discovery as off, and the gap register still lists Config recorder
-    coverage, the unrecorded standards deviation and the unalarmed evidence
-    queue, all closed by 15.6.
+  - ~~The auditor guide.~~ Updated 2026-10-28: §6 (data events, Config
+    coverage, B-175), §7 (the 15.6 detection state) and the gap register.
   - ~~Ratification of ADR-010 and ADR-011.~~ Ratified by Jamie, 2026-10-28.
   - The nine organization-plan controls are suppressed in Audit
     (`platform-suppress-org-protection-plans`, ADR-014), verified once the

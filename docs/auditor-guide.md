@@ -544,9 +544,27 @@ It delivers to `altdig-log-archive-<acct>` in Log Archive
   of versions;
 - replicated to `us-west-2` under the same lock.
 
-Two limits: **management events only, no data events** (S3 object reads
-are not recorded), and **no CloudWatch Logs delivery** (B-005). The
-Athena workgroup in §1.3 is how the archive is searched.
+This trail records management events only, and has **no CloudWatch Logs
+delivery** (B-005). The Athena workgroup in §1.3 is how the archive is
+searched.
+
+**S3 object access** is recorded by a second organization trail,
+`platform-s3-data-events`
+([org/31-s3-data-events-trail.yaml](../org/31-s3-data-events-trail.yaml),
+[ADR-013](adr/ADR-013-s3-object-access-logged-in-every-account-by-a-second-organization-trail.md)),
+live since 2026-10-27:
+
+- every S3 object read and write in every account and region;
+- delivered to the same locked bucket under `data-events/`, so it carries the
+  same six-year Object Lock;
+- **two exclusions**, both stated in the template:
+  - writes to the log archive and its replica, which would otherwise log the
+    trail's own deliveries in a loop;
+  - S3 replication's reads of them. Every other read of the archive is
+    recorded, which is how "who read the audit logs" is answered.
+
+No Athena table reads `data-events/` yet, so these records are retained but
+not yet queryable through §1.3.
 
 **AWS Config.** The recorder records all supported resource types, with
 global types in the home region only. It delivers to
@@ -555,18 +573,24 @@ Config cannot write to a locked bucket, so immutability comes from the
 locked replica. An organization aggregator in Audit covers all three
 regions ([security/40-config-aggregator.yaml](../security/40-config-aggregator.yaml)).
 
-> **Significant gap: recorder coverage.** Per the 2026-09-22 snapshot,
-> Config recorders exist **only in the two Sandbox accounts, in `us-east-2`.**
-> There are none in management, Log Archive, Audit, Infra Tooling, Forensics
-> or Backup, and none in `us-east-1` or `us-west-2`. The phase-15 plan calls
-> this "confirmed and unrecorded". Establish the live state for the Arc8
-> accounts yourself:
-> ```bash
-> aws configservice describe-configuration-recorder-status --region <each allowed region>
-> ```
-> Config also feeds Security Hub's checks and the discovery that creates
-> alarms (§8), so a missing recorder means a blind spot in three controls,
-> not one.
+**Recorder coverage: every account, every allowed region**, continuous
+recording in every tier. Until 2026-10-25 recorders existed only in the two
+Sandbox accounts in `us-east-2`. Phase 15.6a put one in all 30
+account-regions, configured from a single home-region stack per account as
+Config's service-linked role
+([baseline/10-config-recorder.yaml](../baseline/10-config-recorder.yaml),
+[ADR-010](adr/ADR-010-config-records-every-region-from-one-home-region-stack.md)).
+`verify-security-coverage.sh` (§7) now fails on any account-region that is
+not recording, not merely missing a recorder. Check it yourself:
+
+```bash
+aws configservice describe-configuration-recorder-status --region <each allowed region>
+```
+
+Config feeds Security Hub's checks, the conformance packs (§7) and the
+discovery that creates alarms (§8). A recorder that stops is therefore a
+blind spot in all three, which is why coverage is checked rather than
+assumed.
 
 **VPC flow logs: not collected.** The network baseline ships with
 `EnableFlowLogs=false` because delivery to S3 fails (B-012, unresolved). The
@@ -602,13 +626,20 @@ aws cloudtrail get-event-selectors --trail-name platform-organization-trail
 aws s3api get-object-lock-configuration --bucket altdig-log-archive-<acct>  # Log Archive
 aws s3api get-bucket-replication --bucket altdig-log-archive-<acct>
 aws cloudtrail validate-logs --trail-arn <arn> --start-time <t>             # needs §1.3 access
+aws cloudtrail get-trail-status --name platform-s3-data-events              # management
+aws cloudtrail get-event-selectors --trail-name platform-s3-data-events     # the two exclusions
 ```
 
 `validate-logs` is the integrity test that matters: it proves the digest
 chain is unbroken. It needs object read, and therefore needs §1.3.
 
-**Gaps:** Config recorder coverage; B-012 flow logs; DNS query logs; B-005;
-no data events; B-009; B-158 (§14).
+**Gaps:**
+- B-012 (flow logs) and DNS query logs;
+- B-005, and data events not yet queryable in Athena;
+- B-175: the management account forwards no events, so stopping or narrowing
+  either organization trail pages nobody and is visible only afterwards,
+  through the `control-tampering-attempts` query;
+- B-009; B-158 (§14).
 
 ---
 
@@ -622,29 +653,40 @@ region, administered centrally from Audit.
 
 | Service | State |
 |---|---|
-| GuardDuty | Org-wide via auto-enable. 15-minute publishing. Malware Protection, EKS and RDS protection plans not enabled. |
-| Security Hub | Default standards (FSBP), configured locally rather than by central configuration. Aggregates in `us-east-2` only (B-013). One suppression rule for a platform-caused finding. B-147 lists findings the platform itself causes. |
-| Inspector | EC2 and ECR. Lambda scanning off. |
-| Macie | Enabled, inventory only. **Automated sensitive data discovery is off** by recorded choice. |
+| GuardDuty | Org-wide via auto-enable, 15-minute publishing. **S3 Protection and Lambda Protection on in every account** ([ADR-014](adr/ADR-014-guardduty-s3-and-lambda-protection-everywhere-other-plans-per-tenant.md)). EKS, ECS and EC2 runtime, Malware Protection and RDS plans are per tenant, where the workload exists. |
+| Security Hub | **Central configuration from Audit**: one policy at the organization root ([ADR-011](adr/ADR-011-security-hub-central-configuration-disable-only-what-no-account-can-satisfy.md)). Standards are FSBP and NIST 800-53 r5 ([D-032](deviations.md)). A finding aggregator in `us-east-2` links all three regions (B-013). Eight controls are disabled because no account can satisfy them; four automation rules suppress platform-caused findings per resource, each with its reason in the finding's note. B-174 lists the real findings that remain. |
+| Inspector | EC2 and ECR. Lambda scanning per tenant (ADR-014). |
+| Macie | Inventory, plus **automated sensitive data discovery in every account** ([ADR-017](adr/ADR-017-cardholder-tripwire-macie-discovery-on-cost-watched-not-capped.md)). It had in fact been on since 2026-09-17, by Macie's default, while the repository said it was off. Card identifiers are included. A card-data finding in any tier becomes a scope-change ticket and an immediate client conversation. |
 | Access Analyzer | Delegated to Audit, but **no analyzer is created anywhere** (B-058) |
-| Config rules | Security Hub's service-linked rules, plus two platform rules: `platform-secret-max-age` (90 days) and `platform-secret-uses-cmk`. No conformance packs are deployed. |
+| Config rules | Security Hub's service-linked rules; two platform rules, `platform-secret-max-age` (90 days) and `platform-secret-uses-cmk`; and the **platform conformance packs** ([ADR-012](adr/ADR-012-platform-conformance-pack-in-every-account-not-the-aws-hipaa-pack.md)): nine HIPAA-mapped rules Security Hub does not run, in every account and region, and a check that the S3 data events trail is logging. |
 
-Design 04 asks for CIS and PCI standards and conformance packs. The current
-direction is FSBP plus NIST 800-53, which is not yet recorded as a deviation.
+Design 04 asks for CIS and PCI standards and framework-driven conformance
+packs. The platform runs FSBP and NIST 800-53 r5 instead (D-032), and one
+platform pack everywhere in place of AWS's HIPAA sample pack, most of whose
+rules Security Hub already runs (ADR-012).
+[hipaa-control-mapping.md](hipaa-control-mapping.md) maps each HIPAA
+safeguard to the controls that evidence it, and shows where nothing does.
 
 **Coverage is gated.** [scripts/verify-security-coverage.sh](../scripts/verify-security-coverage.sh)
 asserts that members equal the active accounts minus one, per service and per
-region. It runs after every account creation. It does **not** check Config.
-It was written after delegation, enablement and enrolment were found to look
+region. It runs after every account creation. Since 15.6 it also fails on
+any account-region whose Config recorder is not recording, on Security Hub
+not being centrally configured in a region, and on the S3 data events trail
+not logging or carrying any exclusion beyond the log archive. It was written
+after delegation, enablement and enrolment were found to look
 identical in the console while the Audit account had zero members (B-008).
 
 **How to check** (Audit account):
 
 ```bash
 aws guardduty list-detectors; aws guardduty list-members --detector-id <id>
-aws securityhub get-enabled-standards
+aws securityhub get-enabled-standards     # expect: FSBP and NIST 800-53 r5
+aws securityhub describe-organization-configuration   # expect: CENTRAL
+aws securityhub list-automation-rules     # the suppressions, each with its reason
 aws securityhub get-findings --filters '{"SeverityLabel":[{"Value":"CRITICAL","Comparison":"EQUALS"}]}'
 aws inspector2 batch-get-account-status --account-ids <ids>
+aws configservice describe-organization-conformance-pack-statuses
+aws macie2 get-automated-discovery-configuration      # expect: ENABLED, ALL
 aws accessanalyzer list-analyzers          # expect: none
 ```
 
@@ -652,8 +694,12 @@ Sample five HIGH or CRITICAL findings from the period and trace each into the
 router and onward (§8). That is the test of whether detection connects to
 anyone.
 
-**Gaps:** B-013, B-058, B-147; Macie discovery off; no conformance packs;
-standards deviation unrecorded; Config not in the coverage check.
+**Gaps:**
+- B-013 (single-region aggregation), B-058, B-174;
+- Macie discovery samples rather than scanning everything, so it is a
+  tripwire, not a guarantee;
+- its cost is checked by hand until 15.9 (ADR-017);
+- sensitive data other than card data is found but not routed.
 
 ---
 
@@ -1113,7 +1159,6 @@ This is a starting position for the rehearsal, not a conclusion.
 
 | Area | Gap | Ref |
 |---|---|---|
-| Logging | Config recorders absent from platform accounts and from two of three regions | phase-15 plan, unrecorded |
 | Logging | No VPC flow logs | B-012 |
 | Logging | No DNS query logs | — |
 | Identity | No periodic access review | design 03 |
@@ -1139,15 +1184,15 @@ This is a starting position for the rehearsal, not a conclusion.
 | SoD | Quorum is detective, not preventive, against OAAR | §4 |
 | Detection | Access Analyzer has no analyzer | B-058 |
 | Detection | Single-region aggregation and alerting | B-013, B-017 |
-| Detection | Macie discovery off; no conformance packs; standards deviation unrecorded | §7 |
+| Detection | Macie discovery samples rather than scans; its cost watch is run by hand | ADR-017 |
 | Alerting | Simultaneous router and watchdog failure pages nobody | B-021 |
 | Alerting | PagerDuty state local; drift check unscheduled | B-016, B-120 |
 | Alerting | Memory and disk alarms inert | B-103 |
 | Alerting | 06a thresholds draft | B16 |
 | Encryption | Platform DynamoDB tables use the AWS-managed key, not a CMK | §11, unrecorded |
-| Logging | CloudTrail management events only; not in CloudWatch Logs | B-005 |
+| Logging | CloudTrail not in CloudWatch Logs; S3 data events retained but not yet queryable in Athena | B-005, ADR-013 |
+| Logging | Management account forwards no events: organization trail tampering pages nobody | B-175 |
 | Logging | Log masking unproven against canonical values | B-009 |
-| Evidence | Evidence queue and DLQ unalarmed | B-156 |
 | Containment | No memory capture; lone prod instance isolated without redundancy check | B-053, B-168 |
 | HIPAA | Eligible-services SCP unattached (no HIPAA uat/prod yet); vesting gate unbuilt | B-165 |
 | HIPAA | Downstream BAA and notification window open | X1, X8 |
