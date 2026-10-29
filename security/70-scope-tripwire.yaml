@@ -1,0 +1,342 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform — the cardholder scope tripwire. Turns a Macie
+  sensitive-data finding that contains card data into a scope-change dossier
+  for the router and a scope-change conversation for the commercial channel.
+  Deployed to Audit, the Macie administrator, in the home region. ADR-017.
+
+# ---------------------------------------------------------------------------
+# What this is for
+# ---------------------------------------------------------------------------
+# The platform holds no cardholder data. It has no cardholder data environment,
+# and vesting halts on any PCI answer (D-025). So card data turning up in any
+# bucket, in any tier, is a change to what the platform is in scope for, and
+# somebody has to have that conversation with the client before an assessor
+# does. config/tiers.yaml: cardholder_data_is_scope_change, true in every tier.
+#
+# Macie's automated discovery finds it. This turns the finding into two things:
+#   - a Platform Incident Dossier, so the router records it and raises a
+#     ticket. Declared digest_and_jira: a ticket in every tier and never a
+#     page. That is a downgrade where the tier would page (uat, prod) and is
+#     the default elsewhere. The router honours downgrades only (D-028).
+#   - commercial_event: scope-change on the same event, which the commercial
+#     router's declared rule picks up and sends immediately (design 12).
+#
+# ---------------------------------------------------------------------------
+# What counts as card data
+# ---------------------------------------------------------------------------
+# A primary account number, a magnetic stripe or a security code: Macie's
+# CREDIT_CARD_NUMBER, CREDIT_CARD_NUMBER_(NO_KEYWORD), CREDIT_CARD_MAGNETIC_STRIPE
+# and CREDIT_CARD_SECURITY_CODE. NOT CREDIT_CARD_EXPIRATION on its own: an
+# expiry date without a card number is not cardholder data, and MM/YY patterns
+# are common enough that it would cry wolf. Bank account numbers, also in
+# Macie's financial category, are not PCI scope either.
+#
+# A finding with other sensitive data and no card data is not this tripwire's
+# business. It is logged and dropped. Routing regulated data by tier
+# (regulated_data_is_finding) is a separate control, and not built.
+#
+# ---------------------------------------------------------------------------
+# Every path ends somewhere a person sees (the else rule)
+# ---------------------------------------------------------------------------
+#   card data, tier in ScopeChangeTiers  -> dossier + scope-change conversation
+#   card data, tier not in it            -> dossier, digest only, saying why
+#   account missing from the tier map    -> treated as in scope; a tier we
+#                                           cannot read is not a reason to stay
+#                                           quiet about card data
+#   Macie sample finding                 -> dossier, digest only, marked SAMPLE,
+#                                           no conversation. This is how the
+#                                           path is tested without telling a
+#                                           client about a fake card number.
+#   the function itself fails            -> platform-scope-tripwire-errors, to
+#                                           the router. Nothing is lost: Macie
+#                                           keeps the finding for 90 days.
+#
+# The function never reads object contents and never sees a card number.
+# Macie's finding carries the types and counts it detected, not the values.
+#
+# Deploy with scripts/deploy-scope-tripwire.sh, which computes ScopeChangeTiers
+# from config/tiers.yaml rather than having anyone type it.
+
+Parameters:
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+    Description: The organization bus in this account, where the router listens.
+
+  AccountTierParam:
+    Type: String
+    Default: /platform/routing/account-tiers
+    Description: The account-to-tier map the router also reads.
+
+  ScopeChangeTiers:
+    Type: String
+    AllowedPattern: '^[a-z]+(,[a-z]+)*$'
+    Description: >-
+      Tiers whose cardholder_data_is_scope_change is true, comma-separated.
+      Computed from config/tiers.yaml at deploy time; never typed by hand.
+
+  LogsKeyArn:
+    Type: String
+    AllowedPattern: '^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/.+$'
+    Description: KMS key for the function's log group (Audit's logs key).
+
+Resources:
+
+  TripwireRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformScopeTripwire
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  TripwirePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ReadTiersAndRaise
+      Roles: [!Ref TripwireRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadAccountTiers
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AccountTierParam}'
+          - Sid: RaiseOnTheAlertBus
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+
+  TripwireLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-scope-tripwire
+      RetentionInDays: 2557
+      KmsKeyId: !Ref LogsKeyArn
+
+  TripwireFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TripwireLogGroup
+    Properties:
+      FunctionName: platform-scope-tripwire
+      Description: Card data found by Macie becomes a scope-change dossier. ADR-017.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt TripwireRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          ALERT_BUS_NAME: !Ref AlertBusName
+          ACCOUNT_TIER_PARAM: !Ref AccountTierParam
+          SCOPE_CHANGE_TIERS: !Ref ScopeChangeTiers
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+      Code:
+        # Inline because it is one decision and one PutEvents. Tested by
+        # scripts/test-scope-tripwire.py, which loads this exact text.
+        ZipFile: |
+          import datetime
+          import json
+          import os
+
+          import boto3
+
+          # A primary account number, a stripe, or a security code. Not an
+          # expiry date on its own. See the template header.
+          CARD_TYPES = {
+              "CREDIT_CARD_NUMBER",
+              "CREDIT_CARD_NUMBER_(NO_KEYWORD)",
+              "CREDIT_CARD_MAGNETIC_STRIPE",
+              "CREDIT_CARD_SECURITY_CODE",
+          }
+
+          _clients = {}
+
+
+          def _client(name):
+              if name not in _clients:
+                  _clients[name] = boto3.client(name)
+              return _clients[name]
+
+
+          def card_detections(finding):
+              """{type: count} for card data in a Macie finding. Types and counts only."""
+              out = {}
+              result = (finding.get("classificationDetails") or {}).get("result") or {}
+              for category in result.get("sensitiveData") or []:
+                  for d in category.get("detections") or []:
+                      t = d.get("type") or ""
+                      if t in CARD_TYPES:
+                          out[t] = out.get(t, 0) + int(d.get("count") or 0)
+              return out
+
+
+          def account_tier(account_id):
+              """(tier, note). None when the map cannot say, which the caller treats as in scope."""
+              try:
+                  raw = _client("ssm").get_parameter(
+                      Name=os.environ["ACCOUNT_TIER_PARAM"])["Parameter"]["Value"]
+                  tier = json.loads(raw).get(account_id)
+              except Exception as exc:  # noqa: BLE001 -- reported, never swallowed
+                  return None, f"tier map unreadable ({type(exc).__name__})"
+              if not tier:
+                  return None, "account not in the tier map"
+              return tier, None
+
+
+          def decide(finding, tier, tier_note, scope_tiers):
+              """The routing class to declare, whether to open a conversation, and why."""
+              if finding.get("sample"):
+                  return "digest", False, "Macie SAMPLE finding: path test, no conversation"
+              if tier is None:
+                  return "digest_and_jira", True, (
+                      f"tier unknown ({tier_note}); treated as in scope rather than silent")
+              if tier in scope_tiers:
+                  return "digest_and_jira", True, (
+                      f"cardholder_data_is_scope_change is true for tier {tier}")
+              return "digest", False, (
+                  f"cardholder_data_is_scope_change is false for tier {tier}; recorded only")
+
+
+          def build(finding, cards, routing, converse, why, tier):
+              res = finding.get("resourcesAffected") or {}
+              bucket = (res.get("s3Bucket") or {}).get("name") or "unknown"
+              key = (res.get("s3Object") or {}).get("key") or ""
+              account = finding.get("accountId")
+              sample = bool(finding.get("sample"))
+              detail = {
+                  "record_type": "scope-change",
+                  "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  "alarm": {
+                      "name": ("[SAMPLE] " if sample else "") + "Cardholder data found in S3",
+                      "account_id": account,
+                      "resource_id": f"s3://{bucket}/{key}" if key else f"s3://{bucket}",
+                      "environment_tier": tier,
+                  },
+                  "assessment": {
+                      "probable_cause": (
+                          "Macie found card data where the platform holds none. "
+                          "This is a PCI scope question for the client, not an outage: "
+                          "confirm what the object is, who put it there, and whether "
+                          "the application should be storing it at all."),
+                  },
+                  "current_state": "card data present at last discovery",
+                  "routing": routing,
+                  "routing_reason": why,
+                  "macie": {
+                      "finding_id": finding.get("id"),
+                      "type": finding.get("type"),
+                      "region": finding.get("region"),
+                      "origin": (finding.get("classificationDetails") or {}).get("originType"),
+                      "detections": cards,
+                      "sample": sample,
+                  },
+              }
+              if converse:
+                  detail["commercial_event"] = "scope-change"
+              return detail
+
+
+          def handler(event, context=None):
+              finding = event.get("detail") or {}
+              cards = card_detections(finding)
+              if not cards:
+                  print(json.dumps({"record_type": "scope-tripwire", "raised": False,
+                                    "reason": "no card data in this finding",
+                                    "finding_id": finding.get("id"),
+                                    "type": finding.get("type")}))
+                  return {"raised": False}
+
+              scope_tiers = set(filter(None, os.environ["SCOPE_CHANGE_TIERS"].split(",")))
+              tier, note = account_tier(finding.get("accountId"))
+              routing, converse, why = decide(finding, tier, note, scope_tiers)
+              detail = build(finding, cards, routing, converse, why, tier)
+
+              resp = _client("events").put_events(Entries=[{
+                  "EventBusName": os.environ["ALERT_BUS_NAME"],
+                  "Source": "platform.scope",
+                  "DetailType": "Platform Incident Dossier",
+                  "Detail": json.dumps(detail),
+              }])
+              if resp.get("FailedEntryCount"):
+                  # Raised, so the errors alarm fires: a tripwire that fails
+                  # quietly is the one control here that must not.
+                  raise RuntimeError(f"PutEvents failed: {resp.get('Entries')}")
+              out = {"record_type": "scope-tripwire", "raised": True,
+                     "routing": routing, "conversation": converse, "why": why,
+                     "finding_id": finding.get("id")}
+              print(json.dumps(out))
+              return out
+
+  # Macie publishes every member's findings to EventBridge here, in the
+  # administrator account. Matched on the sensitive-data finding types; the
+  # function decides whether card data is among them, because a finding of
+  # type Multiple can carry it alongside other categories.
+  TripwireRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-scope-tripwire
+      Description: Macie sensitive-data findings to the cardholder scope tripwire. ADR-017.
+      EventPattern:
+        source: ['aws.macie']
+        detail-type: ['Macie Finding']
+        detail:
+          type: [{ prefix: 'SensitiveData:' }]
+      State: ENABLED
+      Targets:
+        - Id: tripwire
+          Arn: !GetAtt TripwireFunction.Arn
+
+  TripwirePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TripwireFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TripwireRule.Arn
+
+  # Delivered by the router (D-028), never directly. A failure here means a
+  # card finding may not have become a dossier; the finding itself is still in
+  # Macie for 90 days, which is what makes this a ticket and not a page.
+  TripwireErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-scope-tripwire-errors
+      AlarmDescription: >-
+        The cardholder scope tripwire failed on a Macie finding. A card-data
+        finding may not have reached the router or the commercial channel.
+        List Macie findings of type SensitiveData in Audit for the last day and
+        check each against the router's routing log.
+
+        [platform-routing] routing=digest_and_jira layer=infrastructure urgency=low
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TripwireFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  FunctionName:
+    Value: !Ref TripwireFunction

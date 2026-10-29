@@ -58,6 +58,7 @@ axes:
       - retention_floor
       - regulated_data_expected
       - regulated_data_is_finding
+      - cardholder_data_is_scope_change
       - finding_severity
       - restore_testing
       - canary_required
@@ -71,6 +72,20 @@ axes:
         # The scope-change finding that fires when regulated data turns up
         # somewhere it was not expected.
         regulated_data_is_finding: true
+        # Cardholder data is a scope change in EVERY tier, and is not the same
+        # question as regulated_data_is_finding. That one asks whether real
+        # data is expected here, and is rightly false where it is (uat, prod).
+        # This one asks whether the platform holds this KIND of data at all,
+        # and it holds none: there is no cardholder data environment, and
+        # vesting halts any PCI answer (D-025). Following the regulated-data
+        # pattern would stay silent in uat and prod, exactly where card data
+        # would land (phase 15 plan, 15.6 finding 7; decided 2026-09-25).
+        #
+        # Read by security/70-scope-tripwire.yaml through its ScopeChangeTiers
+        # parameter, which scripts/deploy-scope-tripwire.sh computes from here.
+        # Kept on this axis with the same value everywhere rather than in
+        # tier_specific, because it does not depend on the tier's name.
+        cardholder_data_is_scope_change: true
         finding_severity: non_production
         restore_testing: false
         canary_required: false
@@ -86,6 +101,7 @@ axes:
         # "not misconduct, it is how UAT works" -- and a control that fires on
         # the expected case trains people to close it without reading.
         regulated_data_is_finding: false
+        cardholder_data_is_scope_change: true
         finding_severity: production
         # design 14: "An environment holding regulated data with an untested
         # restore path is an audit finding regardless of its SLA status."
@@ -104,6 +120,7 @@ axes:
         retention_floor: full
         regulated_data_expected: true
         regulated_data_is_finding: false
+        cardholder_data_is_scope_change: true
         finding_severity: production
         restore_testing: true
         canary_required: true

@@ -446,8 +446,13 @@ Resources:
         # it runs IN this account and puts straight onto this bus, so it never
         # passes through baseline/70-event-forwarding.yaml — which is why that
         # template's matching rule lists only the two member-side sources.
+        #
+        # platform.scope is the cardholder scope tripwire
+        # (security/70-scope-tripwire.yaml) and platform.cost the Macie cost
+        # watch (scripts/check-macie-cost.sh), both ADR-017. Both put straight
+        # onto this bus in this account, as containment does.
         source: ['platform.response', 'platform.recovery', 'platform.security',
-                 'platform.change']
+                 'platform.change', 'platform.scope', 'platform.cost']
         detail-type: ['Platform Incident Dossier']
       State: ENABLED
       Targets:
@@ -485,6 +490,8 @@ Resources:
               - platform.recovery
               - platform.security
               - platform.change
+              - platform.scope
+              - platform.cost
       State: ENABLED
       Targets:
         - Id: router

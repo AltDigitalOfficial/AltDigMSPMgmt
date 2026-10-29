@@ -19,19 +19,25 @@
 #   GuardDuty      $5-30   scales with CloudTrail events, VPC flow logs, DNS
 #   Security Hub   $2-10   per finding ingested plus per compliance check
 #   Inspector      $1-15   per scanned instance, image and function
-#   Macie          $0.10   bucket inventory only, as configured here
+#   Macie          inventory plus automated discovery, watched (ADR-017)
 #
 # Design doc 02 is explicit that governance does not vary by environment, so
 # these run in dev and test as well as production. That is a deliberate cost:
 # "sensitive data appears in non-production environments more often than anyone
 # admits".
 #
-# MACIE AUTOMATED SENSITIVE DATA DISCOVERY IS DELIBERATELY NOT ENABLED.
-# It is charged per GB scanned and, pointed at a large bucket, produces bills
-# that are startling rather than merely large. Bucket inventory and public
-# access findings are near-free and are what is switched on. Per-tenant
-# discovery belongs to the questionnaire's data classification, not to a
-# platform default.
+# MACIE AUTOMATED SENSITIVE DATA DISCOVERY IS ON, IN EVERY ACCOUNT (ADR-017).
+# This file used to say it was deliberately off. It was never off: Macie turns
+# automated discovery on by default when it is enabled, and it had been
+# running in every account since 2026-09-17 while this comment said otherwise.
+# Found 2026-10-28. It is now managed here on purpose, because it is the
+# cardholder scope tripwire's source (security/70-scope-tripwire.yaml).
+#
+# Its cost is watched rather than capped. The ceiling is a ratio of each
+# account's bill, set in SSM by the commercial owner and never in this
+# repository, and exceeding it raises a cost conversation. It never switches
+# discovery off, because that would remove the control (Jamie, 2026-10-28).
+# scripts/check-macie-cost.sh measures it.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -56,7 +62,7 @@ hr
 log "Enabling security services organization-wide"
 log "  admin account : ${AUDIT} (Audit)"
 log "  regions       : ${PLATFORM_ALLOWED_REGIONS}"
-log "  macie discovery: NOT enabled (cost) — inventory only"
+log "  macie discovery: ON, card identifiers included (ADR-017)"
 hr
 
 CREDS="$(aws sts assume-role \
@@ -245,13 +251,38 @@ for region in "${REGIONS[@]}"; do
   fi
 
   # --- Macie --------------------------------------------------------------
-  # Inventory and public-access findings only. Automated sensitive data
-  # discovery is charged per GB and is NOT switched on here.
   step "macie: enable" "${region}" \
     audit "${region}" aws macie2 enable-macie \
       --finding-publishing-frequency FIFTEEN_MINUTES --status ENABLED
   step "macie: auto-enable members" "${region}" \
     audit "${region}" aws macie2 update-organization-configuration --auto-enable
+
+  # Automated discovery, for every account including later ones (ADR-017).
+  # Stated, not left to Macie's default, so that the state is this script's
+  # decision and a later default change cannot quietly turn it off.
+  step "macie: automated discovery, all members" "${region}" \
+    audit "${region}" aws macie2 update-automated-discovery-configuration \
+      --status ENABLED --auto-enable-organization-members ALL
+
+  # Card identifiers INCLUDED, on top of AWS's default set, never instead of
+  # it: "includes" adds to the defaults, so this guarantees the tripwire's
+  # types are inspected without narrowing what else is found. Expiry is
+  # included so a finding shows it alongside a number; the tripwire ignores it
+  # on its own. The template is per region and its id is read, not stored.
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    TEMPLATE_ID="$(audit "${region}" aws macie2 get-automated-discovery-configuration \
+      --query sensitivityInspectionTemplateId --output text 2>/dev/null | no_cr)"
+    if [[ -n "${TEMPLATE_ID}" && "${TEMPLATE_ID}" != "None" ]]; then
+      step "macie: card identifiers in the discovery template" "${region}" \
+        audit "${region}" aws macie2 update-sensitivity-inspection-template \
+          --id "${TEMPLATE_ID}" \
+          --includes 'managedDataIdentifierIds=CREDIT_CARD_NUMBER,CREDIT_CARD_NUMBER_(NO_KEYWORD),CREDIT_CARD_MAGNETIC_STRIPE,CREDIT_CARD_SECURITY_CODE,CREDIT_CARD_EXPIRATION'
+    else
+      printf '%swarn%s  %-34s %s — no sensitivity inspection template id\n' \
+        "${C_YELLOW}" "${C_RESET}" "macie: card identifiers" "${region}"
+      FAILED=1
+    fi
+  fi
 
   # --- Inspector ----------------------------------------------------------
   # EC2 and ECR only. Lambda scanning is per-function and most member accounts
@@ -274,8 +305,6 @@ hr
 ok "Pass complete."
 log ""
 log "Deliberately NOT enabled:"
-log "  * Macie automated sensitive data discovery — charged per GB scanned."
-log "    Per-tenant, driven by questionnaire data classification."
 log "  * Inspector Lambda scanning — per-function, per-tenant decision."
 log "  * GuardDuty Malware Protection, EKS, ECS and EC2 runtime and RDS plans —"
 log "    per-tenant, where the workload exists (ADR-014). S3 and Lambda"
