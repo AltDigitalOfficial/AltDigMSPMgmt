@@ -168,6 +168,59 @@ Resources:
                 MFA on the management root is accepted deviation D-006.
               UpdatedBy: platform-automation-rule
 
+  # GuardDuty.5, .7, .8, .9, .11, .12, .13 and Inspector.3, .4 ask whether the
+  # ORGANIZATION auto-enables EKS audit logs, the runtime monitoring plans,
+  # EC2 malware protection, RDS protection and Inspector Lambda scanning.
+  # Security Hub evaluates that configuration where it lives, on the delegated
+  # administrator, which is why these fail on Audit and nowhere else (read
+  # 2026-10-28: 27 findings, every one Audit's).
+  #
+  # Leaving them off at organization level is ADR-014: they cost money in
+  # proportion to workloads most accounts do not run, so they are enabled per
+  # tenant where the workload exists. That decision makes these findings
+  # permanent and tells nobody anything, which is the ADR-011 test for a
+  # suppression. GuardDuty.6 and .10 (Lambda, S3) are enabled and pass, and are
+  # not listed.
+  #
+  # Scoped to Audit's own account id. If a member account ever reports one of
+  # these, it is about that account's detector, and it still raises.
+  SuppressOrgPlanControls:
+    Type: AWS::SecurityHub::AutomationRule
+    Properties:
+      RuleName: platform-suppress-org-protection-plans
+      RuleOrder: 40
+      RuleStatus: ENABLED
+      IsTerminal: false
+      Description: >-
+        GuardDuty and Inspector protection plans left off at organization
+        level by decision ADR-014, evaluated on the delegated administrator.
+      Criteria:
+        ComplianceSecurityControlId:
+          - { Value: GuardDuty.5,  Comparison: EQUALS }
+          - { Value: GuardDuty.7,  Comparison: EQUALS }
+          - { Value: GuardDuty.8,  Comparison: EQUALS }
+          - { Value: GuardDuty.9,  Comparison: EQUALS }
+          - { Value: GuardDuty.11, Comparison: EQUALS }
+          - { Value: GuardDuty.12, Comparison: EQUALS }
+          - { Value: GuardDuty.13, Comparison: EQUALS }
+          - { Value: Inspector.3,  Comparison: EQUALS }
+          - { Value: Inspector.4,  Comparison: EQUALS }
+        AwsAccountId:
+          - { Value: !Ref 'AWS::AccountId', Comparison: EQUALS }
+        RecordState:
+          - { Value: ACTIVE, Comparison: EQUALS }
+      Actions:
+        - Type: FINDING_FIELDS_UPDATE
+          FindingFieldsUpdate:
+            Workflow:
+              Status: SUPPRESSED
+            Note:
+              Text: >-
+                Suppressed by platform-suppress-org-protection-plans. These
+                plans are off at organization level by decision ADR-014 and
+                enabled per tenant where the workload exists.
+              UpdatedBy: platform-automation-rule
+
 Outputs:
   BoundaryIam1RuleArn:
     Description: The IAM.1 suppression rule.

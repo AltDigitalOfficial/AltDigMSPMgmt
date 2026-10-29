@@ -680,6 +680,19 @@ region and accept the same exposure there.
 evidence *retrieval* rather than evidence retention, which is a meaningfully
 rarer clause. Until then this is documented exposure, not a gap.
 
+**Correction, 2026-10-28 (phase 15.6).** *"The detective services are
+already enabled in all three allowed regions and aggregate to `us-east-2`"*
+was not true when written, in two ways:
+- **Config** had recorders only in the two Sandbox accounts, in `us-east-2`.
+  Every account-region recorded only from 15.6a, 2026-10-25 (ADR-010).
+- **Security Hub** had no finding aggregator until 15.6b, 2026-10-26
+  (`security/35-securityhub-aggregator.yaml`, ADR-011). Each region's
+  findings stayed in that region.
+
+GuardDuty, Macie and Inspector were enabled in all three regions as stated.
+The exposure this item describes, that aggregation lives in one region, is
+now real for Security Hub and Config, which is what it assumed all along.
+
 ---
 
 ## B-014 · Two deviation IDs are used twice — CLOSED
@@ -8030,3 +8043,49 @@ router log with `routing: digest` for a dev account.
 **Not covered** (listed in every digest): Lambda function URLs, public S3,
 ECS tasks with public IPs, App Runner, Elastic Beanstalk, Lightsail, Global
 Accelerator. Who created each public resource arrives with Stage B (B-171).
+
+## B-177 · Phase 15.6 closing record
+
+**Recorded** — 2026-10-28. What 15.6 decided that has no other home.
+
+- **Platform accounts are prod-tier** (F-6: "record that choice").
+  `scripts/sync-account-tiers.sh` maps every account registered under
+  `/platform/org/account/` to `prod` unless a deployed StackSet already gave
+  it a tier, which keeps Sandbox at `dev`. F-6 made Config recording
+  continuous in every tier, so this no longer decides Config. It decides
+  routing: a finding in a platform account is routed as production. That is
+  an existing mapping, not a departure from design 14, so it needs no D-item.
+- **Design 04 is not amended** for the standards change (D-032) or the
+  PCI-out decision. The design package is not edited by build work; D-032
+  and D-025 carry both until it is.
+- **Still owed from 15.6:**
+  - The before-and-after cost of Config and Security Hub, as ratios, from a
+    week of billing after 2026-10-26.
+  - The auditor guide: §6 still says "no data events", §7 still describes
+    Macie discovery as off, and the gap register still lists Config recorder
+    coverage, the unrecorded standards deviation and the unalarmed evidence
+    queue, all closed by 15.6.
+  - Ratification of ADR-010 and ADR-011 (Proposed).
+  - The nine organization-plan controls are suppressed in Audit
+    (`platform-suppress-org-protection-plans`, ADR-014), verified once the
+    controls re-evaluate.
+
+## B-178 · Nothing consumes the router's commercial queue
+
+**Open** — 2026-10-28. Found building ADR-017.
+
+`alerting/20-router.yaml` creates `CommercialQueue`, and the router writes to
+it for every event routed `jira_and_commercial` (`deliver()`, `enqueue(...,
+"commercial")`). No function reads it. The working commercial path is
+`platform-route-commercial-declared`
+(`commercial/`), which matches any bus event carrying `commercial_event` and
+sends it on. So a uat finding the router classes as `jira_and_commercial`
+gets a Jira intent and a commercial message that reaches nobody. The routing
+log still says it was delivered.
+
+ADR-017's tripwire avoids it by emitting `commercial_event` on the bus.
+
+**Fix:** either have the router put a `commercial_event` onto the bus instead
+of enqueueing, which is one path and matches design 12, or give the queue a
+consumer. Then add the alarm the queue lacks: a queue with no consumer and
+no depth alarm is the B-156 shape.
