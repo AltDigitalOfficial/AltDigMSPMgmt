@@ -1,8 +1,8 @@
 # ADR-011 — Security Hub is configured centrally from Audit; a control is disabled only when no account can satisfy it, and platform-only noise is suppressed per resource
 
 **Date:** 2026-10-26
-**Deciders:** Jamie (central configuration as phase 15.6b; standards option A, 2026-10-26); Claude (session), unreviewed (the disable-versus-suppress rule and the specific lists)
-**Status:** Proposed
+**Deciders:** Jamie (central configuration as phase 15.6b; standards option A, 2026-10-26; ratified the whole record 2026-10-28); Claude (session), proposing the disable-versus-suppress rule and the specific lists
+**Status:** Accepted (ratified 2026-10-28)
 **Tags:** security-hub, phase-15.6, central-configuration, findings, b-147
 
 ---

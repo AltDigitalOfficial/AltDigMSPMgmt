@@ -1,8 +1,8 @@
 # ADR-010 — Config records in every allowed region, as Config's service-linked role, configured from one home-region stack per account
 
 **Date:** 2026-10-25
-**Deciders:** Jamie (the service-linked role, approving the 15.6a plan on 2026-10-25); Claude (session), unreviewed (one home-region stack configuring every region)
-**Status:** Proposed
+**Deciders:** Jamie (the service-linked role, approving the 15.6a plan on 2026-10-25; ratified the whole record 2026-10-28); Claude (session), proposing one home-region stack configuring every region
+**Status:** Accepted (ratified 2026-10-28)
 **Tags:** config, phase-15.6, baseline, stacksets, hipaa, security-hub
 
 ---

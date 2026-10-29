@@ -8065,7 +8065,7 @@ Accelerator. Who created each public resource arrives with Stage B (B-171).
     Macie discovery as off, and the gap register still lists Config recorder
     coverage, the unrecorded standards deviation and the unalarmed evidence
     queue, all closed by 15.6.
-  - Ratification of ADR-010 and ADR-011 (Proposed).
+  - ~~Ratification of ADR-010 and ADR-011.~~ Ratified by Jamie, 2026-10-28.
   - The nine organization-plan controls are suppressed in Audit
     (`platform-suppress-org-protection-plans`, ADR-014), verified once the
     controls re-evaluate.
