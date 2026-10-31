@@ -929,7 +929,15 @@ Recorded as unknown rather than guessed.
 - Retention is 400 days on both the source and the replica (ADR-018).
 
 The `platform-network` StackSet held `EnableFlowLogs=false` explicitly, so the
-rollout passes `true`.
+rollout passes `true`. It was rolled out 2026-10-31, Sandbox OU first and then
+Arc8, from the management account. All four VPCs deliver, and each file
+carries the 29 fields of the custom format, SSE-KMS. The hand-made probe flow
+log in Sandbox Exercise was deleted once the StackSet's replaced it (Jamie,
+2026-10-31).
+
+Staging leaves the instances outside each stage `OUTDATED`. Their template
+and parameters are identical, but each update-stack-set is a new revision. A
+final update targeting every OU at once clears it.
 
 Still open nearby:
 - B-101: port-22 detection over Athena is now unblocked.
