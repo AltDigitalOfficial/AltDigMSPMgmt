@@ -54,8 +54,9 @@ Parameters:
     MinValue: 1
     Description: >-
       Age at which objects move to Glacier Instant Retrieval. Object Lock is
-      unaffected by storage class, so immutability is preserved. This is the
-      main lever on the cost of a long retention period.
+      unaffected by storage class, so immutability is preserved. In practice
+      it moves very little: S3 skips objects under 128 KB, and 99.8% of
+      CloudTrail and Config objects are smaller than that (D-034).
 
   FlowLogRetentionDays:
     Type: Number

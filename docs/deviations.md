@@ -1894,3 +1894,46 @@ The second is intended: what is still owed is the gap detector's job.
 
 **Closing condition** — 06a gains a growth variant for DLQs that are
 diagnostic copies, or the no-purge ruling changes.
+
+---
+
+## D-034 · No Deep Archive tier: the archives are too small per object for any cold storage class
+
+**Design position** — [04](../design/04-security-controls-and-evidence.md),
+*Log retention*: warm in S3 Standard or Glacier Instant Retrieval for about a
+year, then cold in Glacier Deep Archive to the retention floor. It adds that
+"over-retaining in Deep Archive costs roughly 1% of hot storage".
+
+**Actual** — the six-year replicas in us-west-2 stay in S3 Standard for the
+whole of their COMPLIANCE lock. The sources keep their 90-day Glacier IR rule,
+but S3 skips nearly every object under it.
+
+**Reason** — measured 2026-10-31, phase 15.8:
+- **The CloudTrail replica** holds 350,532 objects averaging 3.2 KB. 99.8% of
+  them are under 128 KB.
+- **The Config replica** holds 2,581 objects, every one under 128 KB.
+
+Every colder class bills a small object as larger than it is:
+- **Glacier IR and Standard-IA** bill at least 128 KB per object.
+- **Deep Archive** adds about 40 KB of metadata overhead per object.
+- **Every class** charges a request fee per transition.
+
+At 3 KB per object, Deep Archive would bill roughly twelve times what
+Standard does. S3 lifecycle skips objects under 128 KB by default
+(`TransitionDefaultMinimumObjectSize: all_storage_classes_128K`, set on the
+source buckets) for exactly this reason. So the source's Glacier IR rule
+moves about 0.2% of objects, and 10% of bytes.
+
+Design 04's 1% figure assumes large objects. CloudTrail and Config deliver
+many small ones.
+
+**Cost** — the archive is billed at Standard rates for six years. It is small
+in absolute terms today (the CloudTrail replica is about 1 GB), and it grows
+with event volume, not with object size.
+
+**Closing condition** — one of:
+- objects reach a size where cold storage pays. CloudTrail does not batch
+  larger on request, so this means a different delivery path; or
+- a tenant's volume makes Standard storage of the archive material. Then the
+  design should be revisited (S3 Intelligent-Tiering does not help: objects
+  under 128 KB are never moved, and are not charged its monitoring fee).
