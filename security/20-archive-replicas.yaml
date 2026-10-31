@@ -41,6 +41,14 @@ Parameters:
       Object Lock retention on the replicas, matching the source archive.
       Six years, per the HIPAA documentation retention expectation.
 
+  FlowLogReplicaRetentionDays:
+    Type: Number
+    Default: 400
+    MinValue: 400
+    Description: >-
+      Age at which replicated flow logs expire. Must match
+      FlowLogRetentionDays in 10-log-archive.yaml (ADR-018).
+
 Resources:
 
   ReplicaKey:
@@ -156,6 +164,19 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      # Expiry on the source does not replicate: S3 lifecycle actions never do.
+      # Without its own rule this replica would keep every flow log forever,
+      # whatever the source's retention says. Same shape as the source rule.
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireFlowLogs
+            Status: Enabled
+            ExpirationInDays: !Ref FlowLogReplicaRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: RemoveExpiredDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
       Tags:
         - { Key: platform-managed, Value: 'true' }
         - { Key: Purpose,          Value: flow-log-replica }

@@ -901,11 +901,45 @@ health checks) and a generic scaffold would be rebuilt anyway.
 
 ---
 
-## B-012 · VPC flow log delivery to S3 fails — UNRESOLVED
+## B-012 · VPC flow log delivery to S3 fails — RESOLVED 2026-10-29 (did not reproduce)
 
-**Status** — blocking flow logs only. `EnableFlowLogs` defaults to `false` in
-`baseline/40-network.yaml` so the VPC deploys without them. **The network
-baseline has no flow logs.**
+**Resolution (2026-10-29, phase 15.7)** — the exhaustive diff the entry below
+asked for was done, and then the delivery itself was retried. The
+CloudFormation-built `altdig-flow-logs-<logarchive>` and the hand-built probe
+bucket now match on policy, encryption, ownership controls and the public
+access block. They differ only in lifecycle, replication and tags, none of
+which a delivery check reads.
+
+A flow log created by hand in the Sandbox Exercise VPC, delivering
+cross-account into the CloudFormation-built bucket, reached `SUCCESS`. The
+objects landed SSE-KMS with the log archive key.
+
+That also settles the `aws:SourceOrgID` question for good. The key grants
+log delivery only on that condition, so log delivery does populate it.
+
+**The original cause is unknown.** The most likely candidates are the bucket
+and key changes made on 2026-09-17 itself, or propagation on a new bucket.
+Recorded as unknown rather than guessed.
+
+**What 15.7 changed:**
+- `EnableFlowLogs` now defaults to `true`, with a v5 custom format.
+- The flow-log bucket's two delivery grants are scoped to
+  `aws:SourceOrgID`. They were unconditioned, so the bucket would have
+  accepted any account's flow logs.
+- Retention is 400 days on both the source and the replica (ADR-018).
+
+The `platform-network` StackSet held `EnableFlowLogs=false` explicitly, so the
+rollout passes `true`.
+
+Still open nearby:
+- B-101: port-22 detection over Athena is now unblocked.
+- B-134: flow logs are not yet in log custody.
+
+The text below is the record as it stood before resolution.
+
+**Status (superseded)** — blocking flow logs only. `EnableFlowLogs` defaults
+to `false` in `baseline/40-network.yaml` so the VPC deploys without them.
+**The network baseline has no flow logs.**
 
 **Symptom** — every attempt returns
 `LogDestination: <bucket> is undeliverable`, from CloudFormation and from a

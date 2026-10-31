@@ -57,6 +57,17 @@ Parameters:
       unaffected by storage class, so immutability is preserved. This is the
       main lever on the cost of a long retention period.
 
+  FlowLogRetentionDays:
+    Type: Number
+    Default: 400
+    MinValue: 400
+    Description: >-
+      Age at which flow logs expire. 400 days covers a 12-month SOC 2 period
+      plus fieldwork lag (Jamie, 2026-10-29). Operational retention, NOT the
+      derived evidence floor: see the FlowLogBucket lifecycle. MinValue holds
+      the ruling, so lowering it is a template change, not a parameter typo.
+      Must match FlowLogReplicaRetentionDays in 20-archive-replicas.yaml.
+
   OrganizationId:
     Type: String
     Description: Organization id (o-xxxx), used to scope the bucket policy.
@@ -662,6 +673,10 @@ Resources:
   # Config-archive policy is responsible and it was not worth more bisection to
   # find out which.
   #
+  # Later, this bucket was refused too. On 2026-10-29 it accepted cross-account
+  # delivery and nothing that could explain the change was found (B-012,
+  # resolved, cause unknown).
+  #
   # A dedicated bucket is the better answer regardless. The Config archive had
   # grown statements for Config and then flow logs, and the locked bucket for
   # CloudTrail and then flow logs; each addition risks the previous one, and a
@@ -697,6 +712,30 @@ Resources:
             Transitions:
               - StorageClass: GLACIER_IR
                 TransitionInDays: !Ref TransitionToGlacierDays
+          # Until 2026-10-29 nothing expired flow logs at all. Design doc 02
+          # derives retention from the union of tenant frameworks, which for
+          # HIPAA is six years; that floor governs the EVIDENCE trail
+          # (CloudTrail, Config), held under Object Lock above. Flow logs were
+          # placed outside it when this bucket was made unlocked, and this rule
+          # makes that explicit: ADR-018.
+          #
+          # The bucket is versioned, so expiring the current version only
+          # writes a delete marker. NoncurrentVersionExpiration removes the
+          # data; its 30 days doubles as the window to recover a flow log
+          # deleted by mistake. Effective retention is 400 to 430 days.
+          #
+          # Lifecycle actions are NOT replicated. The replica in us-west-2
+          # carries its own matching rule (20-archive-replicas.yaml).
+          - Id: ExpireFlowLogs
+            Status: Enabled
+            ExpirationInDays: !Ref FlowLogRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          # A delete marker with no versions under it is clutter, and S3 does
+          # not allow this flag in the same rule as ExpirationInDays.
+          - Id: RemoveExpiredDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
           - Id: AbortIncompleteUploads
             Status: Enabled
             AbortIncompleteMultipartUpload:
@@ -747,11 +786,20 @@ Resources:
           # AWS's documented flow-log grants, verbatim. The ACL condition is
           # kept because it is what the working probe carried; removing it was
           # not tested and this is not the place to find out.
+          # Scoped to this Organization (phase 15.7). Unscoped, the log
+          # delivery service would write ANY AWS account's flow logs here on
+          # that account's request. aws:SourceOrgID is populated for flow log
+          # delivery: B-012 exonerated it on the bucket grants, and on
+          # 2026-10-29 a delivery succeeded through the KMS grant that already
+          # requires it.
           - Sid: AWSLogDeliveryAclCheck
             Effect: Allow
             Principal: { Service: delivery.logs.amazonaws.com }
             Action: 's3:GetBucketAcl'
             Resource: !GetAtt FlowLogBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrganizationId
 
           - Sid: AWSLogDeliveryWrite
             Effect: Allow
@@ -761,6 +809,7 @@ Resources:
             Condition:
               StringEquals:
                 's3:x-amz-acl': 'bucket-owner-full-control'
+                'aws:SourceOrgID': !Ref OrganizationId
 
   LogArchiveBucketPolicy:
     Type: AWS::S3::BucketPolicy

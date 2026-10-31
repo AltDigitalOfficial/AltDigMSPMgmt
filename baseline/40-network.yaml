@@ -101,15 +101,15 @@ Parameters:
 
   EnableFlowLogs:
     Type: String
-    Default: 'false'
+    Default: 'true'
     AllowedValues: ['true', 'false']
     Description: >-
-      Default FALSE because flow log delivery to S3 is currently BROKEN and
-      unresolved — see B-012. Every attempt returns "LogDestination: <bucket>
-      is undeliverable" against three different buckets, including one built to
-      match a bare probe bucket that worked. Leaving this on would fail every
-      deployment of the network baseline, so the VPC ships without flow logs
-      rather than not shipping.
+      On by default. It was off while delivery failed with "LogDestination:
+      <bucket> is undeliverable" (B-012). On 2026-10-29 a flow log from Sandbox
+      Exercise delivered cross-account into this bucket under the platform
+      key, so the failure no longer reproduces (B-012, phase 15.7). 'false'
+      remains for an account where delivery fails again, so the VPC can ship
+      while that is investigated.
 
   FlowLogBucketName:
     Type: String
@@ -357,11 +357,14 @@ Resources:
       RouteTableId: !Ref PrivateRouteTableB
 
   # --- flow logs -----------------------------------------------------------
-  # Straight to the Log Archive bucket rather than via CloudWatch Logs: cheaper
-  # at volume, and it puts flow logs in the same immutable destination as the
-  # audit trail. Flow logs are how "instance alive, telemetry silent" is
-  # distinguished during a telemetry-gap investigation (design doc 11), so
-  # losing them costs a diagnosis.
+  # Straight to the Log Archive account rather than via CloudWatch Logs:
+  # cheaper at volume, and out of reach of anyone working in this account. The
+  # bucket is altdig-flow-logs-<acct>, which is NOT Object Lock: flow log
+  # delivery cannot write to a locked bucket, and flow logs are kept as
+  # operational records, not evidence (security/10-log-archive.yaml). Flow
+  # logs are how "instance alive, telemetry silent" is distinguished during a
+  # telemetry-gap investigation (design doc 11), so losing them costs a
+  # diagnosis.
   FlowLog:
     Type: AWS::EC2::FlowLog
     Condition: WantFlowLogs
@@ -376,8 +379,27 @@ Resources:
       # allowed." Objects land at <bucket>/AWSLogs/<account>/vpcflowlogs/...
       LogDestination: !Sub 'arn:${AWS::Partition}:s3:::${FlowLogBucketName}'
       MaxAggregationInterval: 60
+      # The default format plus every field through v5. The ones that matter:
+      #   tcp-flags          a SYN with no SYN-ACK is a scan or a dead service
+      #   pkt-srcaddr/dst    the real endpoints behind a NAT gateway, which the
+      #                      default srcaddr/dstaddr replace with the NAT's
+      #   flow-direction     ingress or egress without inferring it from ports;
+      #                      port 22 inbound is a finding (design 11)
+      #   pkt-src/dst-aws-service  traffic to AWS services, told apart from
+      #                      the internet
+      #   traffic-path       which egress a flow took (NAT, IGW, endpoint)
+      # Field order is fixed once logs exist: an Athena table reads by position
+      # (B-101), so add fields at the end and never reorder.
+      LogFormat: >-
+        ${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr}
+        ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end}
+        ${action} ${log-status} ${vpc-id} ${subnet-id} ${instance-id}
+        ${tcp-flags} ${type} ${pkt-srcaddr} ${pkt-dstaddr} ${region} ${az-id}
+        ${sublocation-type} ${sublocation-id} ${pkt-src-aws-service}
+        ${pkt-dst-aws-service} ${flow-direction} ${traffic-path}
       Tags:
         - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
 
   # --- DNS firewall (dns-filtered profile) ---------------------------------
   # Route 53 Resolver DNS Firewall blocks at name resolution, before a
