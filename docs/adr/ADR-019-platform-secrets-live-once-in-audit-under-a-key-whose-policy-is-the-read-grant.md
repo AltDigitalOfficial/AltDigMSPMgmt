@@ -1,8 +1,8 @@
 # ADR-019 — Platform secrets live once, in Audit, under a key whose policy is the read grant
 
 **Date:** 2026-10-31
-**Deciders:** Jamie (one copy of each secret, in Audit, "until someone tells me to change it", 2026-10-31; tokens re-issued by hand get a reminder, 2026-10-31); Claude (session), unreviewed (the key in Audit only, the grant in the key policy, the cut-over procedure)
-**Status:** Proposed
+**Deciders:** Jamie (one copy of each secret, in Audit, "until someone tells me to change it", 2026-10-31; tokens re-issued by hand get a reminder, 2026-10-31); Claude (session), unreviewed (the key in Audit only, the grant in the key policy, the cut-over procedure). Ratified by Jamie, 2026-11-01
+**Status:** Accepted
 **Tags:** secrets, kms, audit, phase-15.8
 
 ---

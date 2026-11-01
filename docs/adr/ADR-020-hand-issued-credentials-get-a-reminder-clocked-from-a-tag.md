@@ -1,8 +1,8 @@
 # ADR-020 — Hand-issued credentials get a reminder, clocked from a tag, not from the secret's dates
 
 **Date:** 2026-11-01
-**Deciders:** Jamie (a scheduled reminder in place of rotation, 2026-10-31); Claude (session), unreviewed (the tag clock, 365 days for the four tokens, `none` for routing keys, the reminder days, never paging)
-**Status:** Proposed
+**Deciders:** Jamie (a scheduled reminder in place of rotation, 2026-10-31); Claude (session), unreviewed (the tag clock, 365 days for the four tokens, `none` for routing keys, the reminder days, never paging). Ratified by Jamie, 2026-11-01
+**Status:** Accepted
 **Tags:** secrets, rotation, reminder, phase-15.8
 
 ---

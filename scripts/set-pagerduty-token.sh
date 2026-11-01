@@ -6,6 +6,17 @@
 #   scripts/set-pagerduty-token.sh              # prompts, input hidden
 #   ... | scripts/set-pagerduty-token.sh --stdin
 #   scripts/set-pagerduty-token.sh --propagate  # fan an existing value out
+#   scripts/set-pagerduty-token.sh --readonly   # the drift check's key
+#
+# ---------------------------------------------------------------------------
+# Two keys: full access, and read-only (--readonly)
+# ---------------------------------------------------------------------------
+# pagerduty-drift.sh only runs terraform plan, which only reads. Since 15.8 it
+# reads a read-only general access key, platform/pagerduty/api-token-readonly,
+# so a check that runs often never holds a key that can retarget pages.
+# --readonly stores that one, and insists on the R0 prefix the full key must
+# not carry. The full key stays for pagerduty-apply.sh and
+# pagerduty-maintenance.sh, which write.
 #
 # ---------------------------------------------------------------------------
 # An ACCOUNT key, not a personal one
@@ -54,6 +65,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 FROM_STDIN=0
 PROPAGATE=0
+READONLY=0
 SECRET_NAME="platform/pagerduty/api-token"
 
 # Overriding this narrows the fan-out, which is how a half-rotation gets done
@@ -64,14 +76,21 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --stdin)     FROM_STDIN=1; shift ;;
     --propagate) PROPAGATE=1; shift ;;
+    --readonly)  READONLY=1; SECRET_NAME="platform/pagerduty/api-token-readonly"; shift ;;
     --secret)    SECRET_NAME="$2"; shift 2 ;;
     --account)   CONSUMER_KEYS="${2//,/ }"; shift 2 ;;
     -h|--help)
-      printf 'Usage: %s [--stdin] [--propagate] [--secret <name>] [--account <alias>[,<alias>]]\n' "$0"
+      printf 'Usage: %s [--stdin] [--propagate] [--readonly] [--secret <name>] [--account <alias>[,<alias>]]\n' "$0"
       exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
+
+if [[ "${READONLY}" == "1" ]]; then
+  DESCRIPTION="PagerDuty READ-ONLY REST API key for drift detection (pagerduty-drift.sh). Account-level key, not a personal token. Written by scripts/set-pagerduty-token.sh --readonly."
+else
+  DESCRIPTION="PagerDuty REST API key for tenant provisioning (12.2) and drift detection. Account-level key, not a personal token. Written by scripts/set-pagerduty-token.sh."
+fi
 
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
@@ -111,7 +130,10 @@ else
     warn "That key is shorter than any PagerDuty API key observed so far."
     warn "Storing it anyway; verify with scripts/pagerduty-check.sh."
   fi
-  if [[ "${TOKEN}" == R0* ]]; then
+  if [[ "${READONLY}" == "1" ]]; then
+    [[ "${TOKEN}" == R0* ]] \
+      || die "--readonly expects a READ-ONLY key (they begin R0). This one does not, so it can write. Create a key with the Read-only box ticked."
+  elif [[ "${TOKEN}" == R0* ]]; then
     # PagerDuty prefixes read-only keys. Catching it here saves discovering it
     # as a 403 from a Terraform apply half way through creating a tenant.
     die "That looks like a READ-ONLY key (they begin R0). This must create services, escalation policies and business services, so it needs a full-access key."
@@ -126,10 +148,14 @@ fi
 
 store_secret_everywhere \
   "${SECRET_NAME}" \
-  "PagerDuty REST API key for tenant provisioning (12.2) and drift detection. Account-level key, not a personal token. Written by scripts/set-pagerduty-token.sh." \
+  "${DESCRIPTION}" \
   "${PAYLOAD}" \
   "${ACCOUNTS[@]}"
 unset PAYLOAD
 
 printf '\n'
-info "Next: scripts/pagerduty-check.sh confirms the key authenticates and is not read-only."
+if [[ "${READONLY}" == "1" ]]; then
+  info "Next: scripts/pagerduty-check.sh --readonly confirms the key authenticates and is read-only."
+else
+  info "Next: scripts/pagerduty-check.sh confirms the key authenticates and is not read-only."
+fi

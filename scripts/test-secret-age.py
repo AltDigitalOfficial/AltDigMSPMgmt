@@ -156,5 +156,86 @@ class Handler(unittest.TestCase):
         self.assertEqual(len(self.events.sent), 23)
 
 
+class StubSNS:
+    def __init__(self, subs=("arn:aws:sns:us-east-2:111111111111:platform-owner-platform-operations:x",),
+                 missing=False):
+        self.subs, self.missing, self.published = subs, missing, []
+
+    def list_subscriptions_by_topic(self, TopicArn):
+        if self.missing:
+            raise type("NotFoundException", (Exception,), {})("Topic does not exist")
+        return {"Subscriptions": [{"SubscriptionArn": s} for s in self.subs]}
+
+    def publish(self, TopicArn, Subject, Message):
+        self.published.append({"TopicArn": TopicArn, "Subject": Subject, "Message": Message})
+
+
+FIRST = datetime.date(2026, 12, 1)
+
+
+class Calendar(unittest.TestCase):
+    def setUp(self):
+        self.m = load()
+        self.events = StubEvents()
+        import os
+        os.environ["ALERT_BUS_NAME"] = "platform-alerts"
+        os.environ["OWNER_TOPIC_PREFIX"] = "arn:aws:sns:us-east-2:111111111111:platform-owner-"
+
+    def run_with(self, pages, sns=None):
+        self.sns = sns or StubSNS()
+        self.m._clients.update({"secretsmanager": StubSM(pages), "events": self.events, "sns": self.sns})
+        return self.m.handler({"mode": "monthly"}, today=FIRST)
+
+    def test_months_until(self):
+        mu = self.m.months_until
+        self.assertEqual(mu(FIRST, datetime.date(2027, 9, 19)), 9)
+        self.assertEqual(mu(FIRST, datetime.date(2027, 12, 1)), 12)
+        self.assertEqual(mu(FIRST, datetime.date(2026, 12, 31)), 0)
+
+    def test_lines_use_jamies_wording(self):
+        line = self.m.calendar_line("Jira", datetime.date(2027, 9, 19), FIRST)
+        self.assertEqual(line, "You have 9 months until 19 September 2027, on which date "
+                               "the API key for Jira needs to be cycled.")
+        self.assertIn("1 month until", self.m.calendar_line("X", datetime.date(2027, 1, 5), FIRST))
+        self.assertIn("less than a month", self.m.calendar_line("X", datetime.date(2026, 12, 20), FIRST))
+        self.assertIn("3 days ago", self.m.calendar_line("X", datetime.date(2026, 11, 28), FIRST))
+
+    def test_one_email_per_owner_sorted_by_due(self):
+        out = self.run_with([[
+            secret("platform/pagerduty/api-token", platform_max_age_days="365",
+                   platform_issued="2026-09-21", platform_owner="platform-operations",
+                   platform_tool="PagerDuty REST API"),
+            secret("platform/jira/service-account", platform_max_age_days="365",
+                   platform_issued="2026-09-19", platform_owner="platform-operations"),
+            secret("platform/pagerduty/routing-key", platform_max_age_days="none"),
+        ]])
+        self.assertEqual(len(self.sns.published), 1)
+        msg = self.sns.published[0]
+        self.assertTrue(msg["TopicArn"].endswith(":platform-owner-platform-operations"))
+        self.assertEqual(msg["Subject"], "Credential calendar: next re-issue 2027-09-19")
+        body = msg["Message"]
+        self.assertLess(body.index("platform/jira/service-account"), body.index("PagerDuty REST API"))
+        self.assertIn("the API key for platform/jira/service-account", body)   # no tool tag: name
+        self.assertEqual(out["raised"], 0)
+        self.assertEqual(self.events.sent, [])
+
+    def test_unowned_cadence_goes_to_digest(self):
+        self.run_with([[secret("t", platform_max_age_days="365", platform_issued="2026-09-19")]])
+        self.assertEqual(self.sns.published, [])
+        d = json.loads(self.events.sent[0]["Detail"])
+        self.assertEqual((d["routing"], d["current_state"]), ("digest", "no-owner"))
+
+    def test_unconfirmed_or_missing_mailbox_is_reported_not_published(self):
+        rows = [[secret("t", platform_max_age_days="365", platform_issued="2026-09-19",
+                        platform_owner="platform-operations")]]
+        for sns in (StubSNS(subs=("PendingConfirmation",)), StubSNS(missing=True)):
+            self.events.sent.clear()
+            self.run_with(rows, sns=sns)
+            self.assertEqual(sns.published, [])
+            d = json.loads(self.events.sent[0]["Detail"])
+            self.assertEqual((d["routing"], d["current_state"]), ("digest", "owner-mailbox"))
+            self.assertIn("platform-owner-platform-operations", d["alarm"]["name"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

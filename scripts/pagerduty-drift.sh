@@ -68,12 +68,15 @@ require_account "${PLATFORM_MGMT_ACCOUNT_ID}"
 TF="$(find_tool terraform)" || die "terraform not found. Run scripts/setup-tooling.sh."
 TFDIR="${REPO_ROOT}/pagerduty"
 
-# The token, resolved the same way pagerduty-apply.sh resolves it. A drift
-# check that cannot authenticate must not report "no drift".
+# The token, resolved the way pagerduty-apply.sh resolves it, but the
+# READ-ONLY key (15.8). Plan only reads, so a check that runs often holds a key
+# that cannot retarget pages. No fallback to the full key: a missing read-only
+# key is something to fix, not something to work around with more access.
+# A drift check that cannot authenticate must not report "no drift".
 if [[ -z "${PAGERDUTY_TOKEN:-}" ]]; then
   AUDIT="$(get_param /org/account/altdig-security-audit)"
   if [[ -n "${AUDIT}" && "${AUDIT}" != "None" ]]; then
-    FETCHED="$(read_secret "${AUDIT}" platform/pagerduty/api-token)"
+    FETCHED="$(read_secret "${AUDIT}" platform/pagerduty/api-token-readonly)"
     if [[ -n "${FETCHED}" && "${FETCHED}" != "None" ]]; then
       PAGERDUTY_TOKEN="$(printf '%s' "${FETCHED}" \
         | python -c 'import json,sys; print(json.load(sys.stdin)["api_token"])')"
@@ -82,7 +85,7 @@ if [[ -z "${PAGERDUTY_TOKEN:-}" ]]; then
   fi
 fi
 [[ -n "${PAGERDUTY_TOKEN:-}" ]] \
-  || die "No PagerDuty API token available. Run scripts/set-pagerduty-token.sh.
+  || die "No read-only PagerDuty API token available. Run scripts/set-pagerduty-token.sh --readonly.
       Refusing to report on drift without being able to look."
 
 hr

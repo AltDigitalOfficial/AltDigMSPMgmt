@@ -4,6 +4,10 @@
 # that does and does not prove.
 #
 #   scripts/pagerduty-check.sh [--account <alias>]
+#   scripts/pagerduty-check.sh --readonly   # the drift check's key instead
+#
+# --readonly checks platform/pagerduty/api-token-readonly, and the prefix test
+# inverts: that key MUST begin R0. The write-access caveat does not apply to it.
 #
 # ---------------------------------------------------------------------------
 # What this can prove, and what it cannot
@@ -30,13 +34,15 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 SECRET_NAME="platform/pagerduty/api-token"
 ACCOUNT_KEY="altdig-security-audit"
+READONLY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --readonly) READONLY=1; SECRET_NAME="platform/pagerduty/api-token-readonly"; shift ;;
     --secret)  SECRET_NAME="$2"; shift 2 ;;
     --account) ACCOUNT_KEY="$2"; shift 2 ;;
     -h|--help)
-      printf 'Usage: %s [--secret <name>] [--account <alias>]\n' "$0"; exit 0 ;;
+      printf 'Usage: %s [--readonly] [--secret <name>] [--account <alias>]\n' "$0"; exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
@@ -121,9 +127,12 @@ PYEOF
 
 OK="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("ok"))')"
 PROBLEM="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("problem") or "")')"
-READONLY="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("read_only_prefix"))')"
+PREFIX_R0="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("read_only_prefix"))')"
 
-if [[ "${READONLY}" == "True" ]]; then
+if [[ "${READONLY}" == "1" ]]; then
+  [[ "${PREFIX_R0}" == "True" ]] \
+    || die "This key does not begin R0, so it is not read-only. The drift check's key must not be able to write."
+elif [[ "${PREFIX_R0}" == "True" ]]; then
   die "This key begins R0, which is PagerDuty's read-only prefix. It cannot create services, escalation policies or business services."
 fi
 
@@ -132,6 +141,13 @@ if [[ "${OK}" != "True" ]]; then
 fi
 
 ok "authenticated against the PagerDuty REST API"
+
+if [[ "${READONLY}" == "1" ]]; then
+  # terraform plan reads every resource type the configuration holds, so the
+  # first pagerduty-drift.sh run is the full proof. This proves the key works.
+  ok "read-only, as the drift check requires"
+  exit 0
+fi
 
 # Reported because the tenant module depends on it. design 12's
 # client-conversation event class needs a business service per client, and an

@@ -4,7 +4,7 @@
 # yaml, ADR-020). Tags only; never reads or writes the value.
 #
 #   scripts/set-secret-cadence.sh <secret-name> <days|none> \
-#     [--issued YYYY-MM-DD] [--owner <role>] [--dry-run]
+#     [--issued YYYY-MM-DD] [--owner <role>] [--tool "<name>"] [--dry-run]
 #
 #   <days>     re-issue every N days, counted from platform-issued
 #   none       deliberately no cadence; the reminder records it and stays quiet
@@ -14,19 +14,23 @@
 #              correcting a date.
 #   --owner    the role that re-issues it, carried into the reminder. A role,
 #              not a person's name: names do not belong in the repository or
-#              in tags that land in it.
+#              in tags that land in it. It also picks the mailbox for the
+#              monthly calendar (ADR-021).
+#   --tool     what the calendar calls the credential, e.g. "Jira". The
+#              secret name when absent.
 #
 # Secrets live in Audit (ADR-019), so this works there only.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-NAME=""; CADENCE=""; ISSUED=""; OWNER=""
+NAME=""; CADENCE=""; ISSUED=""; OWNER=""; TOOL=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --issued)  ISSUED="$2"; shift 2 ;;
     --owner)   OWNER="$2"; shift 2 ;;
+    --tool)    TOOL="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '3,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '3,23p' "$0"; exit 0 ;;
     -*)        die "Unknown argument: $1" ;;
     *)         if [[ -z "${NAME}" ]]; then NAME="$1"; else CADENCE="$1"; fi; shift ;;
   esac
@@ -38,6 +42,10 @@ done
   || die "Cadence must be a positive number of days, or none."
 [[ -z "${ISSUED}" || "${ISSUED}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
   || die "--issued must be YYYY-MM-DD."
+# The tagging service's character set. Parentheses and commas are refused, and
+# its error does not say which character.
+[[ -z "${TOOL}" || "${TOOL}" =~ ^[A-Za-z0-9\ +=._:/@-]+$ ]] \
+  || die "--tool may hold only letters, digits, spaces and + - = . _ : / @ (a tag value)."
 
 export AWS_DEFAULT_REGION="${PLATFORM_HOME_REGION}"
 require_cli
@@ -51,6 +59,7 @@ in_account "${AUDIT}" aws secretsmanager describe-secret --secret-id "${NAME}" \
 TAGS=("Key=platform-max-age-days,Value=${CADENCE}")
 [[ -n "${ISSUED}" ]] && TAGS+=("Key=platform-issued,Value=${ISSUED}")
 [[ -n "${OWNER}" ]]  && TAGS+=("Key=platform-owner,Value=${OWNER}")
+[[ -n "${TOOL}" ]]   && TAGS+=("Key=platform-tool,Value=${TOOL}")
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   printf '%s DRY%s  would tag %s: %s\n' "${C_YELLOW}" "${C_RESET}" "${NAME}" "${TAGS[*]}"
