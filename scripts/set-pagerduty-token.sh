@@ -30,9 +30,13 @@
 # ---------------------------------------------------------------------------
 # What reads it
 # ---------------------------------------------------------------------------
-#   tooling   provisioning renders a tenant's PagerDuty configuration from the
-#             registry (saga step 3) and reads back what exists to confirm it
-#   audit     the drift detector, alongside the rest of the detection estate
+#   audit     the drift detector, alongside the rest of the detection estate,
+#             and pagerduty-apply.sh
+#
+# One copy, in Audit, under alias/platform-secrets (ADR-019, Jamie
+# 2026-10-31). Tooling held a second copy for provisioning (saga step 3),
+# which is not deployed (B-110). If it ever is, it reads Audit's copy
+# cross-account through the key policy rather than holding its own.
 #
 # And Terraform, run from a workstation by a person. `pagerduty-apply.sh`
 # reads the token from Secrets Manager rather than requiring PAGERDUTY_TOKEN
@@ -54,7 +58,7 @@ SECRET_NAME="platform/pagerduty/api-token"
 
 # Overriding this narrows the fan-out, which is how a half-rotation gets done
 # on purpose. Comma or space separated.
-CONSUMER_KEYS="altdig-security-audit altdig-infra-tooling"
+CONSUMER_KEYS="altdig-security-audit"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

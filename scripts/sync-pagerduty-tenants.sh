@@ -187,10 +187,15 @@ while IFS=$'\t' read -r NAME KEYVAL; do
       --query VersionId --output text >/dev/null \
       && ok "rotated ${NAME} (${#KEYVAL} characters, not printed)"
   else
+    # Under the platform secrets key, which the router's key-policy grant
+    # covers (ADR-019). platform-max-age-days=none: a routing key can only
+    # open incidents, and is replaced on compromise, not on a calendar
+    # (ADR-020). Without the tag the reminder would report it every Monday.
     in_account "${TARGET}" aws secretsmanager create-secret \
       --name "${NAME}" --secret-string "${PAYLOAD}" \
+      --kms-key-id alias/platform-secrets \
       --description "PagerDuty routing key for a tenant service. Written by scripts/sync-pagerduty-tenants.sh." \
-      --tags Key=platform-managed,Value=true \
+      --tags Key=platform-managed,Value=true Key=platform-max-age-days,Value=none \
       --query ARN --output text >/dev/null \
       && ok "created ${NAME} (${#KEYVAL} characters, not printed)"
   fi

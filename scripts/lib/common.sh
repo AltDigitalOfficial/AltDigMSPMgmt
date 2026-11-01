@@ -708,8 +708,12 @@ store_secret_everywhere() {
     return 0
   fi
 
+  local prior keyargs
   for entry in "$@"; do
     key="${entry%%:*}"; acct="${entry##*:}"
+    # What the account held before, to tell a new credential from a re-store
+    # of the same one. Only a new one restarts the re-issue clock.
+    prior="$(read_secret "${acct}" "${name}" | secret_fingerprint)"
     if in_account "${acct}" aws secretsmanager describe-secret \
          --secret-id "${name}" >/dev/null 2>&1; then
       if in_account "${acct}" aws secretsmanager put-secret-value \
@@ -717,17 +721,30 @@ store_secret_everywhere() {
            --query VersionId --output text >/dev/null 2>&1; then
         ok "rotated ${name} in ${key} (${acct})"; wrote="${wrote}${key} "
       else
-        failed="${failed}${key} "
+        failed="${failed}${key} "; continue
       fi
     else
+      # New secrets go under the platform secrets key where the account has
+      # one (Audit, ADR-019). Without --kms-key-id they would land on the
+      # AWS-managed key and need moving later with move-secret-key.sh.
+      keyargs=()
+      in_account "${acct}" aws kms describe-key --key-id alias/platform-secrets \
+        >/dev/null 2>&1 && keyargs=(--kms-key-id alias/platform-secrets)
       if in_account "${acct}" aws secretsmanager create-secret \
-           --name "${name}" --secret-string "${payload}" \
+           --name "${name}" --secret-string "${payload}" "${keyargs[@]}" \
            --description "${description}" --query ARN --output text \
            >/dev/null 2>&1; then
         ok "stored ${name} in ${key} (${acct})"; wrote="${wrote}${key} "
       else
-        failed="${failed}${key} "
+        failed="${failed}${key} "; continue
       fi
+    fi
+    # ADR-020: the day the credential was issued, for the re-issue reminder.
+    # The secret's own LastChangedDate cannot serve: it moves on any write.
+    if [[ "${prior}" != "${want}" ]]; then
+      in_account "${acct}" aws secretsmanager tag-resource --secret-id "${name}" \
+        --tags "Key=platform-issued,Value=$(date -u +%F)" >/dev/null 2>&1 \
+        || warn "${key}: stored, but platform-issued was not stamped. Run scripts/set-secret-cadence.sh."
     fi
   done
 

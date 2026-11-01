@@ -160,6 +160,38 @@ log "  mode        : $([[ "${DRY_RUN}" == "1" ]] && echo DRY-RUN || echo EXECUTE
 hr
 
 # ---------------------------------------------------------------------------
+# 1b. The archive can hold this tenant's evidence for its floor
+# ---------------------------------------------------------------------------
+# Prompt 15.8 step 6. The Log Archive locks every object for the bucket's
+# default period (COMPLIANCE, D-024), whatever the tenant. A tenant whose
+# derived floor is LONGER than that would produce evidence the platform
+# deletes before the framework allows. Refused here, before anything exists,
+# rather than warned about after the evidence is written (section 9 below
+# still reads back the lock actually applied, as the record of what happened).
+#
+# Read from the bucket, not from the template default: the template says 365,
+# the bucket says 2190, and only the bucket is true. Checked in dry runs too:
+# a dry run that passes here and a real run that refuses would be a lie.
+ARCHIVE_ACCT="$(get_param /org/account/altdig-security-logarchive)"
+ARCHIVE_LOCK="$(in_account "${ARCHIVE_ACCT}" aws s3api get-object-lock-configuration \
+    --bucket "altdig-log-archive-${ARCHIVE_ACCT}" \
+    --query 'ObjectLockConfiguration.Rule.DefaultRetention.[Mode,Days,Years]' \
+    --output text 2>/dev/null | no_cr)" || true
+read -r ARCHIVE_MODE ARCHIVE_DAYS ARCHIVE_YEARS <<<"${ARCHIVE_LOCK:-None None None}"
+[[ "${ARCHIVE_DAYS}" =~ ^[0-9]+$ ]] \
+  || { [[ "${ARCHIVE_YEARS}" =~ ^[0-9]+$ ]] && ARCHIVE_DAYS=$((ARCHIVE_YEARS * 365)); }
+[[ "${ARCHIVE_DAYS}" =~ ^[0-9]+$ ]] \
+  || die "Could not read the Log Archive's default retention, so this tenant's ${RETENTION}-day
+      floor cannot be checked against it. Nothing has been created."
+if [[ "${ARCHIVE_DAYS}" -lt "${RETENTION}" ]]; then
+  die "This tenant's retention floor is ${RETENTION} days, and the Log Archive locks evidence
+      for ${ARCHIVE_DAYS} (${ARCHIVE_MODE}). The platform would delete the tenant's evidence
+      before its framework allows. Raise the archive's default retention first; that
+      is irreversible, so it is a decision, not a fix. Nothing has been created."
+fi
+ok "archive retention ${ARCHIVE_DAYS} days (${ARCHIVE_MODE}) covers the tenant floor of ${RETENTION}"
+
+# ---------------------------------------------------------------------------
 # 2. Partner precondition
 # ---------------------------------------------------------------------------
 # Same gate create-client-ou.sh uses, called here too rather than relied upon

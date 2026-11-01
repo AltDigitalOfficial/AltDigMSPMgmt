@@ -50,23 +50,22 @@
 #          control is circular however the code is arranged.
 #
 # ---------------------------------------------------------------------------
-# Every consuming account, in one run — B-110
+# One copy, in Audit — ADR-019 (was two, B-110)
 # ---------------------------------------------------------------------------
-# A secret is only useful in the account that reads it, and there are now two
-# such accounts:
+# Readers: reconciliation (8.2) and quorum (8.3), in Audit. Provisioning
+# (12.3) would read it from Tooling, but provisioning is not deployed (B-110).
 #
-#   audit     reconciliation (8.2) and quorum (8.3), alongside the router and
-#             containment, because that is where deployment events land and
-#             where Security Hub is aggregated.
-#   tooling   provisioning (12.3), because that is where `platform-registry`
-#             lives and the saga reads the registry on every step.
+# Until 2026-10-31 the token was also stored in Tooling, because a secret
+# under the AWS-managed `aws/secretsmanager` key cannot be read across
+# accounts. It is now under alias/platform-secrets in Audit
+# (security/80-secrets-key.yaml), and Jamie ruled one copy. If provisioning is
+# ever deployed, it reads Audit's copy cross-account: add its role to the key
+# policy, rather than a second copy here.
 #
-# The obvious alternative — one copy in audit, read cross-account from tooling —
-# is NOT available. The secret is encrypted under the AWS-managed
-# `aws/secretsmanager` key, and AWS-managed keys cannot be shared across
-# accounts. It would have to be re-created under a customer-managed key first.
+# The fan-out below is kept. --account still narrows it, and the read-back
+# check is worth having for one account as much as for two.
 #
-# So there are two copies, and two copies of a credential is a rotation
+# Two copies of a credential is a rotation
 # hazard: update one, miss the other, and the missed account keeps working on
 # the old value until the old value is revoked — at which point it fails in a
 # way that looks like an outage rather than like a half-finished rotation.
@@ -94,7 +93,7 @@ EMAIL=""
 
 # The consuming accounts, by SSM alias. Order matters only for --propagate,
 # which sources the existing value from the first one that has it.
-CONSUMER_KEYS="altdig-security-audit altdig-infra-tooling"
+CONSUMER_KEYS="altdig-security-audit"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

@@ -52,6 +52,42 @@ The plan's list missed the quorum roles.
    versions. Only versions written afterwards use the new key. Two writes put
    both AWSCURRENT and AWSPREVIOUS on it. Switching back is the same procedure.
 
+### Amendment, 2026-11-01: the grant's principal, and the cut-over
+
+**As first deployed, the grant did not grant.** The statement named the
+account root as Principal, with the reader roles in an `aws:PrincipalArn`
+condition. A root principal in a key policy delegates to IAM. It does not
+grant. So a reader also needed `kms:Decrypt` in its own IAM policy, and none
+had it.
+
+The first secret moved was the Jira token. Two manual reconciliation runs then
+got `AccessDeniedException` and reported all four deployments as
+`change_source_unavailable`. That produced 8 false digest entries. No Jira
+tickets were created. The token was moved back within minutes.
+
+**The fix:** Principal `*`, narrowed by `kms:CallerAccount` and
+`aws:PrincipalArn`. This is the pattern AWS uses for its own managed keys,
+and it grants to the matched roles directly. After the fix:
+- reconciliation returned `no_change_record`, as scheduled runs do;
+- CloudTrail recorded `PlatformChangeReconciliation` decrypting under the
+  platform key;
+- a deliberate low-urgency test page reached PagerDuty and resolved. The
+  router reads routing keys uncached, so this proves its read.
+
+**All 11 Audit secrets were moved** on 2026-11-01 by
+[scripts/move-secret-key.sh](../../scripts/move-secret-key.sh). It compares
+exact fingerprints before and after, and its `--back` flag reverses a move.
+The Tooling copies are scheduled for deletion with a 30-day recovery window.
+`pagerduty-apply.sh` and the two `set-*-token.sh` scripts now read and write
+Audit only.
+
+New secrets are created under the platform key:
+- `store_secret_everywhere` uses it wherever `alias/platform-secrets` exists;
+- `sync-pagerduty-tenants.sh` uses it for every new tenant's routing key.
+
+`sync-pagerduty-secrets.sh` still creates the platform routing keys without
+it. Those keys exist already, so this only bites if they are ever recreated.
+
 ## Alternatives considered
 
 - **Widen `platform-kms-secrets` to the Security OU.** Rejected. It is
