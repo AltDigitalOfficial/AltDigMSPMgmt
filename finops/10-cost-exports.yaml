@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - where the organization's billing data lands,
+  in the FinOps account. The CUR 2.0 export defined in the management account
+  (finops/00-data-export.yaml) delivers here directly. Phase 15.9 step 2.
+
+# ---------------------------------------------------------------------------
+# Why a separate account
+# ---------------------------------------------------------------------------
+# Design 12:30-32: CUR to S3 in a dedicated reporting account. Until now the
+# only place billing data could be read was the management account, which is
+# why CommercialReadOnly is assigned there (D-009). The management account
+# holds the Organization and nothing else, so reading cost there means
+# giving commercial staff a session in the most powerful account we have.
+#
+# Data Exports has delivered across accounts since April 2026, so the export
+# writes straight into this bucket. No copy sits in the management account
+# and nothing replicates.
+#
+# ---------------------------------------------------------------------------
+# Encryption
+# ---------------------------------------------------------------------------
+# The platform rule is SSE-KMS with a platform key (policies/guard). The Data
+# Exports documentation gives the bucket policy and says nothing about a
+# customer managed key. So the key policy below grants the export service
+# exactly what an SSE-KMS PutObject needs, on the same two conditions as the
+# bucket policy. This is untested until the first delivery; if that never
+# arrives, encryption is the first suspect.
+#
+# ---------------------------------------------------------------------------
+# Retention
+# ---------------------------------------------------------------------------
+# Jamie, 2026-11-01: seven years. 2557 days. No Object Lock: this is an
+# operational copy of billing data that AWS also holds, not evidence. The
+# export overwrites each billing period's files daily (OVERWRITE_REPORT), so
+# the overwritten versions are noncurrent and go after 30 days.
+#
+# ---------------------------------------------------------------------------
+# What is not here yet
+# ---------------------------------------------------------------------------
+# The Glue table. It is defined from the first delivery's actual Parquet
+# schema in step 4, rather than guessed now or inferred daily by a crawler.
+
+Parameters:
+
+  ManagementAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: >-
+      The payer, which owns the export. From config/platform.env
+      (PLATFORM_MGMT_ACCOUNT_ID); never typed into the template.
+
+  RetentionDays:
+    Type: Number
+    Default: 2557
+    MinValue: 2557
+    Description: Seven years (Jamie, 2026-11-01). The floor, so it can only grow.
+
+  QuorumExecutionRoleName:
+    Type: String
+    Default: PlatformQuorumExecutor
+    Description: The only role permitted to disable or delete the key.
+
+Resources:
+
+  CostKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Billing data in the FinOps account (Data Exports, Athena results)
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # Readers are granted through their own IAM policies.
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: DenyDestructiveActionsOutsideQuorum
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DisableKey'
+              - 'kms:DisableKeyRotation'
+              - 'kms:DeleteImportedKeyMaterial'
+            Resource: '*'
+            Condition:
+              ArnNotLike:
+                'aws:PrincipalArn':
+                  - !Sub 'arn:${AWS::Partition}:sts::*:assumed-role/${QuorumExecutionRoleName}/*'
+          # What an SSE-KMS PutObject needs from the writer. Same conditions as
+          # the bucket policy: only exports the management account owns.
+          - Sid: DataExportsDelivery
+            Effect: Allow
+            Principal: { Service: bcm-data-exports.amazonaws.com }
+            Action:
+              - 'kms:GenerateDataKey'
+              - 'kms:Decrypt'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref ManagementAccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:bcm-data-exports:us-east-1:${ManagementAccountId}:export/*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+        - { Key: KeyPurpose,       Value: cost }
+
+  CostKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-cost
+      TargetKeyId: !Ref CostKey
+
+  ExportBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-cost-exports-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt CostKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # ACLs off, so the bucket owns every delivered object outright.
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireBillingData
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: RemoveExpiredDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  ExportBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ExportBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # The policy Data Exports requires, verbatim in shape. Changing it
+          # after the export exists can stop delivery (AWS's own warning).
+          - Sid: EnableAWSDataExportsToWriteToS3
+            Effect: Allow
+            Principal: { Service: bcm-data-exports.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub '${ExportBucket.Arn}/*'
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:bcm-data-exports:us-east-1:${ManagementAccountId}:export/*'
+              StringEquals:
+                'aws:SourceAccount': !Ref ManagementAccountId
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ExportBucket.Arn
+              - !Sub '${ExportBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'altdig-cost-athena-results-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt CostKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      # Query results are scratch. Anything worth keeping is a view or a report.
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireQueryResults
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  AthenaResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AthenaResultsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AthenaResultsBucket.Arn
+              - !Sub '${AthenaResultsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  CostDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: platform_cost
+        Description: CUR 2.0 billing data. Tables are defined in step 4 (15.9).
+
+  # Enforced, so a query cannot choose an unencrypted result location. The
+  # per-query scan cap stops a mistaken SELECT * over seven years from being
+  # an expensive surprise; CUR 2.0 Parquet for this organization is small.
+  CostWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: platform-finops
+      Description: FinOps queries over the CUR 2.0 export.
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 10737418240
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AthenaResultsBucket}/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_KMS
+            KmsKey: !GetAtt CostKey.Arn
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+Outputs:
+
+  ExportBucketName:
+    Description: Pass to finops/00-data-export.yaml as DestinationBucket.
+    Value: !Ref ExportBucket
+
+  CostKeyArn:
+    Value: !GetAtt CostKey.Arn
+
+  WorkGroupName:
+    Value: !Ref CostWorkGroup
