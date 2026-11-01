@@ -8129,3 +8129,44 @@ ADR-017's tripwire avoids it by emitting `commercial_event` on the bus.
 of enqueueing, which is one path and matches design 12, or give the queue a
 consumer. Then add the alarm the queue lacks: a queue with no consumer and
 no depth alarm is the B-156 shape.
+
+## B-179 · Phase 15.8 closing record
+
+**Recorded** — 2026-11-01. What happened to each 15.8 finding
+(`docs/phase-15-plan.md` §1 15.8), and what is still owed.
+
+- **1. Retention premise.** Confirmed wrong, as the plan suspected: the
+  log-archive source and both replicas are COMPLIANCE, 2190 days (D-024). No
+  Object Lock change and no Batch Operations job. Vesting now refuses a
+  tenant whose derived floor exceeds the archive's default lock, before
+  anything is created (`vest-client.sh` section 1b).
+- **2. Deep Archive.** Not built, by measurement: 99.8% of archive objects are
+  under the 128 KB transition minimum and average about 3 KB (D-034).
+- **3. The secrets key.** A key in Audit only, whose policy is the read grant;
+  all 11 Audit secrets moved to it (ADR-019). The first deploy's grant did not
+  grant, and produced 8 false `change_source_unavailable` digest entries on
+  2026-10-31; ADR-019's amendment records it.
+- **4. Distinct credentials.** Declined by Jamie: one copy each, in Audit
+  (ADR-019). The Tooling copies are scheduled for deletion on 2026-11-30 and
+  are recoverable until then.
+- **5. PagerDuty scope.** Scoped OAuth was not used: provider `~> 3.0`
+  requests about 55 read and write scopes either way. Drift now reads a
+  read-only REST key, `platform/pagerduty/api-token-readonly`; apply and
+  maintenance keep the full key. `pagerduty-check.sh` proves access by an
+  empty create (403 read-only, 400 may write), replacing a key-prefix rule
+  that turned out to be false.
+- **6. B10.** The PagerDuty third is addressed. Jira's identity is B-070, still
+  open. Truveon's identity is untouched.
+- **7 and 8. Expiry and max age.** No rotation is possible for these vendors.
+  A tag-clocked reminder (ADR-020) and a monthly calendar email to the
+  `platform-operations` mailbox (ADR-021) replace it. The managed rule
+  `SECRETSMANAGER_SECRET_PERIODIC_ROTATION` was not deployed.
+- **9. Vesting message.** Covered by the refusal in item 1.
+- **10. B-016.** Unchanged: routing keys are still in the local Terraform
+  state.
+
+**Still owed:**
+- `sync-pagerduty-secrets.sh` creates the platform routing keys without the
+  platform key. They exist, so this only matters if they are recreated.
+- Superseded secret versions stay on the AWS-managed key until Secrets
+  Manager prunes them (ADR-019, negative consequences).
