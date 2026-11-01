@@ -14,8 +14,8 @@
 # pagerduty-drift.sh only runs terraform plan, which only reads. Since 15.8 it
 # reads a read-only general access key, platform/pagerduty/api-token-readonly,
 # so a check that runs often never holds a key that can retarget pages.
-# --readonly stores that one, and insists on the R0 prefix the full key must
-# not carry. The full key stays for pagerduty-apply.sh and
+# --readonly stores that one; pagerduty-check.sh --readonly proves it cannot
+# write. The full key stays for pagerduty-apply.sh and
 # pagerduty-maintenance.sh, which write.
 #
 # ---------------------------------------------------------------------------
@@ -130,14 +130,10 @@ else
     warn "That key is shorter than any PagerDuty API key observed so far."
     warn "Storing it anyway; verify with scripts/pagerduty-check.sh."
   fi
-  if [[ "${READONLY}" == "1" ]]; then
-    [[ "${TOKEN}" == R0* ]] \
-      || die "--readonly expects a READ-ONLY key (they begin R0). This one does not, so it can write. Create a key with the Read-only box ticked."
-  elif [[ "${TOKEN}" == R0* ]]; then
-    # PagerDuty prefixes read-only keys. Catching it here saves discovering it
-    # as a 403 from a Terraform apply half way through creating a tenant.
-    die "That looks like a READ-ONLY key (they begin R0). This must create services, escalation policies and business services, so it needs a full-access key."
-  fi
+  # No prefix test. This script used to refuse a full key beginning R0, on the
+  # belief that PagerDuty marks read-only keys that way. It does not: a key
+  # the console shows as Read-only was refused by that rule on 2026-11-01.
+  # Access level is checked by asking PagerDuty, in pagerduty-check.sh.
 
   PAYLOAD="$(TOKEN="${TOKEN}" python -c '
 import json, os

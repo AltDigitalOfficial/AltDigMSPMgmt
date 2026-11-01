@@ -6,29 +6,36 @@
 #   scripts/pagerduty-check.sh [--account <alias>]
 #   scripts/pagerduty-check.sh --readonly   # the drift check's key instead
 #
-# --readonly checks platform/pagerduty/api-token-readonly, and the prefix test
-# inverts: that key MUST begin R0. The write-access caveat does not apply to it.
+# --readonly checks platform/pagerduty/api-token-readonly, and requires the
+# write probe (below) to be REFUSED. The full key requires it not to be.
 #
 # ---------------------------------------------------------------------------
 # What this can prove, and what it cannot
 # ---------------------------------------------------------------------------
 # Authentication is provable: a GET against the API either works or does not.
 #
-# WRITE access is not, without writing. PagerDuty has no dry-run and no
-# "what could this key do" endpoint, so the only honest way to prove the key
-# can create a service is to create one — which this refuses to do as a health
-# check, because a check that leaves objects behind in a paging system is
-# worse than the uncertainty it removes.
+# Write access cannot be fully proven without writing. PagerDuty has no dry-run
+# and no "what could this key do" endpoint, and this refuses to create
+# anything as a health check, because a check that leaves objects behind in a
+# paging system is worse than the uncertainty it removes.
 #
-# So this reports authentication as verified and write access as UNPROVEN, and
-# says which one it checked. The alternative — inferring write access from a
-# successful GET — is the "checked and fine" versus "did not check" confusion
-# that this codebase keeps rediscovering, and here it would surface as a
-# Terraform apply failing half way through provisioning a tenant.
+# The write probe is the narrow part that CAN be proven. It POSTs /services
+# with an empty body. PagerDuty checks permission before it validates input,
+# so:
+#   403   the key may not create services: read-only
+#   400   permission passed, and the empty body was refused ("Name cannot be
+#         empty"): the key may create services
+# Nothing is created either way; a service without a name is invalid.
+# Observed 2026-11-01: 400 for the full key, 403 for the read-only key.
 #
-# The read-only prefix check is a cheap partial: PagerDuty prefixes read-only
-# general access keys with `R0`, so a key that carries it is definitely wrong.
-# A key that does not carry it is merely not-definitely-wrong.
+# That proves service creation only. Escalation policies and business
+# services are not probed, so the full key's report still says the first
+# 'pagerduty-apply.sh --apply' is the real proof.
+#
+# This replaced a key-prefix test. The script used to treat a key beginning
+# R0 as read-only. PagerDuty does not mark keys that way: a key the console
+# shows as Read-only was refused by that rule on 2026-11-01. A key's text
+# says nothing about its access; only PagerDuty's answer does.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -57,7 +64,7 @@ ACCT="$(get_param "/org/account/${ACCOUNT_KEY}")"
 
 RAW="$(read_secret "${ACCT}" "${SECRET_NAME}")"
 [[ -n "${RAW}" && "${RAW}" != "None" ]] \
-  || die "${SECRET_NAME} is not present in ${ACCOUNT_KEY} (${ACCT}). Run scripts/set-pagerduty-token.sh."
+  || die "${SECRET_NAME} is not present in ${ACCOUNT_KEY} (${ACCT}). Run scripts/set-pagerduty-token.sh$([[ ${READONLY} -eq 1 ]] && echo ' --readonly')."
 
 ok "read ${SECRET_NAME} from ${ACCOUNT_KEY} ($(printf '%s' "${RAW}" | secret_fingerprint))"
 
@@ -74,16 +81,27 @@ except Exception:
                                  '{"api_token": ...}'}))
     sys.exit(0)
 
-out = {"read_only_prefix": token.startswith("R0")}
+out = {}
+HEADERS = {"Authorization": f"Token token={token}",
+           "Accept": "application/vnd.pagerduty+json;version=2"}
 
 
 def get(path):
-    req = urllib.request.Request(
-        "https://api.pagerduty.com" + path,
-        headers={"Authorization": f"Token token={token}",
-                 "Accept": "application/vnd.pagerduty+json;version=2"})
+    req = urllib.request.Request("https://api.pagerduty.com" + path, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode() or "{}")
+
+
+def write_probe():
+    """HTTP status of an empty create. See the header: 403 read-only, 400 may write."""
+    req = urllib.request.Request(
+        "https://api.pagerduty.com/services", data=b"{}", method="POST",
+        headers={**HEADERS, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
 
 
 try:
@@ -108,6 +126,8 @@ try:
     else:
         out["business_services_existing"] = len(
             listed.get("business_services") or [])
+
+    out["write_probe"] = write_probe()
 except urllib.error.HTTPError as exc:
     out["ok"] = False
     out["status"] = exc.code
@@ -127,14 +147,7 @@ PYEOF
 
 OK="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("ok"))')"
 PROBLEM="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("problem") or "")')"
-PREFIX_R0="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("read_only_prefix"))')"
-
-if [[ "${READONLY}" == "1" ]]; then
-  [[ "${PREFIX_R0}" == "True" ]] \
-    || die "This key does not begin R0, so it is not read-only. The drift check's key must not be able to write."
-elif [[ "${PREFIX_R0}" == "True" ]]; then
-  die "This key begins R0, which is PagerDuty's read-only prefix. It cannot create services, escalation policies or business services."
-fi
+PROBE="$(printf '%s' "${RESULT}" | python -c 'import json,sys; print(json.load(sys.stdin).get("write_probe"))')"
 
 if [[ "${OK}" != "True" ]]; then
   die "PagerDuty rejected the key: ${PROBLEM}"
@@ -143,11 +156,19 @@ fi
 ok "authenticated against the PagerDuty REST API"
 
 if [[ "${READONLY}" == "1" ]]; then
+  [[ "${PROBE}" == "403" ]] \
+    || die "The write probe was not refused (HTTP ${PROBE}), so this key may be able to write. The drift check's key must be read-only."
+  ok "read-only: PagerDuty refused the write probe (HTTP 403), as the drift check requires"
   # terraform plan reads every resource type the configuration holds, so the
-  # first pagerduty-drift.sh run is the full proof. This proves the key works.
-  ok "read-only, as the drift check requires"
+  # first pagerduty-drift.sh run is the full proof that the key reads enough.
   exit 0
 fi
+
+case "${PROBE}" in
+  400) ok "may create services: the write probe passed permission and failed validation (HTTP 400)" ;;
+  403) die "PagerDuty refused the write probe (HTTP 403). This key is read-only; it cannot create services, escalation policies or business services." ;;
+  *)   warn "The write probe returned HTTP ${PROBE}, which is neither expected answer. Write access is unknown." ;;
+esac
 
 # Reported because the tenant module depends on it. design 12's
 # client-conversation event class needs a business service per client, and an
@@ -173,5 +194,5 @@ fi
 
 printf '\n'
 # Said explicitly rather than left implied. See the header.
-warn "WRITE access is NOT proven by this check, and cannot be without writing."
-warn "The first 'pagerduty-apply.sh --apply' is what proves it."
+warn "Only service creation is proven. Escalation policies and business services are not probed."
+warn "The first 'pagerduty-apply.sh --apply' is what proves the rest."
