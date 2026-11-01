@@ -6,7 +6,7 @@
 #
 # Produces:
 #   name    AltDigital Sandbox Canary
-#   alias   ad-sandbox-canary
+#   alias   altdig-sandbox-canary
 #   email   mspr+sandbox-canary@altdigital.ai
 #   OU      Sandbox
 #
@@ -32,7 +32,7 @@ usage() {
 Usage: create-platform-account.sh --ou <ou> --role <role> [--name "Display Name"] [--dry-run]
 
   --ou       Owning OU scope: security | infra | sandbox
-  --role     Account role: canary, logarchive, audit, forensics, tooling, shared, backup
+  --role     Account role: canary, logarchive, audit, forensics, tooling, shared, backup, finops
   --name     Human-readable Organizations account name. Defaulted if omitted.
   --dry-run  Print what would happen; create nothing.
 USAGE
