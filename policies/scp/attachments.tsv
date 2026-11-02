@@ -67,7 +67,9 @@
 # a tenant pipeline that deploys somewhere nobody checked. That is a
 # conversation before it is a deployment.
 06-region-restriction.json	sandbox,members
-07-deny-bypass.json	members
+# The original 07 is attached NOWHERE since 2026-11-01 and kept, detached,
+# as a one-call rollback, as the 01-03 originals are.
+# 07-deny-bypass.json
 
 # 07-v2 adds NoResourceSharingAcrossAccounts (ADR-022): RAM sharing with the
 # organization is on, so a share reaches another account with no acceptance.
@@ -75,7 +77,10 @@
 # beside the original, proven by the harness, then the original detached.
 # Sandbox first, Members after. Sandbox and Members each had 9 of 10 SCPs,
 # so the overlap fits. Sandbox swapped 2026-11-01: harness 45 passed, 0
-# failed, before and after the original was detached.
+# failed, before and after the original was detached. Members swapped the
+# same day (Jamie): the identical object, compared byte for byte with this
+# file, attached, then the original detached. No harness run in a tenant
+# account, as for 08 and the 01-03 swap.
 07-deny-bypass-v2.json	sandbox,members
 
 # 08 is design 11 Layer 1's "platform-managed alarms and SSM associations",

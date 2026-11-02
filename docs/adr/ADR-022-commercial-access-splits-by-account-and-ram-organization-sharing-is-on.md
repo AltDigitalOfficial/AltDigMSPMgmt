@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-01
 **Deciders:** Jamie (the split design, the management-account work run by Claude, enabling RAM organization sharing with an SCP to follow, and not deferring that SCP, 2026-11-01); Claude (session), unreviewed (the shared billing view as the Cost Explorer mechanism, the contents of each permission set)
-**Status:** Accepted — not built: the SCP on Members that limits RAM sharing to platform roles
+**Status:** Accepted
 **Tags:** commercial, billing, ram, identity, phase-15.9
 
 ---
