@@ -92,11 +92,15 @@ on `platform-alerts` that carries `commercial_event`.
 - An anomaly is caught per tenant even where no budget exists.
 
 **Negative:**
-- **The create path is unproven.** As of 2026-11-01 no client had answered,
-  so `create-budget` has not run against AWS. The first `set-budget`, then
-  `sync-budgets.sh`, is the test.
-- **Arc8 has no answer.** Its dev and test accounts are reported in the
-  digest until `registry.sh set-budget` records one.
+- **A real breach has not yet been delivered.** The create and update paths
+  were proven on 2026-11-02 against Arc8, after Jamie recorded its answer
+  (pre-production set, production deferred).
+  - `platform.oeight.oeight.arc8.pre-production` was created over two
+    accounts. It has three alerts to `platform-cost-alerts` and both platform
+    tags.
+  - A second run took the update path and still showed three alerts.
+  - The topic → bridge → router leg was proven with a labelled test message.
+  - What remains unproven is a message AWS Budgets itself sends.
 - **Budget messages are matched by name in AWS's text.** If AWS changes its
   wording and the name disappears from both subject and body, the bridge
   reports an unrecognised message in the digest rather than a breach. It is
