@@ -386,6 +386,23 @@ if should_run 1 registry-client-record; then
         --jira-site "${JIRA_SITE_URL}" \
         --evidence-destination "${EVIDENCE_DESTINATION}"
   fi
+  # Questionnaire 13.2a/b (ADR-023). After the client record, because
+  # set-budget refuses a client that does not exist. Read here rather than
+  # from the derivation, which carries only whether each answer is present:
+  # the amounts are client commercial data and must not reach the archived
+  # evidence record. Unanswered is not a block; derive-vesting.py has already
+  # warned, and sync-budgets.sh reports it in the digest.
+  BUDGET_PRE="$(q_get ".get('cost',{}).get('pre_production_monthly_budget_usd') or ''")"
+  BUDGET_PROD="$(q_get ".get('cost',{}).get('production_monthly_budget_usd') or ''")"
+  if [[ -z "${BUDGET_PRE}" && -z "${BUDGET_PROD}" ]]; then
+    warn "no budgets in the questionnaire (13.2a/b); the digest will report it"
+  else
+    BUDGET_ARGS=(--partner "${PARTNER}" --slug "${CLIENT}" --app "${APP}")
+    [[ -n "${BUDGET_PRE}" ]]  && BUDGET_ARGS+=(--pre-production "${BUDGET_PRE}")
+    [[ -n "${BUDGET_PROD}" ]] && BUDGET_ARGS+=(--production "${BUDGET_PROD}")
+    attempt 1 registry-client-budgets \
+      bash "${REPO_ROOT}/scripts/registry.sh" set-budget "${BUDGET_ARGS[@]}" "${DRY_FLAG[@]}"
+  fi
 fi
 
 # ===========================================================================

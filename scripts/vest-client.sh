@@ -806,6 +806,15 @@ if [[ "${DRY_RUN}" != "1" ]]; then
     warn "The trail query was not updated; these accounts are invisible to it."
     warn "  Run scripts/deploy-trail-query.sh"
   fi
+
+  # Budgets cover accounts, so a vested account joins its tier group's budget
+  # now (ADR-023). Without an answer, sync-budgets.sh reports it in the digest.
+  info "Bringing budgets up to date with the new accounts"
+  if bash "${REPO_ROOT}/scripts/sync-budgets.sh" >/dev/null 2>&1; then
+    ok "budgets synced (unanswered applications are reported in the digest)"
+  else
+    warn "Budgets were not synced. Run scripts/sync-budgets.sh"
+  fi
 fi
 
 hr

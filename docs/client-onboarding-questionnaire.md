@@ -588,14 +588,23 @@ the other.
 
 | # | Question | How to answer | When | Change later? |
 |---|---|---|---|---|
-| 13.1 | Do you have a monthly budget expectation for this application? | Free text | Optional | Reversible |
-| 13.2 | At what monthly spend would you want to be alerted? | Number, in dollars | Dev | Reversible |
+| 13.2a | What is the acceptable monthly budget for your **pre-production** tiers (development, test, and UAT if you have it), taken together? | Number, in US dollars | Dev | Reversible |
+| 13.2b | What is the acceptable monthly budget for your **production** tier? | Number, in US dollars, or "deferred" | Prod | Reversible |
 | 13.3 | Who should receive cost alerts and reports? | Name, email | Dev | Reversible |
 | 13.4 | Are you willing to trade availability for cost in non-production? | Yes / No | Dev | Reversible |
 
-**On 13.2.** Cloud cost failures are usually sudden rather than gradual — a
-misconfigured loop or a runaway process can multiply a bill in a day. A
-threshold lets us catch it while it is still small.
+**On 13.2a and 13.2b.** Each becomes a monthly budget over that tier's AWS
+accounts. We are alerted when spend reaches 80% of it, when it reaches 100%,
+and when the month is forecast to go over, and we contact you about it. We
+also watch for sudden spikes against your normal pattern, whatever the
+budget: cloud cost failures are usually sudden rather than gradual, and a
+misconfigured loop or a runaway process can multiply a bill in a day.
+
+Production can be deferred until we build your production environment. A
+budget can be changed at any time; tell us and we update it.
+
+*(13.1, a free-text budget expectation, and the old 13.2, a single alert
+threshold, were replaced by 13.2a and 13.2b on 2026-11-01.)*
 
 ---
 

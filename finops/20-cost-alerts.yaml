@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - where the payer's cost alerts start: one
+  anomaly monitor over the Tenant cost category, and the topic that AWS
+  Budgets and Cost Anomaly Detection publish to. Management account,
+  us-east-1. Phase 15.9 step 6, ADR-023.
+
+# ---------------------------------------------------------------------------
+# Why this is in the management account
+# ---------------------------------------------------------------------------
+# Budgets over linked accounts and anomaly monitors over cost categories are
+# payer constructs, like the cost categories they read
+# (scripts/sync-cost-categories.sh). This stack holds them and the topic they
+# publish to, and nothing that acts on an alert: the topic is subscribed from
+# Audit by commercial/20-cost-alert-bridge.yaml, which turns each message into
+# a commercial event on the alert bus. The commercial router decides who hears
+# it, and a cost alert notifies; it never pages (design 12).
+#
+# Budgets themselves are not in this template. They are one per application
+# and tier group, from registry answers that change, so scripts/sync-budgets.sh
+# creates and updates them.
+#
+# ---------------------------------------------------------------------------
+# The anomaly monitor
+# ---------------------------------------------------------------------------
+# AWS-managed, dimensional, on the Tenant cost category: AWS analyses each
+# tenant's spend separately and a new tenant is covered the day the cost
+# category maps its accounts, with nothing added here.
+#
+# The subscription threshold is a PERCENTAGE of expected spend, not an amount,
+# so nobody sets a figure in the repository. 25% is a starting point: an
+# anomaly that adds a quarter to a tenant's expected cost is a conversation;
+# smaller ones are noise for a commercial channel. Tune it, do not remove it.
+#
+#   aws cloudformation deploy --region us-east-1 --profile msp-mgmt \
+#     --stack-name platform-cost-alerts \
+#     --template-file finops/20-cost-alerts.yaml \
+#     --parameter-overrides AuditAccountId=<audit> \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --tags platform-layer=infrastructure platform-managed=true
+
+Metadata:
+  cfn-lint:
+    config:
+      regions: [us-east-1]
+
+Parameters:
+
+  AuditAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: The account whose bridge subscribes to the topic. /platform/org/account/altdig-security-audit.
+
+  AnomalyImpactPercent:
+    Type: Number
+    Default: 25
+    MinValue: 1
+    MaxValue: 1000
+    Description: Raise an anomaly when it adds at least this percentage to a tenant's expected spend.
+
+  QuorumExecutionRoleName:
+    Type: String
+    Default: PlatformQuorumExecutor
+
+Resources:
+
+  # Budget and anomaly messages carry amounts. Encrypted with a key whose
+  # policy admits the two publishing services, which an AWS-managed SNS key
+  # cannot do.
+  CostAlertsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Cost alert topic in the management account (Budgets, Cost Anomaly Detection)
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: DenyDestructiveActionsOutsideQuorum
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DisableKey'
+              - 'kms:DisableKeyRotation'
+              - 'kms:DeleteImportedKeyMaterial'
+            Resource: '*'
+            Condition:
+              ArnNotLike:
+                'aws:PrincipalArn':
+                  - !Sub 'arn:${AWS::Partition}:sts::*:assumed-role/${QuorumExecutionRoleName}/*'
+          - Sid: CostServicesPublish
+            Effect: Allow
+            Principal:
+              Service:
+                - budgets.amazonaws.com
+                - costalerts.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: '*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+        - { Key: KeyPurpose,       Value: cost-alerts }
+
+  CostAlertsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-cost-alerts
+      TargetKeyId: !Ref CostAlertsKey
+
+  CostAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: platform-cost-alerts
+      DisplayName: AltDigital cost alerts
+      KmsMasterKeyId: !Ref CostAlertsKey
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  CostAlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref CostAlertsTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: BudgetsPublish
+            Effect: Allow
+            Principal: { Service: budgets.amazonaws.com }
+            Action: 'sns:Publish'
+            Resource: !Ref CostAlertsTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:budgets::${AWS::AccountId}:*'
+          - Sid: AnomalyDetectionPublish
+            Effect: Allow
+            Principal: { Service: costalerts.amazonaws.com }
+            Action: 'sns:Publish'
+            Resource: !Ref CostAlertsTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          # The bridge in Audit, and nothing else, may subscribe.
+          - Sid: AuditBridgeSubscribes
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:root' }
+            Action: 'sns:Subscribe'
+            Resource: !Ref CostAlertsTopic
+            Condition:
+              StringEquals:
+                'sns:Protocol': lambda
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 'sns:Publish'
+            Resource: !Ref CostAlertsTopic
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  TenantAnomalyMonitor:
+    Type: AWS::CE::AnomalyMonitor
+    Properties:
+      MonitorName: platform-tenant-cost
+      MonitorType: DIMENSIONAL
+      MonitorDimension: COST_CATEGORY
+      MonitorSpecification: '{"CostCategories":{"Key":"Tenant"}}'
+      ResourceTags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  TenantAnomalySubscription:
+    Type: AWS::CE::AnomalySubscription
+    Properties:
+      SubscriptionName: platform-tenant-cost
+      Frequency: IMMEDIATE
+      MonitorArnList: [!Ref TenantAnomalyMonitor]
+      Subscribers:
+        - Type: SNS
+          Address: !Ref CostAlertsTopic
+      ThresholdExpression: !Sub '{"Dimensions":{"Key":"ANOMALY_TOTAL_IMPACT_PERCENTAGE","MatchOptions":["GREATER_THAN_OR_EQUAL"],"Values":["${AnomalyImpactPercent}"]}}'
+      ResourceTags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+Outputs:
+
+  CostAlertsTopicArn:
+    Description: Subscribed from Audit by commercial/20-cost-alert-bridge.yaml; budgets publish here.
+    Value: !Ref CostAlertsTopic

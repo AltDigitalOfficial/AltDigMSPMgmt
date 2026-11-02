@@ -62,6 +62,10 @@ Clients
                  [--timezone IANA_ZONE]
                  Updates only the fields passed; never erases the rest.
   get-client     --partner S --slug S
+  set-budget     --partner S --slug S --app S [--pre-production USD]
+                 [--production USD|deferred]
+                 Questionnaire 13.2a/b (ADR-023). Touches only the budget
+                 attributes; never state. Amounts are never printed.
   link-truveon   --partner S --slug S --name TRUVEON_TENANT_SLUG
                  One Truveon tenant per client (B-023).
   list-clients   [--partner S]
@@ -98,7 +102,7 @@ BAA=""; IP_OWNER=""; ACCOUNT_ID=""; ENVIRONMENT=""; APP=""; VERSION=""
 NAME=""; REASON=""; REVIEW_BY=""; TECH_CONTACT=""; DEV_MANAGER=""
 CHANGE_APPROVER=""; JIRA_PROJECT=""; SERVICE_MODEL=""; COMPLIANCE=""; KIND=""
 BREACH_CONTACT=""; SECURITY_CONTACT=""; JIRA_SITE_URL=""; EVIDENCE_DESTINATION=""
-TIMEZONE=""
+TIMEZONE=""; BUDGET_PRE=""; BUDGET_PROD=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -121,6 +125,8 @@ while [[ $# -gt 0 ]]; do
     --breach-contact)   BREACH_CONTACT="$2"; shift 2 ;;
     --security-contact) SECURITY_CONTACT="$2"; shift 2 ;;
     --timezone)         TIMEZONE="$2"; shift 2 ;;
+    --pre-production)   BUDGET_PRE="$2"; shift 2 ;;
+    --production)       BUDGET_PROD="$2"; shift 2 ;;
     --account-id)       ACCOUNT_ID="$2"; shift 2 ;;
     --env)              ENVIRONMENT="$2"; shift 2 ;;
     --app)              APP="$2"; shift 2 ;;
@@ -338,6 +344,66 @@ cmd_check_partner() {
 # tech contact and dev manager, which step 1 never passes and which were
 # overwritten with blanks each time. A record that forgets on re-run is not a
 # spine.
+cmd_set_budget() {
+  # Questionnaire 13.2a and 13.2b, per application (ADR-023). The registry has
+  # no application record, so budgets sit on the client record, one attribute
+  # per application and tier group: budget#<app>#pre_production and
+  # budget#<app>#production. Read by scripts/sync-budgets.sh.
+  #
+  # A command of its own, not put-client flags: put-client always writes
+  # state (defaulting to provisioning), so recording a budget through it would
+  # quietly demote a live client. This writes the budget attributes and
+  # updated_at, and requires the client to exist already.
+  #
+  # Amounts are client commercial data. They are held here, never printed by
+  # this script, and never written to the repository.
+  [[ -n "${PARTNER}" ]] || die "--partner is required."
+  [[ -n "${SLUG}" ]]    || die "--slug is required."
+  [[ -n "${APP}" ]]     || die "--app is required."
+  validate_slug "partner" "${PARTNER}"
+  validate_slug "client" "${SLUG}"
+  validate_app_slug "${APP}"
+  [[ -n "${BUDGET_PRE}" || -n "${BUDGET_PROD}" ]] \
+    || die "Give --pre-production, --production, or both."
+
+  local set="updated_at = :u" vals names="{"
+  vals="\":u\":{\"S\":\"$(now_iso)\"}"
+  if [[ -n "${BUDGET_PRE}" ]]; then
+    [[ "${BUDGET_PRE}" =~ ^[0-9]+(\.[0-9]{1,2})?$ && ! "${BUDGET_PRE}" =~ ^0+(\.0+)?$ ]] \
+      || die "--pre-production must be a positive amount in US dollars."
+    set+=", #bpre = :bpre"; vals+=",\":bpre\":{\"N\":\"${BUDGET_PRE}\"}"
+    names+="\"#bpre\":\"budget#${APP}#pre_production\","
+  fi
+  if [[ -n "${BUDGET_PROD}" ]]; then
+    if [[ "${BUDGET_PROD}" == "deferred" ]]; then
+      vals+=",\":bprod\":{\"S\":\"deferred\"}"
+    else
+      [[ "${BUDGET_PROD}" =~ ^[0-9]+(\.[0-9]{1,2})?$ && ! "${BUDGET_PROD}" =~ ^0+(\.0+)?$ ]] \
+        || die "--production must be a positive amount in US dollars, or deferred."
+      vals+=",\":bprod\":{\"N\":\"${BUDGET_PROD}\"}"
+    fi
+    set+=", #bprod = :bprod"
+    names+="\"#bprod\":\"budget#${APP}#production\","
+  fi
+  names="${names%,}}"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    printf '%s DRY%s  update-item CLIENT %s/%s budgets for %s:%s%s\n' \
+      "${C_YELLOW}" "${C_RESET}" "${PARTNER}" "${SLUG}" "${APP}" \
+      "${BUDGET_PRE:+ pre-production}" "${BUDGET_PROD:+ production}"
+    return 0
+  fi
+  ddb_init
+  ddb update-item --table-name "${TABLE}" \
+    --key "{\"PK\":{\"S\":\"PARTNER#${PARTNER}\"},\"SK\":{\"S\":\"CLIENT#${SLUG}\"}}" \
+    --condition-expression "attribute_exists(PK)" \
+    --update-expression "SET ${set}" \
+    --expression-attribute-names "${names}" \
+    --expression-attribute-values "{${vals}}" >/dev/null \
+    || die "Could not record the budget. Does client ${PARTNER}/${SLUG} exist?"
+  ok "budgets recorded for ${PARTNER}/${SLUG}/${APP}:${BUDGET_PRE:+ pre-production}${BUDGET_PROD:+ production$([[ "${BUDGET_PROD}" == deferred ]] && echo ' (deferred)')}"
+}
+
 cmd_put_client() {
   [[ -n "${PARTNER}" ]] || die "--partner is required."
   [[ -n "${SLUG}" ]]    || die "--slug is required."
@@ -751,6 +817,7 @@ case "${CMD}" in
   check-partner)    cmd_check_partner ;;
   put-client)       cmd_put_client ;;
   get-client)       cmd_get_client ;;
+  set-budget)       cmd_set_budget ;;
   link-truveon)     cmd_link_truveon ;;
   list-clients)     cmd_list_clients ;;
   put-account)      cmd_put_account ;;

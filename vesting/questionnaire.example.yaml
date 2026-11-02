@@ -121,6 +121,14 @@ exit:
   post_exit_governance_loss_ack: true
   truveon_retention_desired: false
 
+# Section 13 (ADR-023). Illustrative amounts, NOT OEight's answer: real budgets
+# are client commercial data and live in the registry, never here. Pre-
+# production covers dev, test and uat together. Production may be deferred
+# until production is vested.
+cost:
+  pre_production_monthly_budget_usd: 1000
+  production_monthly_budget_usd: deferred
+
 # Section 16. One Truveon tenant per client (B-023). OEight already has one --
 # it was provisioned 2026-09-08, before the platform existed -- so creation is
 # skipped and the tenant is configured and linked only. People are NOT here;

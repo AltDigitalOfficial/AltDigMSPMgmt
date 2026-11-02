@@ -659,6 +659,26 @@
         }
       }
     },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pre_production_monthly_budget_usd"],
+      "description": "Section 13 — the client's acceptable monthly AWS spend for this application, per tier group (Jamie, 2026-11-01). Each becomes an AWS Budget over that group's accounts (scripts/sync-budgets.sh, ADR-023); an alert reaches the commercial channel, never a pager. Optional in the schema so questionnaires completed before this section existed still validate; derive-vesting.py warns when it is absent and sync-budgets.sh reports the application in the digest until it is answered. Amounts are client commercial data: they live in the registry, never in the repository.",
+      "properties": {
+        "pre_production_monthly_budget_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "13.2a — acceptable monthly spend, in US dollars, across the pre-production accounts together: dev, test, and uat when there is one. Needed before dev is usable."
+        },
+        "production_monthly_budget_usd": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {"const": "deferred"}
+          ],
+          "description": "13.2b — acceptable monthly spend, in US dollars, for the production account. May be 'deferred' until production is vested; sync-budgets.sh reports a vested production account with no answer."
+        }
+      }
+    },
     "truveon": {
       "type": "object",
       "additionalProperties": false,

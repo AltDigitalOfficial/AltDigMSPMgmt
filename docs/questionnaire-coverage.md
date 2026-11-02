@@ -96,8 +96,9 @@ Multi-region (8.3), RTO and RPO beyond the defaults (8.1, 8.2), dedicated
 infrastructure (9.6), a dedicated key (9.1), bring-your-own key (9.3),
 inbound internet and WAF (6.1), IP allow-listing (6.5), VPN or Direct Connect
 (6.4), certificates and DNS (7.x), certificate expiry monitoring — which the
-form promises under **all three** service models — cost alerts (13.2),
-business-event alarms (11.10), and patching (5.6, 5.7, B-141).
+form promises under **all three** service models — business-event alarms
+(11.10), and patching (5.6, 5.7, B-141). Cost alerts (13.2a/b) were on this
+list until 2026-11-01, when ADR-023 built them.
 
 On a form with AltDigital in the room these become a conversation. On a page
 they become an order.
@@ -317,8 +318,8 @@ the rows that are not are marked.
 
 | # | Question | Status | Note |
 |---|---|---|---|
-| 13.1 | Budget expectation | form only | |
-| 13.2 | Alert threshold | form only · not built | No AWS Budgets exist anywhere in the repository |
+| 13.2a | Pre-production budget | builds | `cost.pre_production_monthly_budget_usd` → `registry.sh set-budget` (onboarding step 1) → `sync-budgets.sh` → an AWS Budget over dev/test/uat, alerts through the commercial router (ADR-023). Unanswered: the digest says so on every sync |
+| 13.2b | Production budget | builds | `cost.production_monthly_budget_usd`, or `deferred` until prod is vested; same path |
 | 13.3 | Cost report recipients | form only | |
 | 13.4 | Trade availability for cost | form only | |
 

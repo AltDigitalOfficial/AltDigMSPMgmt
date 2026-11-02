@@ -600,6 +600,17 @@ def derive(q, rules):
     d["evidence_destination"] = q["evidence"]["destination"]
     d["declares_regulatory_exposure"] = bool(declares_exposure(q))
 
+    # 13.2a/13.2b — budgets (ADR-023). Presence only. The amounts are client
+    # commercial data: onboarding writes them to the registry from the
+    # questionnaire, and they never enter this output, which vesting archives
+    # under the evidence lock.
+    cost = q.get("cost") or {}
+    prod = cost.get("production_monthly_budget_usd")
+    d["budgets"] = {
+        "pre_production": "set" if cost.get("pre_production_monthly_budget_usd") else "missing",
+        "production": "deferred" if prod == "deferred" else ("set" if prod else "missing"),
+    }
+
     # 5.5 — quorum is a platform property, not a customer answer.
     d["key_deletion_quorum"] = "any two of Jamie, Wayne, Art"
 
@@ -629,6 +640,18 @@ def warnings_for(q, d):
             "    network step, after the accounts exist. Choose 'isolated' or 'dns-filtered',\n"
             "    or implement B-010 first. Note that 'isolated' is both cheaper and MORE\n"
             "    restrictive than 'locked' — see docs/isolation-tiers.md."
+        )
+    if d["budgets"]["pre_production"] == "missing":
+        w.append(
+            "No pre-production budget (13.2a). The accounts vest, but no AWS Budget\n"
+            "    watches their spend, and sync-budgets.sh reports this application in the\n"
+            "    digest until the client answers. Record it with registry.sh put-client\n"
+            "    --budget-app <app> --budget-pre-production <usd>."
+        )
+    if d["budgets"]["production"] == "missing":
+        w.append(
+            "No production budget (13.2b), and it is not marked 'deferred'. Answer it, or\n"
+            "    defer it explicitly, before production is vested."
         )
     # No PCI warning here: any PCI answer halts in check_cardholder_scope (D-025).
     if d["egress_profile_overridden"]:

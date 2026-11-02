@@ -1,0 +1,262 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - turns the payer's budget and anomaly messages
+  into commercial events on the alert bus, in Audit. Phase 15.9 step 6,
+  ADR-023.
+
+# ---------------------------------------------------------------------------
+# Where this sits
+# ---------------------------------------------------------------------------
+# AWS Budgets and Cost Anomaly Detection publish to platform-cost-alerts in the
+# management account (finops/20-cost-alerts.yaml), because both are payer
+# constructs. This function subscribes to that topic across accounts and puts
+# each message on platform-alerts as an incident dossier carrying
+# commercial_event, the shape check-macie-cost.sh already uses. From there the
+# commercial router (commercial/10-commercial-routing.yaml) sends it to the
+# Client Conversations service in PagerDuty: a notification, never a page.
+#
+# It decides nothing about who hears an alert. That is the router's (D-028).
+#
+# ---------------------------------------------------------------------------
+# What each message becomes
+# ---------------------------------------------------------------------------
+#   anomaly (JSON with anomalyId)   cost-anomaly, tenant = the Tenant cost
+#                                   category value, deduplicated on the
+#                                   anomaly id
+#   budget (text naming a budget    budget-breach, tenant and tier group read
+#   platform.<p>.<c>.<a>.<group>)   from the name sync-budgets.sh gives it,
+#                                   deduplicated per budget, alert and month
+#   anything else                   a digest entry saying an unrecognised cost
+#                                   message arrived, with its subject. Not
+#                                   dropped (the else rule).
+#   the function fails              platform-cost-alert-bridge-errors, to the
+#                                   router
+#
+# The message text travels in the event. Budget and anomaly messages carry
+# amounts, and for a cost conversation the number is the point; the commercial
+# channel is where those amounts are meant to be read.
+
+Parameters:
+
+  CostAlertsTopicArn:
+    Type: String
+    AllowedPattern: '^arn:aws:sns:us-east-1:[0-9]{12}:platform-cost-alerts$'
+    Description: The CostAlertsTopicArn output of finops/20-cost-alerts.yaml.
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  LogsKeyArn:
+    Type: String
+    AllowedPattern: '^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/.+$'
+    Description: KMS key for the function's log group (Audit's logs key).
+
+Resources:
+
+  BridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformCostAlertBridge
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: RaiseOnTheAlertBus
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: events:PutEvents
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${AlertBusName}'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  BridgeLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-cost-alert-bridge
+      RetentionInDays: 2557
+      KmsKeyId: !Ref LogsKeyArn
+
+  BridgeFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: BridgeLogGroup
+    Properties:
+      FunctionName: platform-cost-alert-bridge
+      Description: Budget and anomaly messages to commercial events. ADR-023.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt BridgeRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          ALERT_BUS_NAME: !Ref AlertBusName
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+      Code:
+        # Inline, tested by scripts/test-cost-alert-bridge.py, which loads
+        # this exact text.
+        ZipFile: |
+          import datetime
+          import hashlib
+          import json
+          import os
+          import re
+
+          import boto3
+
+          # sync-budgets.sh names every budget this way. Dots, because slugs
+          # never contain one, so the name splits without guessing.
+          BUDGET = re.compile(
+              r"platform\.(?P<partner>[a-z0-9-]+)\.(?P<client>[a-z0-9-]+)"
+              r"\.(?P<app>[a-z0-9-]+)\.(?P<group>pre-production|production)\b")
+
+          _clients = {}
+
+
+          def _client(name):
+              if name not in _clients:
+                  _clients[name] = boto3.client(name)
+              return _clients[name]
+
+
+          def _now():
+              return datetime.datetime.now(datetime.timezone.utc)
+
+
+          def translate(subject, message):
+              """One SNS message -> one dossier for the alert bus."""
+              now = _now()
+              base = {"record_type": "cost-alert", "recorded_at": now.isoformat(),
+                      "routing": "digest"}
+              try:
+                  m = json.loads(message)
+              except ValueError:
+                  m = None
+
+              if isinstance(m, dict) and m.get("anomalyId"):
+                  tenant = m.get("dimensionalValue") or "unknown"
+                  return {**base,
+                      "commercial_event": "cost-anomaly",
+                      "tenant": tenant,
+                      "incident_id": f"cost-anomaly:{m['anomalyId']}",
+                      "alarm": {"name": f"Cost anomaly: {tenant}",
+                                "account_id": m.get("accountId"),
+                                "resource_id": m.get("monitorName") or m.get("monitorArn")},
+                      "assessment": {"probable_cause": (
+                          "Cost Anomaly Detection found spend above this tenant's expected "
+                          "pattern. Impact, root causes and the console link are below.")},
+                      "anomaly": {k: m.get(k) for k in (
+                          "impact", "rootCauses", "anomalyStartDate", "anomalyEndDate",
+                          "anomalyDetailsLink", "monitorName")},
+                      "current_state": "anomaly open"}
+
+              b = BUDGET.search(message or "") or BUDGET.search(subject or "")
+              if b:
+                  name = b.group(0)
+                  # One conversation per budget, per alert, per month: the
+                  # same threshold firing again tomorrow is the same news.
+                  alert = hashlib.sha256((subject or "").encode()).hexdigest()[:12]
+                  return {**base,
+                      "commercial_event": "budget-breach",
+                      "tenant": f"{b['partner']}-{b['client']}-{b['app']}",
+                      "partner": b["partner"],
+                      "tier_group": b["group"],
+                      "incident_id": f"budget-breach:{name}:{now:%Y-%m}:{alert}",
+                      "alarm": {"name": f"Budget alert: {name}", "resource_id": name},
+                      "assessment": {"probable_cause": (
+                          f"The {b['group']} budget the client set in onboarding "
+                          "(13.2a/b) has reached an alert threshold. The message "
+                          "from AWS Budgets is below.")},
+                      "budget_message": {"subject": subject, "text": message},
+                      "current_state": "threshold reached"}
+
+              # Neither shape. Seen by a person, not dropped, and not routed
+              # as commercial: nothing here says it is a client conversation.
+              return {**base,
+                  "alarm": {"name": "Unrecognised cost alert message",
+                            "resource_id": "platform-cost-alerts"},
+                  "assessment": {"probable_cause": (
+                      "A message reached platform-cost-alerts that is neither an "
+                      "anomaly nor a platform budget. Subject: " + (subject or "(none)") +
+                      ". Read the bridge's log for the message.")},
+                  "current_state": "unrecognised"}
+
+
+          def handler(event, context=None):
+              entries = []
+              for record in event.get("Records") or []:
+                  sns = record.get("Sns") or {}
+                  print(json.dumps({"record_type": "cost-alert-received",
+                                    "subject": sns.get("Subject"),
+                                    "message_id": sns.get("MessageId")}))
+                  d = translate(sns.get("Subject"), sns.get("Message") or "")
+                  entries.append({"EventBusName": os.environ["ALERT_BUS_NAME"],
+                                  "Source": "platform.cost",
+                                  "DetailType": "Platform Incident Dossier",
+                                  "Detail": json.dumps(d, default=str)})
+              for i in range(0, len(entries), 10):
+                  resp = _client("events").put_events(Entries=entries[i:i + 10])
+                  if resp.get("FailedEntryCount"):
+                      # Raised, so SNS retries and the errors alarm fires: a
+                      # budget alert lost here is a client surprised later.
+                      raise RuntimeError(f"PutEvents failed: {resp.get('Entries')}")
+              return {"raised": len(entries)}
+
+  BridgePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BridgeFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref CostAlertsTopicArn
+
+  # Created from this side: the topic's policy admits Audit to subscribe a
+  # Lambda and nothing else.
+  BridgeSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: BridgePermission
+    Properties:
+      TopicArn: !Ref CostAlertsTopicArn
+      Protocol: lambda
+      Endpoint: !GetAtt BridgeFunction.Arn
+      Region: us-east-1
+
+  BridgeErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-cost-alert-bridge-errors
+      AlarmDescription: >-
+        The cost alert bridge failed. A budget or anomaly alert may not have
+        reached the commercial channel. Read /aws/lambda/platform-cost-alert-bridge
+        in Audit; every message received is logged with its subject.
+
+        [platform-routing] routing=digest_and_jira layer=infrastructure urgency=low
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BridgeFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  FunctionName:
+    Value: !Ref BridgeFunction
