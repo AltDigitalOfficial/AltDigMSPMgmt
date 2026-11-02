@@ -69,6 +69,14 @@
 06-region-restriction.json	sandbox,members
 07-deny-bypass.json	sandbox,members
 
+# 07-v2 adds NoResourceSharingAcrossAccounts (ADR-022): RAM sharing with the
+# organization is on, so a share reaches another account with no acceptance.
+# Swapped the B-135 way, because 07 is one object on two OUs: v2 attached
+# beside the original, proven by the harness, then the original detached.
+# Sandbox first, Members after. Sandbox and Members each had 9 of 10 SCPs,
+# so the overlap fits.
+07-deny-bypass-v2.json	sandbox
+
 # 08 is design 11 Layer 1's "platform-managed alarms and SSM associations",
 # which 01-03 never carried (B-149). PowerUserAccess in dev could rewrite the
 # response engine's code, disable the drift rule that recreates deleted

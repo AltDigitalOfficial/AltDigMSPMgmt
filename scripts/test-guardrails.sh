@@ -390,6 +390,14 @@ check 07 NoNetworkingAroundTheBaseline "ec2:CreateVpcPeeringConnection" yes --  
 
 check 07 NoNetworkingAroundTheBaseline "ec2:CreateInternetGateway" yes --   aws ec2 create-internet-gateway --region "${TEST_REGION}"
 
+# RAM sharing with the organization has been on since 2026-11-01 (ADR-022),
+# so a share reaches another account with no acceptance step. The probe is an
+# invitation that does not exist: denied by the SCP, or, for the exempt
+# probe, refused as unknown. Nothing is shared or created either way.
+check 07 NoResourceSharingAcrossAccounts "ram:AcceptResourceShareInvitation" yes -- \
+  aws ram accept-resource-share-invitation --region "${TEST_REGION}" \
+  --resource-share-invitation-arn "arn:aws:ram:${TEST_REGION}:111111111111:resource-share-invitation/00000000-0000-0000-0000-000000000000"
+
 # Sharing a snapshot moves data out of the account with no data-plane call --
 # no GetObject, no export, nothing the evidence pipeline would see as egress.
 #
