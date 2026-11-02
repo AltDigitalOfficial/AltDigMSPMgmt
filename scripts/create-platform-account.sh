@@ -254,6 +254,11 @@ fi
 hr
 ok "${CANONICAL_ALIAS} = ${ACCOUNT_ID}   (alias: ${ALIAS})"
 log ""
-log "AWS sends a welcome message to ${EMAIL}."
-log "Confirm it arrives — that is the genuine end-to-end test of the"
-log "plus-addressed mail path, and it closes deviation D-008."
+# AWS sends NO welcome message for an account created through Organizations:
+# none arrived for any of the ten created 2026-09 to 2026-11, while console
+# sign-ups did get one. An earlier version of this message said to wait for
+# it. The root address's mail path has to be tested by sending to it.
+log "AWS does not send a welcome message for accounts created through"
+log "Organizations. To prove ${EMAIL} receives mail (password"
+log "resets, AWS notices), send it a message from outside and confirm it"
+log "arrives."
