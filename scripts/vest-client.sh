@@ -791,6 +791,23 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# The trail query learns the new accounts (ADR-008)
+# ---------------------------------------------------------------------------
+# The org trail's Athena table projects a fixed account list. Until it is
+# redeployed, every query silently leaves these accounts out. A warning, not a
+# failure: the accounts are vested either way, and a re-run of
+# deploy-trail-query.sh is all that is missing.
+if [[ "${DRY_RUN}" != "1" ]]; then
+  info "Adding the new accounts to the trail query (Log Archive)"
+  if bash "${REPO_ROOT}/scripts/deploy-trail-query.sh" >/dev/null 2>&1; then
+    ok "trail query covers every account"
+  else
+    warn "The trail query was not updated; these accounts are invisible to it."
+    warn "  Run scripts/deploy-trail-query.sh"
+  fi
+fi
+
 hr
 if [[ "${DRY_RUN}" == "1" ]]; then
   ok "Dry run complete — nothing created."

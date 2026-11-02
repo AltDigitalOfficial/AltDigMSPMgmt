@@ -242,6 +242,15 @@ else
   warn "Account settings incomplete. Run scripts/apply-account-settings.sh --account ${ACCOUNT_ID} --verify"
 fi
 
+# The org trail's Athena table projects a fixed account list (ADR-008), so a
+# new account is invisible to every query until it is redeployed.
+info "Adding ${ACCOUNT_ID} to the trail query"
+if bash "${REPO_ROOT}/scripts/deploy-trail-query.sh" >/dev/null 2>&1; then
+  ok "trail query covers ${ACCOUNT_ID}"
+else
+  warn "Trail query not updated. Run scripts/deploy-trail-query.sh"
+fi
+
 hr
 ok "${CANONICAL_ALIAS} = ${ACCOUNT_ID}   (alias: ${ALIAS})"
 log ""

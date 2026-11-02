@@ -312,21 +312,12 @@ fi
 # --- 4. the trail query stack, in Log Archive ------------------------------
 hr
 info "Trail query stack"
-ORG_ID="$(aws organizations describe-organization \
-  --query 'Organization.Id' --output text | no_cr)"
-[[ "${ORG_ID}" =~ ^o-[a-z0-9]+$ ]] || die "Could not read the Organization id."
-
-# Every account, any status: closed accounts keep their trail history.
-ALL_ACCOUNTS="$(aws organizations list-accounts \
-  --query 'Accounts[].Id' --output text | no_cr | tr '\t' ',' | tr -s ', ' ',')"
-ALL_ACCOUNTS="${ALL_ACCOUNTS%,}"
-[[ -n "${ALL_ACCOUNTS}" ]] || die "Could not list Organization accounts."
-
-DEPLOY_ARGS=(--account "${QUERY_ACCOUNT}" --template security/50-trail-query.yaml
-  --stack "${QUERY_STACK}" "OrganizationId=${ORG_ID}" "AccountIds=${ALL_ACCOUNTS}")
-[[ "${DRY_RUN}" == "1" ]] && DEPLOY_ARGS+=(--dry-run)
-"${REPO_ROOT}/scripts/deploy-to-account.sh" "${DEPLOY_ARGS[@]}" \
-  || die "Could not deploy ${QUERY_STACK} to ${QUERY_ACCOUNT}."
+# Its own script since 2026-11-01, so the table does not depend on an
+# engagement being granted (ADR-008 amendment).
+TQ_ARGS=()
+[[ "${DRY_RUN}" == "1" ]] && TQ_ARGS+=(--dry-run)
+"${REPO_ROOT}/scripts/deploy-trail-query.sh" "${TQ_ARGS[@]}" \
+  || die "Could not deploy the trail query stack."
 
 # --- 5. assignments, one per active account --------------------------------
 hr

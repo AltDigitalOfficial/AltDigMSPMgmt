@@ -2,8 +2,8 @@
 
 **Date:** 2026-10-08
 **Recorded:** 2026-10-14
-**Deciders:** Jamie (to build a query layer over the trail, 2026-10-08: "let's go on and build it"); Claude (session), unreviewed (its shape)
-**Status:** Proposed
+**Deciders:** Jamie (to build a query layer over the trail, 2026-10-08: "let's go on and build it"); Claude (session), unreviewed (its shape). Ratified by Jamie, 2026-11-01
+**Status:** Accepted
 **Tags:** cloudtrail, athena, audit, log-archive, cost
 
 ---
@@ -119,6 +119,40 @@ partition list.
 - `AuditEvidenceReader` grants Athena on `platform-audit` only, not on the
   `primary` workgroup.
 - cfn-lint and cfn-guard pass.
+
+## Amendment — 2026-11-01: deployed, proved, and kept current
+
+**Why it was never deployed.** The stack was step 4 of
+`deploy-audit-access.sh`, which refuses to run without an audit engagement
+end date. No engagement was granted, so the table never existed. That was
+found on 2026-11-01, when a query was needed and the workgroup was missing.
+
+**What changed:**
+- **[scripts/deploy-trail-query.sh](../../scripts/deploy-trail-query.sh)**
+  deploys the stack on its own, with the account list derived as before.
+  `deploy-audit-access.sh` calls it, so a grant still refreshes the table.
+- **`create-platform-account.sh` and `vest-client.sh` call it** at the end of
+  a real run. This closes the negative consequence above: a new account no
+  longer waits for somebody to remember. A failure there warns rather than
+  failing the vesting.
+- **Deployed 2026-11-01** to Log Archive as `platform-trail-query`, projecting
+  all 11 accounts.
+
+**Proved against the real archive, 2026-11-01:**
+- Events known to have happened that day came back exactly: one
+  `EnableSharingWithAwsOrganization` and three `CreateResourceShare` in the
+  management account, us-east-1, with the read calls around them in three
+  regions.
+- One day in us-east-2 returned events for every one of the 11 accounts, so
+  the account projection and the object-key template both hold.
+- `sessioncredentialfromconsole` parses. No console session fell in that
+  slice, so its true value is not yet observed.
+- A single-account, single-day query scanned under 5 MB; a day across every
+  account in one region, about 28 MB.
+
+**Still not proved:** a query that reaches objects older than 90 days, in
+Glacier Instant Retrieval. The trail's first objects reach that age in
+December 2026.
 
 ## Related
 
