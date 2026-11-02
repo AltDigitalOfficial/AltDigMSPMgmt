@@ -76,7 +76,7 @@
 # Sandbox first, Members after. Sandbox and Members each had 9 of 10 SCPs,
 # so the overlap fits. Sandbox swapped 2026-11-01: harness 45 passed, 0
 # failed, before and after the original was detached.
-07-deny-bypass-v2.json	sandbox
+07-deny-bypass-v2.json	sandbox,members
 
 # 08 is design 11 Layer 1's "platform-managed alarms and SSM associations",
 # which 01-03 never carried (B-149). PowerUserAccess in dev could rewrite the
