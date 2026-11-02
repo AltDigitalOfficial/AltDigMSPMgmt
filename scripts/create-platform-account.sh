@@ -254,11 +254,12 @@ fi
 hr
 ok "${CANONICAL_ALIAS} = ${ACCOUNT_ID}   (alias: ${ALIAS})"
 log ""
-# AWS sends NO welcome message for an account created through Organizations:
-# none arrived for any of the ten created 2026-09 to 2026-11, while console
-# sign-ups did get one. An earlier version of this message said to wait for
-# it. The root address's mail path has to be tested by sending to it.
-log "AWS does not send a welcome message for accounts created through"
+# Do not wait for a welcome message. D-008 records one for the first Sandbox
+# account in 2026-09, but none for the other nine accounts created since is in
+# the mailbox, and that one is not there either. An earlier version of this
+# message said to wait for it; for altdig-infra-finops nothing came. The root
+# address's mail path is tested by sending to it.
+log "AWS may not send a welcome message for an account created through"
 log "Organizations. To prove ${EMAIL} receives mail (password"
 log "resets, AWS notices), send it a message from outside and confirm it"
 log "arrives."

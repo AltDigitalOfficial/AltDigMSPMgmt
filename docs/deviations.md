@@ -574,6 +574,15 @@ welcome message for `ad-sandbox-canary`, sent to
 `mspr+sandbox-canary@altdigital.ai` on account creation — genuine AWS mail over
 the real path, which is the strongest confirmation available.
 
+**Re-verified 2026-11-01** for `mspr+infra-finops@altdigital.ai`
+(`altdig-infra-finops`): no welcome message arrived after account creation, so
+a message was sent to it from an external sender and arrived within a minute.
+Genuine AWS mail also reaches the plus addresses:
+`mspr+sandbox-canary@altdigital.ai` has received AWS Health notices and
+support-case mail since 2026-09. The welcome message cited above is not in
+the mailbox now, and none exists for any of the nine accounts created after
+it. Treat a welcome message as unreliable evidence; send a test instead.
+
 **Standing guidance retained** — if a mail exception is ever needed for AWS
 notifications, do not allow-list `amazon.com` or `amazonaws.com` by domain.
 Spoofed AWS notifications are a common phishing lure and a domain allow-list
