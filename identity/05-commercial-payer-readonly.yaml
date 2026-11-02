@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - CommercialPayerReadOnly permission set.
+  Invoices, payments, credits and tax only, in the management account: the
+  part of the commercial grant that cannot leave it (D-009). Assigned to the
+  CommercialReadOnly GROUP. Read-only throughout.
+
+# ---------------------------------------------------------------------------
+# Why there are two commercial permission sets
+# ---------------------------------------------------------------------------
+# D-009: invoices, payment instruments, credits and tax are payer data,
+# readable only in the management account. Cost analysis is not: since 15.9
+# it reaches the FinOps account through the CUR 2.0 export and a shared
+# billing view, and CommercialReadOnly (00-commercial-readonly.yaml) is
+# assigned there.
+#
+# So the management account keeps this much narrower grant. No Cost Explorer,
+# no Budgets, no Data Exports, no Cost Optimization Hub, no pricing: anyone
+# analysing cost does it in FinOps. The same group holds both, because the
+# same people do both jobs; the split is by account, not by person.
+#
+# SCPs do not apply to the management account, so the two deny statements are
+# the whole boundary, as in 00-commercial-readonly.yaml.
+
+Parameters:
+
+  InstanceArn:
+    Type: String
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:sso:::instance/(sso)?ins-[0-9a-f]{16}$'
+    Description: IAM Identity Center instance ARN.
+
+  GroupId:
+    Type: String
+    AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    Description: The CommercialReadOnly identity store group.
+
+  ManagementAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: The payer. From config/platform.env.
+
+  SsmPrefix:
+    Type: String
+    Default: /platform
+    AllowedPattern: '^/[a-zA-Z0-9._/-]+$'
+
+Resources:
+
+  PayerReadOnlyPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: CommercialPayerReadOnly
+      Description: >-
+        Invoices, payments, credits and tax in the management account only.
+        Cost analysis is in the FinOps account. D-009.
+      InstanceArn: !Ref InstanceArn
+      SessionDuration: PT4H
+      RelayStateType: 'https://us-east-1.console.aws.amazon.com/billing/home#/bills'
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PayerBillingRead
+            Effect: Allow
+            Action:
+              - account:GetAccountInformation
+              - aws-portal:View*
+              - billing:Get*
+              - billing:List*
+              - consolidatedbilling:Get*
+              - consolidatedbilling:List*
+              - invoicing:Get*
+              - invoicing:List*
+              - payments:Get*
+              - payments:List*
+              - purchase-orders:Get*
+              - purchase-orders:List*
+              - purchase-orders:View*
+              - tax:Get*
+              - tax:List*
+            Resource: '*'
+          # Invoices break charges down by account, which needs the names.
+          - Sid: AccountNamesForInvoices
+            Effect: Allow
+            Action:
+              - organizations:DescribeAccount
+              - organizations:DescribeOrganization
+              - organizations:ListAccounts
+            Resource: '*'
+          - Sid: ConsoleIdentityChrome
+            Effect: Allow
+            Action:
+              - iam:ListAccountAliases
+              - sts:GetCallerIdentity
+            Resource: '*'
+
+          # Layer 1: nothing outside payer billing. Narrower than the old
+          # management-account grant: ce, budgets, cur, bcm-data-exports,
+          # cost-optimization-hub, savingsplans, pricing and sustainability
+          # are gone, and organizations is three actions, not Describe* and
+          # List*.
+          - Sid: DenyOutsidePayerBilling
+            Effect: Deny
+            NotAction:
+              - account:GetAccountInformation
+              - aws-portal:*
+              - billing:*
+              - consolidatedbilling:*
+              - iam:ListAccountAliases
+              - invoicing:*
+              - organizations:DescribeAccount
+              - organizations:DescribeOrganization
+              - organizations:ListAccounts
+              - payments:*
+              - purchase-orders:*
+              - sts:GetCallerIdentity
+              - tax:*
+            Resource: '*'
+
+          # Layer 2: no writes inside it, by verb prefix, tagging included.
+          # The same list as 00-commercial-readonly.yaml for these services.
+          - Sid: DenyWritesWithinPayerBilling
+            Effect: Deny
+            Action:
+              - aws-portal:Modify*
+              - billing:Create*
+              - billing:Delete*
+              - billing:Put*
+              - billing:Redeem*
+              - billing:Tag*
+              - billing:Untag*
+              - billing:Update*
+              - invoicing:Create*
+              - invoicing:Delete*
+              - invoicing:Put*
+              - invoicing:Tag*
+              - invoicing:Untag*
+              - invoicing:Update*
+              - payments:Accept*
+              - payments:Create*
+              - payments:Delete*
+              - payments:Make*
+              - payments:Tag*
+              - payments:Untag*
+              - payments:Update*
+              - purchase-orders:Add*
+              - purchase-orders:Delete*
+              - purchase-orders:Modify*
+              - purchase-orders:Tag*
+              - purchase-orders:Untag*
+              - purchase-orders:Update*
+              - tax:Batch*
+              - tax:Delete*
+              - tax:Put*
+              - tax:Update*
+            Resource: '*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+        - { Key: Purpose,          Value: commercial-payer-readonly }
+        - { Key: DesignDoc,        Value: '12' }
+
+  # To the group, never a user, for the reasons in 00-commercial-readonly.yaml.
+  PayerReadOnlyAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !GetAtt PayerReadOnlyPermissionSet.PermissionSetArn
+      PrincipalType: GROUP
+      PrincipalId: !Ref GroupId
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref ManagementAccountId
+
+  PermissionSetArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${SsmPrefix}/identity/permission-set/commercial-payer-readonly'
+      Type: String
+      Value: !GetAtt PayerReadOnlyPermissionSet.PermissionSetArn
+      Description: CommercialPayerReadOnly permission set ARN (management account, D-009)
+      Tags: { platform-managed: 'true' }
+
+Outputs:
+
+  PermissionSetArn:
+    Value: !GetAtt PayerReadOnlyPermissionSet.PermissionSetArn

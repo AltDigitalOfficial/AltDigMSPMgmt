@@ -23,11 +23,22 @@ Description: >-
 # ---------------------------------------------------------------------------
 # Why the deny statements carry the weight here
 # ---------------------------------------------------------------------------
-# The target is the Organization MANAGEMENT account. SCPs do not apply to the
-# management account — that is an AWS property, not a configuration choice. So
-# there is no outer guardrail behind this permission set. Its own inline policy
-# is the entire boundary, which is why the denies are constructed to hold even
-# if the attached AWS managed policy grows new actions later.
+# Until 15.9 the target was the Organization MANAGEMENT account (D-009), where
+# SCPs do not apply, so this inline policy was the entire boundary. Since 15.9
+# it is the FinOps account (altdig-infra-finops), which sits under the
+# Infrastructure OU's SCPs, and the payer-only part of the old grant is a
+# separate, narrower permission set left in the management account
+# (05-commercial-payer-readonly.yaml). The denies are kept exactly as strict:
+# they hold even if the attached AWS managed policy grows new actions later,
+# and a FinOps account will hold more than billing data one day.
+#
+# In FinOps the grant reads cost two ways:
+#   - Cost Explorer, through the organization billing view the management
+#     account shares with FinOps (finops/05-billing-view.yaml). Choose the
+#     view "platform-organization" in the console; the default view is
+#     FinOps's own costs only.
+#   - Athena over the CUR 2.0 export (finops/10-cost-exports.yaml), in the
+#     platform-finops workgroup only.
 #
 # Two layers, deliberately:
 #
@@ -70,9 +81,9 @@ Parameters:
   TargetAccountId:
     Type: String
     Description: >-
-      Account the permission set is assigned to. Currently the Organization
-      management account, which is deviation D-009 — the aggregation layer that
-      should hold this does not exist yet.
+      Account the permission set is assigned to: the FinOps account, from
+      /platform/org/account/altdig-infra-finops. The Athena, S3 and KMS grants
+      are scoped to resources named for this account.
     AllowedPattern: '^[0-9]{12}$'
     ConstraintDescription: Must be a 12-digit AWS account id.
 
@@ -169,9 +180,9 @@ Resources:
               - cost-optimization-hub:ListEnrollmentStatuses
               - cost-optimization-hub:ListRecommendationSummaries
               - cost-optimization-hub:ListRecommendations
-              # Data Exports — the modern CUR API. The export itself does not
-              # exist yet (phase 11.1); this is here so that when it lands the
-              # permission set does not need reopening.
+              # Data Exports — the modern CUR API. The export lives in the
+              # management account, so from FinOps these list nothing; the
+              # data itself is read through Athena below.
               - bcm-data-exports:GetExecution
               - bcm-data-exports:GetExport
               - bcm-data-exports:GetTable
@@ -196,6 +207,12 @@ Resources:
           # client roster. That is accepted — a commercial function that cannot
           # see which clients it is billing for is not a commercial function.
           # It exposes names and structure only, never contents.
+          #
+          # Since the move to FinOps these calls are refused by Organizations
+          # itself, which answers only the management account and delegated
+          # administrators. Kept so the grant is ready if FinOps is ever
+          # registered as one; until then account names come from the shared
+          # billing view and the CUR's line_item_usage_account_name.
           - Sid: OrganizationStructureRead
             Effect: Allow
             Action:
@@ -209,6 +226,86 @@ Resources:
               - organizations:ListRoots
               - organizations:ListTagsForResource
             Resource: '*'
+
+          # -----------------------------------------------------------------
+          # The CUR 2.0 export, through Athena (15.9)
+          # -----------------------------------------------------------------
+          # One workgroup, one database, one export bucket, read only. The
+          # workgroup enforces its own encrypted result location, so the only
+          # write this grant makes is a query result, into the results bucket.
+          # No Glue writes: tables are defined by the platform, not by queries
+          # (a CREATE TABLE AS fails on glue:CreateTable, denied by layer 1).
+          - Sid: AthenaInTheFinOpsWorkgroup
+            Effect: Allow
+            Action:
+              - athena:BatchGetQueryExecution
+              - athena:GetQueryExecution
+              - athena:GetQueryResults
+              - athena:GetQueryResultsStream
+              - athena:GetWorkGroup
+              - athena:ListQueryExecutions
+              - athena:StartQueryExecution
+              - athena:StopQueryExecution
+            Resource: !Sub 'arn:${AWS::Partition}:athena:*:${TargetAccountId}:workgroup/platform-finops'
+          - Sid: AthenaCatalogBrowse
+            Effect: Allow
+            Action:
+              - athena:GetDataCatalog
+              - athena:GetDatabase
+              - athena:GetTableMetadata
+              - athena:ListDataCatalogs
+              - athena:ListDatabases
+              - athena:ListTableMetadata
+              - athena:ListWorkGroups
+            Resource: '*'
+          - Sid: GlueReadCostTables
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:GetTable
+              - glue:GetTables
+              - glue:BatchGetPartition
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:glue:*:${TargetAccountId}:catalog'
+              - !Sub 'arn:${AWS::Partition}:glue:*:${TargetAccountId}:database/platform_cost'
+              - !Sub 'arn:${AWS::Partition}:glue:*:${TargetAccountId}:table/platform_cost/*'
+          - Sid: ReadTheExport
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::altdig-cost-exports-${TargetAccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::altdig-cost-exports-${TargetAccountId}/*'
+          - Sid: WriteQueryResults
+            Effect: Allow
+            Action:
+              - s3:AbortMultipartUpload
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:ListMultipartUploadParts
+              - s3:PutObject
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::altdig-cost-athena-results-${TargetAccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::altdig-cost-athena-results-${TargetAccountId}/*'
+          # The cost key, by alias, and only as S3 uses it on the caller's
+          # behalf. No direct decrypt.
+          - Sid: CostKeyThroughS3
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: !Sub 'arn:${AWS::Partition}:kms:*:${TargetAccountId}:key/*'
+            Condition:
+              StringLike:
+                'kms:ViaService': 's3.*.amazonaws.com'
+              'ForAnyValue:StringEquals':
+                'kms:ResourceAliases': alias/platform-cost
 
           # Console chrome. Without GetCallerIdentity and ListAccountAliases
           # the console header renders an error banner on every page, which
@@ -236,29 +333,40 @@ Resources:
           # producing a support request that resolves to "add one action".
           - Sid: DenyOutsideBillingDomain
             Effect: Deny
+            # Invoices, payments, credits, tax and purchase orders are not on
+            # this list since 15.9: they are payer data, and the management
+            # account's CommercialPayerReadOnly carries them. Athena, Glue
+            # reads, S3 object access and the two KMS calls are, for the
+            # export; the Allow statements scope them to FinOps's cost
+            # resources.
             NotAction:
               - account:GetAccountInformation
-              - aws-portal:*
+              - athena:*
+              - aws-portal:View*
               - bcm-data-exports:*
               - billing:*
               - budgets:*
               - ce:*
-              - consolidatedbilling:*
               - cost-optimization-hub:*
               - cur:*
               - freetier:*
+              - glue:BatchGetPartition
+              - glue:Get*
               - iam:ListAccountAliases
-              - invoicing:*
-              - mapcredits:*
+              - kms:Decrypt
+              - kms:GenerateDataKey
               - organizations:Describe*
               - organizations:List*
-              - payments:*
               - pricing:*
-              - purchase-orders:*
+              - s3:AbortMultipartUpload
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:ListMultipartUploadParts
+              - s3:PutObject
               - savingsplans:*
               - sts:GetCallerIdentity
               - sustainability:*
-              - tax:*
             Resource: '*'
 
           # -----------------------------------------------------------------
@@ -274,13 +382,16 @@ Resources:
           - Sid: DenyWritesWithinBillingDomain
             Effect: Deny
             Action:
-              - account:Accept*
-              - account:Delete*
-              - account:Disable*
-              - account:Enable*
-              - account:Put*
-              - account:Start*
-              - aws-portal:Modify*
+              # Athena: queries yes, anything that changes the workgroup or catalog no.
+              - athena:Create*
+              - athena:Delete*
+              - athena:Import*
+              - athena:Put*
+              - athena:StartCalculationExecution
+              - athena:StartSession
+              - athena:Tag*
+              - athena:Untag*
+              - athena:Update*
               - bcm-data-exports:Create*
               - bcm-data-exports:Delete*
               - bcm-data-exports:Tag*
@@ -313,43 +424,16 @@ Resources:
               - cur:Untag*
               - freetier:Put*
               - freetier:Upgrade*
-              - invoicing:Create*
-              - invoicing:Delete*
-              - invoicing:Put*
-              - invoicing:Tag*
-              - invoicing:Untag*
-              - invoicing:Update*
-              # Accept* is not a verb prefix used elsewhere in this list. It is
-              # here because payments:AcceptFinancingApplicationTerms is a
-              # write that none of the usual prefixes catch — the kind of thing
-              # enumerating by verb misses, which is why cfn-lint's action-name
-              # check is load-bearing here rather than cosmetic.
-              - payments:Accept*
-              - payments:Create*
-              - payments:Delete*
-              - payments:Make*
-              - payments:Tag*
-              - payments:Untag*
-              - payments:Update*
-              - purchase-orders:Add*
-              - purchase-orders:Delete*
-              - purchase-orders:Modify*
-              - purchase-orders:Tag*
-              - purchase-orders:Untag*
-              - purchase-orders:Update*
               - savingsplans:Create*
               - savingsplans:Delete*
               - savingsplans:Return*
               - savingsplans:Tag*
               - savingsplans:Untag*
-              - tax:Batch*
-              - tax:Delete*
-              - tax:Put*
-              - tax:Update*
             Resource: '*'
 
       Tags:
         - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
         - { Key: Purpose,          Value: commercial-billing-readonly }
         - { Key: DesignDoc,        Value: '12' }
 
@@ -401,8 +485,8 @@ Resources:
       Type: String
       Value: !Ref TargetAccountId
       Description: >-
-        Account CommercialReadOnly is assigned to. Deviation D-009 while this
-        is the management account.
+        Account CommercialReadOnly is assigned to: FinOps since 15.9. The
+        management account keeps only CommercialPayerReadOnly (D-009).
       Tags: { platform-managed: 'true' }
 
 Outputs:

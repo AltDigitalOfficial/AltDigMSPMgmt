@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - an organization-wide billing view, shared with
+  the FinOps account, so Cost Explorer there shows every account's cost.
+  Management account, us-east-1. Phase 15.9 step 3.
+
+# ---------------------------------------------------------------------------
+# Why this exists
+# ---------------------------------------------------------------------------
+# A member account's Cost Explorer shows that account only. The payer's
+# billing data reaches another account in two ways: the CUR 2.0 export
+# (finops/00-data-export.yaml), which is the raw data for Athena and
+# report.py, and a custom billing view shared through RAM, which is what
+# makes the Cost Explorer console work from FinOps. Commercial staff use the
+# console, so both are needed for CommercialReadOnly to leave the management
+# account (D-009).
+#
+# The view has no filter: the whole organization. It is shared with exactly
+# one account, FinOps, and never outside the organization.
+#
+# Prerequisite, checked 2026-11-01 rather than set here: Cost Explorer's
+# linked-account access was already on (member accounts can call ce). A
+# shared view does nothing without it.
+#
+#   aws cloudformation deploy --region us-east-1 --profile msp-mgmt \
+#     --stack-name platform-billing-view \
+#     --template-file finops/05-billing-view.yaml \
+#     --parameter-overrides FinOpsAccountId=<finops> \
+#     --tags platform-layer=infrastructure platform-managed=true
+
+Metadata:
+  cfn-lint:
+    config:
+      regions: [us-east-1]
+
+Parameters:
+
+  FinOpsAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: From /platform/org/account/altdig-infra-finops.
+
+Resources:
+
+  OrganizationView:
+    Type: AWS::Billing::BillingView
+    Properties:
+      Name: platform-organization
+      # The API allows letters, digits, spaces and + = . _ - @ only.
+      Description: Every account in the organization - Cost Explorer in the FinOps account
+      SourceViews:
+        - !Sub 'arn:${AWS::Partition}:billing::${AWS::AccountId}:billingview/primary'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  OrganizationViewShare:
+    Type: AWS::RAM::ResourceShare
+    Properties:
+      Name: platform-billing-view-finops
+      AllowExternalPrincipals: false
+      ResourceArns:
+        - !GetAtt OrganizationView.Arn
+      Principals:
+        - !Ref FinOpsAccountId
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+Outputs:
+
+  BillingViewArn:
+    Description: Choose this view in Cost Explorer in the FinOps account.
+    Value: !GetAtt OrganizationView.Arn

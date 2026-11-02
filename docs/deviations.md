@@ -757,6 +757,36 @@ D-007. A billing-only grant over an Organization whose entire spend is one
 sandbox account is a very different proposition from one covering live client
 workloads.
 
+**Narrowed 2026-11-01 (15.9 step 3).** Not closed: the payer half cannot move,
+as recorded above.
+
+- `CommercialReadOnly` is assigned to the FinOps account
+  (`altdig-infra-finops`), not the management account. It reads cost through:
+  - Cost Explorer, using the billing view `platform-organization`, which the
+    management account shares with FinOps through RAM
+    (`finops/05-billing-view.yaml`);
+  - Athena over the CUR 2.0 export (`finops/00-data-export.yaml` and
+    `finops/10-cost-exports.yaml`).
+- `CommercialPayerReadOnly` (`identity/05-commercial-payer-readonly.yaml`)
+  stays in the management account. It covers invoices, payments, credits, tax
+  and purchase orders, with three Organizations reads for account names. It
+  grants no Cost Explorer, Budgets, Data Exports, Cost Optimization Hub,
+  pricing or Savings Plans access. The same group holds both permission sets.
+- Verified: each permission set is provisioned to its one account only, and
+  IAM Access Analyzer reports no findings on either policy.
+
+**The close condition changes.** A billing delegated administrator does not
+make the organization's Cost Explorer readable from a member account; the
+shared billing view is what did. Nothing else here can move, so D-009 now
+records a permanent, narrow payer grant rather than a temporary broad one.
+
+**What it cost:** RAM sharing with the organization was enabled on
+2026-11-01, because billing views can only be shared that way. Any account can
+now share resources with any other account in the organization, with no
+acceptance step. Developers' `PowerUserAccess` includes RAM, so this is
+closed by an SCP on Members (Jamie, 2026-11-01: not deferred, because the same
+customer is discussing more applications).
+
 ---
 
 ## D-010 · Identity Center users and groups are created outside Entra — CLOSES ITSELF

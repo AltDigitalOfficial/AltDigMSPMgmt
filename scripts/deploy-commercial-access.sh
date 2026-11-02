@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
-# Deploy the CommercialReadOnly permission set and reconcile its membership.
+# Deploy the commercial permission sets and reconcile their group's membership.
 #
 # Three things happen here, in order, and each is idempotent:
 #
 #   1. The Identity Center group is created if absent.
-#   2. The permission set and its assignment are deployed by CloudFormation.
+#   2. Both permission sets and their assignments are deployed by
+#      CloudFormation: CommercialPayerReadOnly to the management account, then
+#      CommercialReadOnly to FinOps.
 #   3. Members listed in config/identity.env are created in the identity store
 #      if absent and added to the group if not already in it.
 #
@@ -28,6 +30,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 STACK_NAME=platform-identity-commercial
 TEMPLATE="${REPO_ROOT}/identity/00-commercial-readonly.yaml"
+PAYER_STACK_NAME=platform-identity-commercial-payer
+PAYER_TEMPLATE="${REPO_ROOT}/identity/05-commercial-payer-readonly.yaml"
 IDENTITY_ENV="${REPO_ROOT}/config/identity.env"
 
 while [[ $# -gt 0 ]]; do
@@ -105,23 +109,39 @@ fi
 # 2. Permission set and assignment
 # ---------------------------------------------------------------------------
 
+# Two permission sets for one group since 15.9 (D-009 narrowed):
+#   CommercialPayerReadOnly  management account  invoices, payments, tax
+#   CommercialReadOnly       FinOps              Cost Explorer, Athena
+# The payer set deploys FIRST. Retargeting CommercialReadOnly removes the
+# management-account assignment, and the group must already hold the payer
+# grant at that moment, or invoices are unreachable in between.
+
+FINOPS="$(get_param /org/account/altdig-infra-finops)"
+[[ -n "${FINOPS}" && "${FINOPS}" != "None" ]] \
+  || die "altdig-infra-finops is not registered. Create it first (15.9 step 1)."
+
 hr
 log "Commercial access deploy"
-log "  stack    : ${STACK_NAME}"
 log "  instance : ${INSTANCE_ARN}"
 log "  group    : ${COMMERCIAL_READONLY_GROUP} ${GROUP_ID:-<not yet created>}"
-log "  target   : ${PLATFORM_MGMT_ACCOUNT_ID}  (deviation D-009)"
+log "  payer    : ${PAYER_STACK_NAME} -> ${PLATFORM_MGMT_ACCOUNT_ID} (management, D-009)"
+log "  analysis : ${STACK_NAME} -> ${FINOPS} (FinOps)"
 log "  region   : ${AWS_DEFAULT_REGION}"
 hr
 
 if [[ -n "${GROUP_ID}" ]]; then
+  cfn_deploy "${PAYER_STACK_NAME}" "${PAYER_TEMPLATE}" \
+    "InstanceArn=${INSTANCE_ARN}" \
+    "GroupId=${GROUP_ID}" \
+    "ManagementAccountId=${PLATFORM_MGMT_ACCOUNT_ID}" \
+    "SsmPrefix=${PLATFORM_SSM_PREFIX}"
   cfn_deploy "${STACK_NAME}" "${TEMPLATE}" \
     "InstanceArn=${INSTANCE_ARN}" \
     "GroupId=${GROUP_ID}" \
-    "TargetAccountId=${PLATFORM_MGMT_ACCOUNT_ID}" \
+    "TargetAccountId=${FINOPS}" \
     "SsmPrefix=${PLATFORM_SSM_PREFIX}"
 else
-  skip "stack ${STACK_NAME} — no group id available in this dry run"
+  skip "stacks ${PAYER_STACK_NAME}, ${STACK_NAME} — no group id available in this dry run"
 fi
 
 # ---------------------------------------------------------------------------
@@ -269,8 +289,14 @@ if [[ "${DRY_RUN}" != "1" ]]; then
   hr
   log "Access portal: https://altdigital.awsapps.com/start"
   log ""
-  log "Verify the grant holds, signed in as a group member:"
+  log "Cost analysis is in the FinOps account (CommercialReadOnly). In Cost"
+  log "Explorer there, choose the billing view 'platform-organization'; the"
+  log "default view shows FinOps's own costs only. Invoices, payments and tax"
+  log "are in the management account (CommercialPayerReadOnly)."
+  log ""
+  log "Verify the grant holds, signed in to FinOps as a group member:"
   log "  aws ce get-cost-and-usage --region us-east-1 \\"
+  log "    --billing-view-arn <platform-organization view ARN> \\"
   log "    --time-period Start=\$(date -d '1 month ago' +%Y-%m-01),End=\$(date +%Y-%m-%d) \\"
   log "    --granularity MONTHLY --metrics UnblendedCost"
   log ""
