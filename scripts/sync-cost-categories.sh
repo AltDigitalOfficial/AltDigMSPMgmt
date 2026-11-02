@@ -201,6 +201,24 @@ json.dump(c['Rules'], open(sys.argv[3],'w',encoding='utf-8'))
   fi
 done
 
+# --- cost allocation tags --------------------------------------------------
+# platform-layer only (15.9 step 7; plan section 6.9 as amended by D-031).
+# Owner and Application are carried by account-level Cost Categories, above,
+# and DataClassification stays inactive by decision: activating it would show
+# every billing viewer which resources are regulated (design 12:59-61).
+# Activation is not retroactive; spend is tagged from the day it is on.
+for TAG in platform-layer; do
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    printf '%s DRY%s  activate cost allocation tag %s\n' "${C_YELLOW}" "${C_RESET}" "${TAG}"
+    continue
+  fi
+  aws ce update-cost-allocation-tags-status \
+    --cost-allocation-tags-status "TagKey=${TAG},Status=Active" \
+    --query 'Errors' --output text >/dev/null \
+    || die "Could not activate cost allocation tag ${TAG}."
+  ok "cost allocation tag ${TAG} active"
+done
+
 hr
 info "Cost Explorer takes up to 24 hours to backfill a new category."
 log "  Until then a grouped report shows the dimension with no values, which"
