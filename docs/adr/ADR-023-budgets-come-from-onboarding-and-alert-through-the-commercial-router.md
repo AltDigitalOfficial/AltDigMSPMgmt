@@ -1,8 +1,8 @@
 # ADR-023 — Budgets come from the onboarding questionnaire, per application and tier group, and alert through the commercial router
 
 **Date:** 2026-11-01
-**Deciders:** Jamie (budget amounts come from the onboarding questionnaire, asked as acceptable budgets for the pre-production and production tiers, 2026-11-01); Claude (session), unreviewed (the thresholds, one budget per application and tier group, the storage on the client record, the anomaly monitor and its 25% threshold, the payer topic and Audit bridge, keeping amounts out of the derivation and the repository, the digest notice for an unanswered budget)
-**Status:** Proposed
+**Deciders:** Jamie (budget amounts come from the onboarding questionnaire, asked as acceptable budgets for the pre-production and production tiers, 2026-11-01); Claude (session), unreviewed (the thresholds, one budget per application and tier group, the storage on the client record, the anomaly monitor and its 25% threshold, the payer topic and Audit bridge, keeping amounts out of the derivation and the repository, the digest notice for an unanswered budget). Ratified by Jamie, 2026-11-02
+**Status:** Accepted
 **Tags:** cost, budgets, commercial, questionnaire, phase-15.9
 
 ---
