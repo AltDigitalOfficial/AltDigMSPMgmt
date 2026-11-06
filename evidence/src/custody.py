@@ -33,6 +33,11 @@ integrity has other owners and the record says which:
                  an Object Lock bucket (security/10-log-archive.yaml). The
                  record carries `immutable: false` rather than implying
                  otherwise.
+    flowlogs     Nothing equivalent either. The flow-log bucket is versioned
+                 and unlocked, and expires objects after 400 days (ADR-018):
+                 operational data, outside the evidence floor. Also
+                 `immutable: false`. Added 2026-11-06 (B-134), once flow logs
+                 were collected at all (B-012).
 
 A missing digest is a finding; a quiet hour is not
 --------------------------------------------------
@@ -41,7 +46,8 @@ anything happened. So an absent digest means the trail stopped, or delivery
 did, and it is raised. Zero LOG files in an hour is ordinary -- a quiet region
 writes none -- and is recorded without being raised. Config writes on its own
 schedule (history every six hours, snapshots when asked), so a zero there is
-never a finding either.
+never a finding either. Nor for flow logs: a VPC with no traffic in an interval
+writes no file, and an account with no VPC never writes one.
 
 Hours are closed and self-healing
 ---------------------------------
@@ -80,6 +86,7 @@ ALERT_BUS_NAME = os.environ.get("ALERT_BUS_NAME", "platform-alerts")
 TENANT_MAP_PARAM = os.environ.get("EVIDENCE_TENANT_MAP_PARAM", "/platform/evidence/tenants")
 LOG_ARCHIVE_BUCKET = os.environ.get("LOG_ARCHIVE_BUCKET", "")
 CONFIG_ARCHIVE_BUCKET = os.environ.get("CONFIG_ARCHIVE_BUCKET", "")
+FLOW_LOG_BUCKET = os.environ.get("FLOW_LOG_BUCKET", "")
 ORGANIZATION_ID = os.environ.get("ORGANIZATION_ID", "")
 REGIONS = [r.strip() for r in os.environ.get("LOG_REGIONS", "").split(",") if r.strip()]
 LAG_HOURS = int(os.environ.get("CUSTODY_LAG_HOURS", "3"))
@@ -92,6 +99,7 @@ CONTROL_REF = "log-custody"
 #   123456789012_CloudTrail_us-east-2_20260923T1405Z_abc.json.gz
 #   123456789012_CloudTrail-Digest_us-east-2_trail_us-east-2_20260923T140512Z.json.gz
 #   123456789012_Config_us-east-2_ConfigHistory_AWS::S3::Bucket_20260923T140512Z_20260923T200512Z_1.json.gz
+#   123456789012_vpcflowlogs_us-east-2_fl-0123456789abcdef0_20261031T1910Z_849acceb.log.gz
 # The FIRST match is the file's own time. Config history names carry a second
 # (window end) timestamp, which is why this is not "the last match".
 _STAMP = re.compile(r"_(\d{8})T(\d{2})(\d{2})(\d{2})?Z")
@@ -112,9 +120,10 @@ def _hour_of(key, fallback):
 def _prefixes(source, account, region, hour):
     """Every prefix that can hold this hour's objects. One day folder per source.
 
-    CloudTrail pads month and day; Config does not. Getting that wrong would not
-    raise -- it would list an empty folder and report a silent hour -- which is
-    why both layouts are spelled out rather than formatted from one template.
+    CloudTrail and flow logs pad month and day; Config does not. Getting that
+    wrong would not raise -- it would list an empty folder and report a silent
+    hour -- which is why each layout is spelled out rather than formatted from
+    one template.
     """
     if source == "cloudtrail":
         day = hour.strftime("%Y/%m/%d")
@@ -123,6 +132,11 @@ def _prefixes(source, account, region, hour):
     if source == "config":
         day = f"{hour.year}/{hour.month}/{hour.day}"
         return [f"AWSLogs/{account}/Config/{region}/{day}/"]
+    if source == "flowlogs":
+        # Each account's own flow logs deliver under its own AWSLogs/<account>,
+        # with no organization id: the VPC owner is the requester.
+        day = hour.strftime("%Y/%m/%d")
+        return [f"AWSLogs/{account}/vpcflowlogs/{region}/{day}/"]
     raise ValueError(source)
 
 
@@ -130,6 +144,7 @@ SOURCES = {
     # source: (bucket env, immutable)
     "cloudtrail": (lambda: LOG_ARCHIVE_BUCKET, True),
     "config": (lambda: CONFIG_ARCHIVE_BUCKET, False),
+    "flowlogs": (lambda: FLOW_LOG_BUCKET, False),
 }
 
 
@@ -250,6 +265,7 @@ def _accounts():
 def run(event=None, context=None):
     missing_config = [n for n, v in (("LOG_ARCHIVE_BUCKET", LOG_ARCHIVE_BUCKET),
                                      ("CONFIG_ARCHIVE_BUCKET", CONFIG_ARCHIVE_BUCKET),
+                                     ("FLOW_LOG_BUCKET", FLOW_LOG_BUCKET),
                                      ("ORGANIZATION_ID", ORGANIZATION_ID),
                                      ("LOG_REGIONS", REGIONS),
                                      ("EVIDENCE_LEDGER_TABLE", LEDGER_TABLE),

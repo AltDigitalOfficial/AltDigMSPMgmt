@@ -124,6 +124,15 @@ Parameters:
       versioned and delete-denied but not Object Lock -- see
       security/10-log-archive.yaml for why it cannot be.
 
+  FlowLogBucketName:
+    Type: String
+    Default: ''
+    Description: >-
+      The flow-log archive (altdig-flow-logs-<log archive account>), versioned,
+      unlocked, 400-day expiry (ADR-018). Custody's third source (B-134), and
+      part of HasCustody like the other two. A redeploy that omits it keeps
+      the previous value; one that sets it empty removes custody, so pass it.
+
   OrganizationId:
     Type: String
     Default: ''
@@ -182,6 +191,7 @@ Conditions:
   HasCustody: !And
     - !Not [!Equals [!Ref LogArchiveBucketName, '']]
     - !Not [!Equals [!Ref ConfigArchiveBucketName, '']]
+    - !Not [!Equals [!Ref FlowLogBucketName, '']]
     - !Not [!Equals [!Ref OrganizationId, '']]
 
 Resources:
@@ -778,6 +788,7 @@ Resources:
             Resource:
               - !Sub 'arn:${AWS::Partition}:s3:::${LogArchiveBucketName}'
               - !Sub 'arn:${AWS::Partition}:s3:::${ConfigArchiveBucketName}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${FlowLogBucketName}'
           # UpdateItem to allocate sequence numbers; GetItem/PutItem for the
           # per-hour done-markers kept in the same table.
           - Sid: AllocateAndMark
@@ -836,6 +847,7 @@ Resources:
           EVIDENCE_TENANT_MAP_PARAM: !Ref TenantMapParam
           LOG_ARCHIVE_BUCKET: !Ref LogArchiveBucketName
           CONFIG_ARCHIVE_BUCKET: !Ref ConfigArchiveBucketName
+          FLOW_LOG_BUCKET: !Ref FlowLogBucketName
           ORGANIZATION_ID: !Ref OrganizationId
           LOG_REGIONS: !Join [',', !Ref LogRegions]
           ALERT_BUS_NAME: !Ref AlertBusName

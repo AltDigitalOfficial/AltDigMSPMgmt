@@ -662,29 +662,16 @@ Resources:
   # -------------------------------------------------------------------------
   # Flow log archive — a THIRD bucket
   # -------------------------------------------------------------------------
-  # VPC Flow Logs would not deliver to either existing bucket:
-  # "LogDestination: <bucket> is undeliverable", against the locked bucket AND
-  # against the non-locked Config archive.
+  # VPC Flow Logs would not deliver to either existing bucket ("LogDestination:
+  # <bucket> is undeliverable"). A bare probe bucket with AWS's documented
+  # policy worked, and kept working as SSE-KMS, DenyInsecureTransport, a
+  # delete-deny and versioning were added back one at a time. This bucket was
+  # later refused too, then accepted delivery on 2026-10-29 with no change
+  # found. The full record is B-012 (resolved, cause unknown).
   #
-  # The cause was not isolated. A bare probe bucket with AWS's documented
-  # flow-log policy worked immediately, and stayed working as each suspected
-  # difference was added back to it one at a time — SSE-KMS with the platform
-  # key, DenyInsecureTransport, a delete-deny conditioned on aws:PrincipalArn,
-  # and versioning. All four were exonerated. Something in the accumulated
-  # Config-archive policy is responsible and it was not worth more bisection to
-  # find out which.
-  #
-  # Later, this bucket was refused too. On 2026-10-29 it accepted cross-account
-  # delivery and nothing that could explain the change was found (B-012,
-  # resolved, cause unknown).
-  #
-  # A dedicated bucket is the better answer regardless. The Config archive had
-  # grown statements for Config and then flow logs, and the locked bucket for
-  # CloudTrail and then flow logs; each addition risks the previous one, and a
-  # policy serving three delivery services is a policy nobody can reason about.
-  # One bucket per delivery service, each with the minimal documented policy.
-  #
-  # Modelled exactly on the configuration proved to work, not on what ought to.
+  # One bucket per delivery service regardless: a policy serving three
+  # delivery services is a policy nobody can reason about. Modelled exactly on
+  # the configuration proved to work, not on what ought to.
   FlowLogBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -811,6 +798,20 @@ Resources:
               StringEquals:
                 's3:x-amz-acl': 'bucket-owner-full-control'
                 'aws:SourceOrgID': !Ref OrganizationId
+
+          # Custody's listing grant, as on the other two archives: ListBucket
+          # and nothing else (B-134, 2026-11-06). Placed after the delivery
+          # grants and touching none of them; the bucket's delivery is checked
+          # after every change to this policy (B-012).
+          - !If
+            - HasCustody
+            - Sid: EvidenceCustodyList
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${AuditAccountId}:role/PlatformEvidenceCustody'
+              Action: 's3:ListBucket'
+              Resource: !GetAtt FlowLogBucket.Arn
+            - !Ref AWS::NoValue
 
   LogArchiveBucketPolicy:
     Type: AWS::S3::BucketPolicy
