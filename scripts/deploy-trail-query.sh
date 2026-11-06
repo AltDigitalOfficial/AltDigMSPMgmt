@@ -55,7 +55,9 @@ ALL_ACCOUNTS="$(aws organizations list-accounts \
 ALL_ACCOUNTS="${ALL_ACCOUNTS%,}"
 [[ -n "${ALL_ACCOUNTS}" ]] || die "Could not list Organization accounts."
 
-info "Trail query: $(printf '%s' "${ALL_ACCOUNTS}" | tr ',' '\n' | wc -l | tr -d ' ') accounts projected"
+# grep -c, not wc -l: the list has no trailing newline, and wc counted one
+# fewer account than were projected.
+info "Trail query: $(printf '%s' "${ALL_ACCOUNTS}" | tr ',' '\n' | grep -c .) accounts projected"
 
 DEPLOY_ARGS=(--account "${QUERY_ACCOUNT}" --template security/50-trail-query.yaml
   --stack "${QUERY_STACK}" "OrganizationId=${ORG_ID}" "AccountIds=${ALL_ACCOUNTS}")

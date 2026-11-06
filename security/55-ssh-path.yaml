@@ -1,0 +1,461 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  AltDigital Managed Platform - inbound SSH path detection over the VPC flow
+  logs, in the Log Archive account. Hourly, an Athena query over
+  platform_audit.flowlogs finds inbound TCP 22 that a security group accepted,
+  and each account and target found becomes a dossier on the alert bus in
+  Audit. B-101, design 11.
+
+# ---------------------------------------------------------------------------
+# What it detects, and why traffic rather than configuration
+# ---------------------------------------------------------------------------
+# design 11: "There is no SSH path in this architecture. Inbound on 22
+# appearing in flow logs is a finding in its own right, independent of the
+# telemetry question, and is alarmed directly."
+#
+# cfn-guard's SG_NO_OPEN_INGRESS_EXCEPT_443 refuses a template that opens 22.
+# That is a preventive control on the configuration. This is the detective
+# control on the traffic, and catches what nobody templated: a rule added in
+# the console, a developer's CLI, or anything the guard never sees.
+#
+# The signal is ACCEPT, ingress, TCP, destination port 22. REJECT is left
+# out: a rejected connection is the security group working, and internet
+# scanners would make it permanent noise on every public interface. One
+# accepted flow means a path exists and something used it.
+#
+# ---------------------------------------------------------------------------
+# Who hears it is the router's decision
+# ---------------------------------------------------------------------------
+# The dossier declares no routing class. The router looks up the subject
+# account's tier: digest and Jira in dev and test, a page in uat and prod.
+# This emitter never escalates (CLAUDE.md), and it does not downgrade either,
+# because nothing here knows more than the tier does.
+#
+# Arc8 dev has port 22 open to the internet by ruling (ADR-015), and the
+# ruling requires that exposure in the digest. This is how it arrives there.
+#
+# The title and resource are stable per account and target, so the router's
+# dedup key is too: an hourly repeat updates one item rather than opening
+# another.
+#
+# ---------------------------------------------------------------------------
+# A detector that cannot see is a finding
+# ---------------------------------------------------------------------------
+# Every live interface writes a record each interval, NODATA when idle, so a
+# window with no flow records at all means the table or delivery is broken,
+# not that the estate is quiet. That, a failed query, and any other failure
+# each raise their own dossier, declared digest_and_jira: a downgrade from the
+# page Log Archive's prod tier would give, because a blind detector is a
+# ticket, not an incident. If even that cannot be sent, the function fails and
+# its errors alarm reaches the router through platform-forward-marked-alarms.
+#
+# Overlap: the window is 70 minutes on an hourly schedule, ending 10 minutes
+# back for delivery delay, so no minute falls between two runs.
+
+Parameters:
+
+  AuditAccountId:
+    Type: String
+    AllowedPattern: '^[0-9]{12}$'
+    Description: The Audit account, which holds the alert bus. From /platform/org/account/altdig-security-audit.
+
+  AlertBusName:
+    Type: String
+    Default: platform-alerts
+
+  Schedule:
+    Type: String
+    Default: 'rate(1 hour)'
+
+  LookbackMinutes:
+    Type: Number
+    Default: 70
+    MinValue: 60
+    Description: Window length. Longer than the schedule so consecutive windows overlap.
+
+  LagMinutes:
+    Type: Number
+    Default: 10
+    MinValue: 0
+    Description: How far back the window ends, for flow-log delivery delay.
+
+Resources:
+
+  # Log Archive has no alias/platform-logs: the member baseline creates it and
+  # does not reach platform accounts. Created here under the same alias, as
+  # reporting/10-digest-sender.yaml does for Tooling.
+  LogsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts platform log groups in the Log Archive account
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMPolicyDelegation
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal: { Service: !Sub 'logs.${AWS::Region}.amazonaws.com' }
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  LogsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/platform-logs
+      TargetKeyId: !Ref LogsKey
+
+  DetectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PlatformSshPathDetector
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: QueryFlowLogsAndRaise
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RunQueries
+                Effect: Allow
+                Action: [athena:StartQueryExecution, athena:GetQueryExecution, athena:GetQueryResults]
+                Resource: !Sub 'arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/platform-audit'
+              - Sid: ReadTheTable
+                Effect: Allow
+                Action: [glue:GetDatabase, glue:GetTable, glue:GetPartition, glue:GetPartitions]
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/platform_audit'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/platform_audit/flowlogs'
+              # Flow logs only: not the trail bucket, not the Config archive.
+              - Sid: ReadFlowLogs
+                Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket, s3:GetBucketLocation]
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-${AWS::AccountId}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-flow-logs-${AWS::AccountId}/AWSLogs/*'
+              - Sid: WriteResults
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:ListBucket, s3:GetBucketLocation, s3:AbortMultipartUpload]
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-audit-query-${AWS::AccountId}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::altdig-audit-query-${AWS::AccountId}/results/*'
+              # Keys named by alias and used only through S3, so the role
+              # cannot decrypt anything the archive key protects elsewhere.
+              - Sid: DecryptFlowLogsThroughS3
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                Condition:
+                  'ForAnyValue:StringEquals':
+                    'kms:ResourceAliases': alias/platform-log-archive
+                  StringEquals:
+                    'kms:ViaService': !Sub 's3.${AWS::Region}.amazonaws.com'
+              - Sid: EncryptResultsThroughS3
+                Effect: Allow
+                Action: [kms:GenerateDataKey, kms:Decrypt]
+                Resource: '*'
+                Condition:
+                  'ForAnyValue:StringEquals':
+                    'kms:ResourceAliases': alias/platform-audit-query
+                  StringEquals:
+                    'kms:ViaService': !Sub 's3.${AWS::Region}.amazonaws.com'
+              - Sid: RaiseOnTheAlertBus
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AuditAccountId}:event-bus/${AlertBusName}'
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+
+  DetectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/platform-ssh-path
+      RetentionInDays: 2557
+      KmsKeyId: !GetAtt LogsKey.Arn
+
+  DetectorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DetectorLogGroup
+    Properties:
+      FunctionName: platform-ssh-path
+      Description: Inbound TCP 22 accepted, from the flow logs, to the alert bus. B-101.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DetectorRole.Arn
+      Timeout: 300
+      MemorySize: 128
+      Environment:
+        Variables:
+          ALERT_BUS_ARN: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AuditAccountId}:event-bus/${AlertBusName}'
+          LOOKBACK_MINUTES: !Ref LookbackMinutes
+          LAG_MINUTES: !Ref LagMinutes
+      Tags:
+        - { Key: platform-managed, Value: 'true' }
+        - { Key: platform-layer,   Value: infrastructure }
+      Code:
+        # Inline, tested by scripts/test-ssh-path.py, which loads this exact
+        # text. What is tested is what deploys.
+        ZipFile: |
+          import datetime
+          import json
+          import os
+          import time
+
+          import boto3
+
+          WORKGROUP = "platform-audit"
+          DATABASE = "platform_audit"
+          SAMPLE = 5
+          TITLE = "Inbound SSH accepted (TCP 22)"
+
+          _clients = {}
+
+
+          def _client(name):
+              if name not in _clients:
+                  _clients[name] = boto3.client(name)
+              return _clients[name]
+
+
+          def _now():
+              return datetime.datetime.now(datetime.timezone.utc)
+
+
+          def window(now):
+              end = (now - datetime.timedelta(minutes=int(os.environ.get("LAG_MINUTES", "10")))
+                     ).replace(second=0, microsecond=0)
+              start = end - datetime.timedelta(minutes=int(os.environ.get("LOOKBACK_MINUTES", "70")))
+              return start, end
+
+
+          def _where(start, end):
+              # Partition days first, so the scan is one or two days of one
+              # table, then the exact window. Every value is computed here from
+              # the clock; nothing from an event reaches the SQL.
+              days, d = [], start.date()
+              while d <= end.date():
+                  days.append(f"'{d:%Y/%m/%d}'")
+                  d += datetime.timedelta(days=1)
+              return (f"dt IN ({', '.join(days)}) "
+                      f"AND start_time >= {int(start.timestamp())} "
+                      f"AND start_time < {int(end.timestamp())}")
+
+
+          def ssh_sql(start, end):
+              return (
+                  "SELECT account, region, interface_id, "
+                  "coalesce(nullif(instance_id, '-'), interface_id) AS target, vpc_id, "
+                  "count(*) AS flows, sum(packets) AS packets, "
+                  "count(DISTINCT srcaddr) AS sources, "
+                  f"array_join(slice(array_sort(array_agg(DISTINCT srcaddr)), 1, {SAMPLE}), ',') "
+                  "AS sample_sources, "
+                  "min(start_time) AS first_seen, max(end_time) AS last_seen "
+                  "FROM flowlogs "
+                  "WHERE dstport = 22 AND protocol = 6 AND action = 'ACCEPT' "
+                  f"AND flow_direction = 'ingress' AND {_where(start, end)} "
+                  "GROUP BY 1, 2, 3, 4, 5")
+
+
+          def seen_sql(start, end):
+              return f"SELECT count(*) AS records FROM flowlogs WHERE {_where(start, end)}"
+
+
+          def query(sql, deadline):
+              athena = _client("athena")
+              qid = athena.start_query_execution(
+                  QueryString=sql, WorkGroup=WORKGROUP,
+                  QueryExecutionContext={"Database": DATABASE})["QueryExecutionId"]
+              while True:
+                  st = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]["Status"]
+                  if st["State"] == "SUCCEEDED":
+                      break
+                  if st["State"] in ("FAILED", "CANCELLED"):
+                      raise RuntimeError(f"query {qid} {st['State']}: {st.get('StateChangeReason')}")
+                  if time.time() > deadline:
+                      raise RuntimeError(f"query {qid} still {st['State']} at the deadline")
+                  time.sleep(2)
+              rows, header = [], None
+              for page in athena.get_paginator("get_query_results").paginate(QueryExecutionId=qid):
+                  for r in page["ResultSet"]["Rows"]:
+                      vals = [c.get("VarCharValue") for c in r["Data"]]
+                      if header is None:
+                          header = vals
+                          continue
+                      rows.append(dict(zip(header, vals)))
+              return qid, rows
+
+
+          def _iso(epoch):
+              try:
+                  return datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc).isoformat()
+              except (TypeError, ValueError):
+                  return None
+
+
+          def dossier(row, start, end, qid):
+              flows, sources = row.get("flows"), row.get("sources")
+              return {
+                  "record_type": "ssh-path",
+                  "recorded_at": _now().isoformat(),
+                  "current_state": "ALARM",
+                  "alarm": {"name": TITLE, "account_id": row.get("account"),
+                            "resource_id": row.get("target"), "region": row.get("region")},
+                  "assessment": {"probable_cause": (
+                      f"A security group admitted inbound TCP 22 and traffic used it: "
+                      f"{flows} accepted flow(s) from {sources} source address(es) to "
+                      f"{row.get('target')} between {start.isoformat()} and {end.isoformat()}. "
+                      "Design 11: there is no SSH path in this architecture, so one that "
+                      "carries traffic is a finding in its own right. Session Manager is the "
+                      "supported way in. In dev, ADR-015 makes the exposure the tenant's to "
+                      "mitigate and this report its visibility.")},
+                  "ssh_path": {
+                      "interface_id": row.get("interface_id"), "vpc_id": row.get("vpc_id"),
+                      "flows": flows, "packets": row.get("packets"), "sources": sources,
+                      "sample_sources": (row.get("sample_sources") or "").split(",")[:SAMPLE],
+                      "first_seen": _iso(row.get("first_seen")),
+                      "last_seen": _iso(row.get("last_seen")),
+                      "window": [start.isoformat(), end.isoformat()],
+                      "query_execution_id": qid},
+              }
+
+
+          def blind(name, cause, account):
+              # Declared digest_and_jira: a downgrade from the page this prod
+              # account's tier would give. A blind detector is a ticket.
+              return {
+                  "record_type": "ssh-path-detector",
+                  "recorded_at": _now().isoformat(),
+                  "current_state": "ALARM",
+                  "routing": "digest_and_jira",
+                  "alarm": {"name": name, "account_id": account, "resource_id": "platform-ssh-path"},
+                  "assessment": {"probable_cause": cause},
+              }
+
+
+          def send(details):
+              bus = os.environ["ALERT_BUS_ARN"]
+              entries = [{"EventBusName": bus, "Source": "platform.network",
+                          "DetailType": "Platform Incident Dossier",
+                          "Detail": json.dumps(d, default=str)} for d in details]
+              for i in range(0, len(entries), 10):
+                  resp = _client("events").put_events(Entries=entries[i:i + 10])
+                  if resp.get("FailedEntryCount"):
+                      raise RuntimeError(f"PutEvents failed: {resp.get('Entries')}")
+
+
+          def run(now=None, context=None, account=None):
+              now = now or _now()
+              start, end = window(now)
+              deadline = time.time() + (
+                  (context.get_remaining_time_in_millis() / 1000 - 20) if context else 240)
+              _, seen = query(seen_sql(start, end), deadline)
+              records = int((seen[0] if seen else {}).get("records") or 0)
+              if records == 0:
+                  send([blind(
+                      "SSH-path detector blind: no flow-log records in its window",
+                      (f"platform_audit.flowlogs returned no records at all between "
+                       f"{start.isoformat()} and {end.isoformat()}. Every live interface writes "
+                       "one each interval, NODATA when idle, so this is the table or delivery "
+                       "failing, not a quiet estate. Inbound SSH went unwatched for the window. "
+                       "Check flow-log delivery to altdig-flow-logs-<log archive> and the "
+                       "table's projection (security/50-trail-query.yaml)."),
+                      account)])
+                  out = {"record_type": "ssh-path-run", "records": 0, "found": 0, "blind": True}
+                  print(json.dumps(out))
+                  return out
+              qid, rows = query(ssh_sql(start, end), deadline)
+              if rows:
+                  send([dossier(r, start, end, qid) for r in rows])
+              out = {"record_type": "ssh-path-run", "window": [start.isoformat(), end.isoformat()],
+                     "records": records, "found": len(rows),
+                     "targets": [f"{r.get('account')}/{r.get('target')}" for r in rows]}
+              print(json.dumps(out))
+              return out
+
+
+          def handler(event, context=None):
+              account = (getattr(context, "invoked_function_arn", "") or "::::").split(":")[4] or None
+              try:
+                  return run(context=context, account=account)
+              except Exception as exc:  # noqa: BLE001
+                  try:
+                      send([blind("SSH-path detector failed",
+                                  (f"platform-ssh-path did not complete: {type(exc).__name__}: "
+                                   f"{exc}"[:900] + ". Inbound SSH went unwatched for this "
+                                   "window; the next run covers the overlap only."), account)])
+                  finally:
+                      raise
+
+  DetectorRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: platform-ssh-path
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      Targets:
+        - Id: detector
+          Arn: !GetAtt DetectorFunction.Arn
+
+  DetectorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DetectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DetectorRule.Arn
+
+  DetectorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: platform-ssh-path-errors
+      AlarmDescription: >-
+        The SSH-path detector failed, and may not have been able to say so on
+        the alert bus. Inbound TCP 22 is unwatched until it runs again. Read
+        /aws/lambda/platform-ssh-path in Log Archive.
+
+        [platform-routing] routing=digest_and_jira layer=infrastructure urgency=low
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DetectorFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+
+  FunctionName:
+    Value: !Ref DetectorFunction

@@ -4112,6 +4112,22 @@ actually are before wiring the IAM policy — a question the test never asks.
 
 ## B-101 · Inbound port 22 detection needs Athena over S3 flow logs
 
+**Built 2026-11-06** (ADR-024, Proposed). Its trigger had fired twice: the trail
+query (ADR-008) and FinOps each have an Athena workgroup.
+- `security/50-trail-query.yaml` adds `platform_audit.flowlogs`, projected over
+  the same account list, and a saved query `inbound-ssh-accepted`.
+- `security/55-ssh-path.yaml` runs in Log Archive hourly. Each account and
+  target with accepted inbound TCP 22 becomes a `platform.network` dossier on
+  Audit's alert bus. No routing class is declared, so the router's tier
+  decides.
+- A run that sees no flow records at all, or fails, raises its own
+  `digest_and_jira` finding.
+- First run: one target, Arc8 dev's instance, which ADR-015 records with 22
+  open. The router routed it `digest_and_jira` at tier dev [verified
+  2026-11-06].
+
+The text below is the record as it stood before.
+
 **Deferred with a trigger** — 2026-09-21.
 
 design 11 and prompt 10.3 both ask for it:

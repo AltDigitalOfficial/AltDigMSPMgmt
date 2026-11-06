@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
 Description: >-
-  AltDigital Managed Platform - a queryable view of the organization trail, in
-  the Log Archive account. Athena workgroup platform-audit, a Glue table over
-  the archive with partition projection, an encrypted results bucket, and the
-  queries an auditor asks first.
+  AltDigital Managed Platform - a queryable view of the organization trail and
+  the VPC flow logs, in the Log Archive account. Athena workgroup
+  platform-audit, Glue tables over both archives with partition projection, an
+  encrypted results bucket, and the queries an auditor asks first.
 
 # ---------------------------------------------------------------------------
 # Why it exists
@@ -78,6 +78,20 @@ Parameters:
     Type: String
     Default: '2026/09/01'
     Description: First day projected, yyyy/MM/dd. Earlier than the trail's first object is harmless.
+    AllowedPattern: '^[0-9]{4}/[0-9]{2}/[0-9]{2}$'
+
+  FlowLogRegions:
+    Type: CommaDelimitedList
+    Default: 'us-east-1,us-east-2,us-west-2'
+    Description: >-
+      Regions projected for flow logs. The allowed regions only: a VPC cannot
+      exist outside them (SCP 06), so unlike the trail there is nothing to
+      find elsewhere.
+
+  FlowLogStartDate:
+    Type: String
+    Default: '2026/10/29'
+    Description: First flow-log day projected, yyyy/MM/dd. The first delivery that held (B-012).
     AllowedPattern: '^[0-9]{4}/[0-9]{2}/[0-9]{2}$'
 
   BytesScannedCutoffPerQuery:
@@ -295,6 +309,88 @@ Resources:
             # digest's ClickOps signal reads it (ADR-004).
             - { Name: sessioncredentialfromconsole, Type: string }
 
+  # VPC flow logs, as baseline/40-network.yaml writes them: space-delimited
+  # text, one header line per file, the 29 fields of its LogFormat in that
+  # order. The table reads by POSITION, so these columns must follow that
+  # template's field order exactly; the network baseline adds fields only at
+  # the end for this reason. Names are the format's with underscores.
+  #
+  # `start_time` and `end_time` rather than the format's `start` and `end`:
+  # END is reserved in Athena's SQL, the same trap `dt` avoids above. And
+  # `region_name`, because `region` is already the partition. A field the
+  # record leaves as "-" reads as NULL in an integer column.
+  #
+  # Each account delivers under its own AWSLogs/<account>, with no
+  # organization id, which is why the location differs from the trail's.
+  # Added for B-101 (inbound port 22); also the operational record an
+  # investigation reads (ADR-018).
+  FlowLogTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref AuditDatabase
+      TableInput:
+        Name: flowlogs
+        Description: VPC flow logs, every platform VPC, partitioned by account, region and day.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: csv
+          skip.header.line.count: '1'
+          projection.enabled: 'true'
+          projection.account.type: enum
+          projection.account.values: !Join [',', !Ref AccountIds]
+          projection.region.type: enum
+          projection.region.values: !Join [',', !Ref FlowLogRegions]
+          projection.dt.type: date
+          projection.dt.format: yyyy/MM/dd
+          projection.dt.range: !Sub '${FlowLogStartDate},NOW'
+          projection.dt.interval: '1'
+          projection.dt.interval.unit: DAYS
+          storage.location.template: !Sub 's3://altdig-flow-logs-${AWS::AccountId}/AWSLogs/${!account}/vpcflowlogs/${!region}/${!dt}'
+        PartitionKeys:
+          - { Name: account, Type: string }
+          - { Name: region, Type: string }
+          - { Name: dt, Type: string }
+        StorageDescriptor:
+          Location: !Sub 's3://altdig-flow-logs-${AWS::AccountId}/AWSLogs/'
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+            Parameters:
+              field.delim: ' '
+              serialization.format: ' '
+          Columns:
+            - { Name: version, Type: int }
+            - { Name: account_id, Type: string }
+            - { Name: interface_id, Type: string }
+            - { Name: srcaddr, Type: string }
+            - { Name: dstaddr, Type: string }
+            - { Name: srcport, Type: int }
+            - { Name: dstport, Type: int }
+            - { Name: protocol, Type: bigint }
+            - { Name: packets, Type: bigint }
+            - { Name: bytes, Type: bigint }
+            - { Name: start_time, Type: bigint }
+            - { Name: end_time, Type: bigint }
+            - { Name: action, Type: string }
+            - { Name: log_status, Type: string }
+            - { Name: vpc_id, Type: string }
+            - { Name: subnet_id, Type: string }
+            - { Name: instance_id, Type: string }
+            - { Name: tcp_flags, Type: int }
+            - { Name: type, Type: string }
+            - { Name: pkt_srcaddr, Type: string }
+            - { Name: pkt_dstaddr, Type: string }
+            - { Name: region_name, Type: string }
+            - { Name: az_id, Type: string }
+            - { Name: sublocation_type, Type: string }
+            - { Name: sublocation_id, Type: string }
+            - { Name: pkt_src_aws_service, Type: string }
+            - { Name: pkt_dst_aws_service, Type: string }
+            - { Name: flow_direction, Type: string }
+            - { Name: traffic_path, Type: int }
+
   # -------------------------------------------------------------------------
   # The first questions
   # -------------------------------------------------------------------------
@@ -423,6 +519,28 @@ Resources:
           AND dt >= date_format(current_date - interval '90' day, '%Y/%m/%d')
         GROUP BY 1, 2, 3, 4, 5
         ORDER BY denials DESC
+
+  # The question security/55-ssh-path.yaml asks every hour, over a longer
+  # window: an SSH path that exists, shown by traffic that used it.
+  QueryInboundSsh:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: inbound-ssh-accepted
+      Description: Inbound TCP 22 that a security group accepted, by account and interface. Design 11 -- there is no SSH path in this architecture. B-101.
+      WorkGroup: !Ref AuditWorkGroup
+      Database: !Ref AuditDatabase
+      QueryString: |
+        SELECT account, region, interface_id, instance_id,
+               count(*) AS flows,
+               count(DISTINCT srcaddr) AS sources,
+               from_unixtime(min(start_time)) AS first_seen,
+               from_unixtime(max(end_time)) AS last_seen
+        FROM flowlogs
+        WHERE dstport = 22 AND protocol = 6 AND action = 'ACCEPT'
+          AND flow_direction = 'ingress'
+          AND dt >= date_format(current_date - interval '30' day, '%Y/%m/%d')
+        GROUP BY 1, 2, 3, 4
+        ORDER BY flows DESC
 
 Outputs:
 

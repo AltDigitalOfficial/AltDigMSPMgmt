@@ -452,9 +452,13 @@ Resources:
         # watch (scripts/check-macie-cost.sh), both ADR-017. platform.secrets
         # is the re-issue reminder (security/90-secret-age.yaml, ADR-020). All
         # three put straight onto this bus in this account, as containment does.
+        #
+        # platform.network is inbound SSH from the flow logs
+        # (security/55-ssh-path.yaml, B-101). It runs in Log Archive and puts
+        # onto this bus across accounts, under the bus's organization grant.
         source: ['platform.response', 'platform.recovery', 'platform.security',
                  'platform.change', 'platform.scope', 'platform.cost',
-                 'platform.secrets']
+                 'platform.secrets', 'platform.network']
         detail-type: ['Platform Incident Dossier']
       State: ENABLED
       Targets:
@@ -495,6 +499,7 @@ Resources:
               - platform.scope
               - platform.cost
               - platform.secrets
+              - platform.network
       State: ENABLED
       Targets:
         - Id: router
