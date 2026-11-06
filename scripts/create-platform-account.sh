@@ -251,6 +251,23 @@ else
   warn "Trail query not updated. Run scripts/deploy-trail-query.sh"
 fi
 
+# Three more lists that iterate accounts and were not refreshed for
+# altdig-infra-finops. Found 2026-11-06, five days after it was created: it had
+# no registry record, so the Cost Categories left it out and the cost report
+# could not place its spend, and the evidence tenant map lacked it, so log
+# custody never attested its logs. Registration first, because the Cost
+# Categories are built from the registry. The tenant map reads platform
+# accounts from /platform/org/account/, which already holds the new one; it
+# was simply never re-run.
+for step in register-platform-accounts sync-cost-categories sync-evidence-tenants; do
+  info "Running ${step}"
+  if bash "${REPO_ROOT}/scripts/${step}.sh" >/dev/null 2>&1; then
+    ok "${step} includes ${ACCOUNT_ID}"
+  else
+    warn "${step} did not complete. Run scripts/${step}.sh"
+  fi
+done
+
 hr
 ok "${CANONICAL_ALIAS} = ${ACCOUNT_ID}   (alias: ${ALIAS})"
 log ""

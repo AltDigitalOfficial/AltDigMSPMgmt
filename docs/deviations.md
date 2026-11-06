@@ -1976,3 +1976,76 @@ with event volume, not with object size.
 - a tenant's volume makes Standard storage of the archive material. Then the
   design should be revisited (S3 Intelligent-Tiering does not help: objects
   under 128 KB are never moved, and are not charged its monitoring fee).
+
+## D-035 · The billing export is encrypted with S3's own key, not a customer-managed one
+
+**Design position** — [04](../design/04-security-controls-and-evidence.md),
+*Encryption at rest*: customer-managed keys, not AWS-managed.
+
+**Actual** — the CUR 2.0 objects in `altdig-cost-exports-<finops>` are SSE-S3
+(`AES256`). The bucket's default is SSE-KMS under `alias/platform-cost`, and
+the key grants the Data Exports service what it needs. The first delivery,
+2026-11-06, ignored both: the data file, its manifest and AWS's own access-test
+object are all `AES256` [verified 2026-11-06].
+
+**Reason** — Data Exports sets SSE-S3 on every object it writes. That explicit
+header overrides a bucket default. AWS documents that SSE-KMS can only be
+applied after delivery ([Data protection in Data
+Exports](https://docs.aws.amazon.com/cur/latest/userguide/data-protection.html)).
+There is no export setting for a key.
+
+Re-encrypting after delivery was rejected:
+- It needs a function that copies each object onto itself with SSE-KMS.
+  OVERWRITE_REPORT rewrites the month's files daily, so that is a daily copy.
+- The bucket is versioned, so every SSE-S3 original survives as a noncurrent
+  version for 30 days anyway. Re-encryption would shorten that window, not
+  close it.
+- It is a writer on the export bucket that exists only to change encryption,
+  and its failure would be silent.
+
+**Cost** — what the customer-managed key would have added is a key policy as a
+second gate on reading, and CloudTrail `Decrypt` events naming every reader.
+- The first is held instead by the account: billing data lives only in the
+  FinOps account, which no tenant or developer principal can reach.
+- The bucket policy admits only the delivery service, and readers come through
+  `CommercialReadOnly`.
+- The second is partly held by S3 data events, which the organization trail
+  records (ADR-013).
+
+The data is billing line items: spend, usage and account names. It is not
+regulated data.
+
+**Closing condition** — Data Exports offers a key setting for its S3
+destination, or design 04 is amended to name AWS-delivered exports as an
+exception. Then remove this record, or the bucket default it leaves in place.
+
+## D-036 · Shared platform cost is allocated to tenants in one internal report, never in billing
+
+**Design position** — [10](../design/10-commercial-model.md): shared platform
+cost (management, Security and Infrastructure accounts) is absorbed into the
+percentage uplift, never allocated. Design 10 says nothing about an internal
+allocation view. Phase 15.9 step 5 asked for Cost Category split-charge rules
+allocating that cost across tenants by spend.
+
+**Actual** — no split-charge rules. One saved Athena query in FinOps,
+`internal-shared-cost-allocation` (`finops/10-cost-exports.yaml`), computes
+each tenant's share of shared cost per billing period, and its fully loaded
+multiple. It is for AltDigital's view of what a tenant costs to run.
+`cost/src/report.py` still treats shared cost as absorbed, and the invoice
+lines are unchanged.
+
+**Reason** — F-8 (`docs/phase-15-plan.md` §6.8). Allocated cost inside a
+tenant's raw AWS figure would carry the uplift as well: cost-plus on top of
+cost-plus, which open item X3 exists to prevent. The allocation is still worth
+knowing, which is B-090's question. F-8 said "an Athena view". It is a saved
+query instead: a CloudFormation-managed view is a Glue table holding
+base64-encoded Presto text, fragile to maintain for a report a person runs.
+
+**Cost** — a number exists that must never reach a tenant. The exclusion is
+tested, not trusted: `scripts/test-cost-report.py` fails if any script,
+template or function other than the FinOps template names the query, and
+asserts that the report's SQL reads only `cur2`.
+
+**Closing condition** — design 10 adopts allocation for pricing, or the
+report is no longer wanted. In either case, remove the query and the test
+together.

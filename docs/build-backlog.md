@@ -3607,6 +3607,11 @@ completeness counter sat downstream of the decision about what to sweep.
 
 ## B-090 · Three cost reports nobody has asked the data for yet
 
+**Shared services cost: built as a query, 2026-11-06.** The saved query
+`internal-shared-cost-allocation` in FinOps (F-8, D-036) produces the number.
+It is not a scheduled or delivered artefact. The other two reports are
+unchanged.
+
 **Deferred with triggers** — 2026-09-20, raised by Jamie while starting 9.2.
 
 Prompt 9.2 builds one report: the **monthly tenant cost report** — raw AWS
@@ -4169,7 +4174,7 @@ Prompt 11.1 asks for five things. Three exist:
 | `CommercialReadOnly` permission set | Built — `identity/00-commercial-readonly.yaml` |
 | Monthly per-tenant cost report (raw, flat fee, uplift, separately) | Built in 9.2 — `cost/src/report.py` |
 | Delegated Cost Explorer access | Partly: Cost Categories exist in the payer; delegation does not |
-| CUR export to S3 in a dedicated reporting account | **Not built** |
+| CUR export to S3 in a dedicated reporting account | **Built 2026-11-06** in 15.9 (B-180): FinOps account, `platform_cost.cur2` |
 | Portfolio view by service model | **Not built** |
 
 The cost report is word-for-word the same deliverable as prompt 9.2's last
@@ -8223,3 +8228,47 @@ no depth alarm is the B-156 shape.
   platform key. They exist, so this only matters if they are recreated.
 - Superseded secret versions stay on the AWS-managed key until Secrets
   Manager prunes them (ADR-019, negative consequences).
+
+## B-180 · Phase 15.9 closing record
+
+**Recorded** — 2026-11-06. What 15.9 built, step by step, and what is still
+owed. Spend appears here only as ratios.
+
+- **1. FinOps account.** `altdig-infra-finops`, created 2026-11-01 in the
+  Infrastructure OU. It was left out of the registry, the Cost Categories and
+  the evidence tenant map for five days. All three were refreshed on
+  2026-11-06, and `create-platform-account.sh` now runs them.
+- **2. Billing export.** CUR 2.0 `platform-cur2` delivers across accounts to
+  `altdig-cost-exports-<finops>`, with seven-year retention. The first delivery
+  came on 2026-11-06, four days after creation, and covers 2026-11 only; no
+  backfill was requested. It is SSE-S3, not the platform key, because the
+  service overrides the bucket default (D-035).
+- **3. Commercial access.** Split by account (ADR-022, D-009 narrowed): payer
+  documents in the management account, analysis in FinOps. RAM organization
+  sharing is on, and SCP 07 v2 blocks member-account sharing.
+- **4. The report.** `cost/src/report.py` reads `platform_cost.cur2`
+  through Athena.
+  - It keeps the list-vs-net basis check and `RatesNotSet`.
+  - It reads CUR's snake-case category names.
+  - It counts the lines that carry a net figure, which is none while there
+    are no discounts.
+  - It reports spend with no tenant instead of billing it as "unregistered".
+  - It says when a month was never exported.
+  - Live run on 2026-11-06: Arc8's tenant `oeight` is not billable because
+    the rates define no Model A rate. Pricing is not set here.
+- **5. Allocation.** No split-charge rules (F-8). One internal saved query,
+  tested as unreachable from invoicing (D-036). Arc8's fully loaded cost for
+  2026-11 to date is 2.41× its own AWS spend.
+- **6. Budgets and anomalies.** From questionnaire 13.2a/b (ADR-023, accepted).
+  Arc8 pre-production is live.
+- **7. Cost allocation tag.** `platform-layer` is active.
+- **8. Overhead.** Reported as ratios in the session, not here.
+
+**Still owed:**
+- A Model A rate, or the rates marked contractual. These are human pricing
+  decisions (design 10).
+- Whether the rates parameter moves from the management account to FinOps.
+  Today a FinOps-only session can query the export but cannot read the rates,
+  so `CommercialReadOnly` alone cannot produce the report.
+- A backfill of 2026-09 and 2026-10, if those months are ever invoiced from
+  the export. Cost Explorer still holds them.

@@ -49,24 +49,61 @@ saying it happened.
 So the report compares unblended against net-unblended every run and reports
 the basis it used. When they differ it says so loudly instead of continuing to
 produce believable-looking numbers.
+
+Where the numbers come from: the CUR 2.0 export, not Cost Explorer
+------------------------------------------------------------------
+Phase 15.9 step 4. The report reads platform_cost.cur2 in the FinOps account
+through Athena workgroup platform-finops (finops/10-cost-exports.yaml), one
+query per month. Three things differ from Cost Explorer, each found in the
+first delivery (2026-11-06), and each handled here rather than assumed away:
+
+    category names   CUR rewrites them: Tenant -> tenant, AccountKind ->
+                     account_kind, ServiceModel -> service_model. The map is
+                     read with element_at, which answers NULL for an absent
+                     key; a subscript would fail the whole query.
+    net columns      line_item_net_unblended_cost was NULL on every line, with
+                     no discounts in the estate. NULL is read as "equal to
+                     unblended" for the arithmetic, and the output says how
+                     many lines carried a net figure, so the basis check never
+                     passes in silence.
+    no backfill      the export began with 2026-11. An earlier month has no
+                     rows at all, which must not read as a month of no spend.
+
+Tax lines are included in raw AWS cost, as they were in Cost Explorer's
+UnblendedCost. Whether the uplift applies to tax is a pricing decision, not
+this report's.
+
+Spend with no tenant is reported, not billed
+--------------------------------------------
+An account the Cost Categories do not cover has no tenant. Cost Explorer
+answered "Tenant$" for it and the first version billed it as a tenant called
+"unregistered", at the default rate. Here it is its own figure, with the
+accounts named, and a warning: a platform account created after the last
+scripts/sync-cost-categories.sh run lands here (the FinOps account did, on its
+first day).
 """
 import datetime
 import json
 import os
+import time
 
 import boto3
 
-ce = boto3.client("ce")
+athena = boto3.client("athena")
 ssm = boto3.client("ssm")
 
 RATES_PARAM = os.environ.get("COST_RATES_PARAM", "/platform/cost/rates")
+WORKGROUP = os.environ.get("COST_WORKGROUP", "platform-finops")
+DATABASE = os.environ.get("COST_DATABASE", "platform_cost")
+TABLE = os.environ.get("COST_TABLE", "cur2")
+QUERY_TIMEOUT_SECONDS = int(os.environ.get("COST_QUERY_TIMEOUT_SECONDS", "240"))
 
-# The Cost Categories sync creates these. Named here because the report is
-# useless without them, and a missing category should say which one rather
-# than returning an empty grouping.
-TENANT_CATEGORY = os.environ.get("COST_TENANT_CATEGORY", "Tenant")
-KIND_CATEGORY = os.environ.get("COST_KIND_CATEGORY", "AccountKind")
-MODEL_CATEGORY = os.environ.get("COST_MODEL_CATEGORY", "ServiceModel")
+# The Cost Categories sync creates these, and CUR writes them in snake case.
+# Named here because the report is useless without them, and a missing
+# category should say which one rather than returning an empty grouping.
+TENANT_KEY = os.environ.get("COST_TENANT_KEY", "tenant")
+KIND_KEY = os.environ.get("COST_KIND_KEY", "account_kind")
+MODEL_KEY = os.environ.get("COST_MODEL_KEY", "service_model")
 
 # Cost Category values that mean "the registry did not say". A tenant whose
 # accounts carry one of these is billed at the `default` rate, as designed.
@@ -99,17 +136,20 @@ class RatesUnreadable(Exception):
     """
 
 
+class BillingDataUnreadable(Exception):
+    """The export could not be queried. Not the same as a month of no spend."""
+
+
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
 def _month_bounds(month):
-    """(start, end) for a YYYY-MM, as Cost Explorer wants them.
+    """(start, end) for a YYYY-MM, end EXCLUSIVE: the first of the next month.
 
-    End is EXCLUSIVE and is the first of the next month. Cost Explorer treats
-    it that way, and an inclusive reading here would silently drop the last day
-    of every month -- roughly 3% of every invoice, consistently, in AltDigital's
-    favour. The kind of error that is embarrassing rather than expensive.
+    Reported in the output so a reader can see the period. The query itself
+    selects by billing_period, which is the whole month by construction, so
+    the inclusive-end error this once guarded against cannot occur there.
     """
     year, mon = (int(p) for p in month.split("-"))
     start = datetime.date(year, mon, 1)
@@ -146,31 +186,63 @@ def rates():
     return models, bool(data.get("rates_are_contractual"))
 
 
-def _ce_month(start, end, group_by, metrics):
-    return ce.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="MONTHLY",
-        Metrics=metrics,
-        GroupBy=group_by,
-    )
+def month_sql(month):
+    """One row per (tenant, kind, model, account) for the month.
+
+    `month` is validated as YYYY-MM before it reaches here; nothing else from
+    the event enters the SQL.
+    """
+    return (
+        f"SELECT element_at(cost_category, '{TENANT_KEY}') AS tenant, "
+        f"element_at(cost_category, '{KIND_KEY}') AS kind, "
+        f"element_at(cost_category, '{MODEL_KEY}') AS model, "
+        "line_item_usage_account_id AS account, "
+        "sum(line_item_unblended_cost) AS unblended, "
+        "sum(coalesce(line_item_net_unblended_cost, line_item_unblended_cost)) AS net, "
+        "count(line_item_net_unblended_cost) AS net_lines, "
+        "count(*) AS lines "
+        f"FROM {TABLE} WHERE billing_period = '{month}' "
+        "GROUP BY 1, 2, 3, 4")
 
 
-def _amount(group, metric):
-    return float(group["Metrics"][metric]["Amount"])
-
-
-def _period_total(start, end):
-    """Ungrouped spend for the period, to tell 'nothing' from 'not grouped'."""
+def _query(sql):
+    """Rows as dicts. Raises BillingDataUnreadable on any failure."""
     try:
-        result = ce.get_cost_and_usage(
-            TimePeriod={"Start": start, "End": end},
-            Granularity="MONTHLY", Metrics=["UnblendedCost"])
-        return sum(float(r["Total"]["UnblendedCost"]["Amount"])
-                   for r in result.get("ResultsByTime", []))
-    except Exception:                              # noqa: BLE001
-        # Unknown, and must not be reported as zero -- zero is one of the two
-        # answers this call exists to distinguish.
-        return None
+        qid = athena.start_query_execution(
+            QueryString=sql, WorkGroup=WORKGROUP,
+            QueryExecutionContext={"Database": DATABASE})["QueryExecutionId"]
+        deadline = time.time() + QUERY_TIMEOUT_SECONDS
+        while True:
+            st = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]["Status"]
+            if st["State"] == "SUCCEEDED":
+                break
+            if st["State"] in ("FAILED", "CANCELLED"):
+                raise BillingDataUnreadable(
+                    f"query {qid} {st['State']}: {st.get('StateChangeReason')}")
+            if time.time() > deadline:
+                raise BillingDataUnreadable(f"query {qid} still {st['State']} at the deadline")
+            time.sleep(2)
+        rows, header = [], None
+        for page in athena.get_paginator("get_query_results").paginate(QueryExecutionId=qid):
+            for r in page["ResultSet"]["Rows"]:
+                vals = [c.get("VarCharValue") for c in r["Data"]]
+                if header is None:
+                    header = vals
+                    continue
+                rows.append(dict(zip(header, vals)))
+        return rows
+    except BillingDataUnreadable:
+        raise
+    except Exception as exc:                       # noqa: BLE001
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        raise BillingDataUnreadable(
+            f"could not query {DATABASE}.{TABLE} in workgroup {WORKGROUP}: "
+            f"{code or type(exc).__name__}. Run in the FinOps account, as "
+            "CommercialReadOnly or an operator.") from exc
+
+
+def _f(value):
+    return float(value) if value not in (None, "") else 0.0
 
 
 def report(event=None, context=None):
@@ -183,6 +255,10 @@ def report(event=None, context=None):
         first = today.replace(day=1)
         last_month = first - datetime.timedelta(days=1)
         month = f"{last_month.year:04d}-{last_month.month:02d}"
+    try:
+        datetime.datetime.strptime(month, "%Y-%m")
+    except ValueError:
+        raise ValueError(f"month must be YYYY-MM, got {month!r}")
     start, end = _month_bounds(month)
 
     try:
@@ -197,85 +273,67 @@ def report(event=None, context=None):
         print(json.dumps(out, default=str))
         return out
 
-    # Both metrics, every run. See the module docstring: the day these diverge
-    # is the day the uplift starts being billed on the wrong basis, and nothing
-    # else in the platform would notice.
-    grouped = _ce_month(
-        start, end,
-        [{"Type": "COST_CATEGORY", "Key": TENANT_CATEGORY},
-         {"Type": "COST_CATEGORY", "Key": KIND_CATEGORY}],
-        ["UnblendedCost", "NetUnblendedCost"])
+    try:
+        rows = _query(month_sql(month))
+    except BillingDataUnreadable as exc:
+        out = {"record_type": "tenant-cost-report", "month": month,
+               "produced": False, "blocked_by": type(exc).__name__,
+               "reason": str(exc)}
+        print(json.dumps(out, default=str))
+        return out
 
     tenants = {}
     shared_total = 0.0
     discount_delta = 0.0
-    # How many groups Cost Explorer returned AT ALL.
+    uncategorized_total, uncategorized_accounts = 0.0, set()
+    total, net_lines, lines_seen = 0.0, 0, 0
+    # How many categorised groups the export returned.
     #
     # "No tenants" has two causes and they look identical in the output:
     #
-    #   every account is kind=shared        correct, and true today
-    #   the Cost Categories have not        Cost Explorer takes up to 24 hours
-    #   backfilled yet                      to populate a newly created one
+    #   every account is kind=shared        correct while only AltDigital's
+    #                                       own estate exists
+    #   the Cost Categories are not         newly created, or the sync has
+    #   answering                           not run
     #
     # A billing report that cannot tell those apart would show a customer
     # nothing and look healthy doing it. Counted rather than inferred.
     groups_seen = 0
-    for result in grouped.get("ResultsByTime", []):
-        for group in result.get("Groups", []):
-            groups_seen += 1
-            tenant, kind = (group["Keys"] + ["", ""])[:2]
-            tenant = tenant.split("$", 1)[-1] or "unregistered"
-            kind = kind.split("$", 1)[-1] or "unknown"
-            gross = _amount(group, "UnblendedCost")
-            net = _amount(group, "NetUnblendedCost")
-            discount_delta += gross - net
+    for row in rows:
+        gross, net = _f(row.get("unblended")), _f(row.get("net"))
+        total += gross
+        discount_delta += gross - net
+        net_lines += int(_f(row.get("net_lines")))
+        lines_seen += int(_f(row.get("lines")))
+        tenant, kind = row.get("tenant"), row.get("kind") or "unknown"
+        if not tenant:
+            uncategorized_total += gross
+            uncategorized_accounts.add(row.get("account"))
+            continue
+        groups_seen += 1
 
-            if kind == "shared":
-                # design 10: absorbed into the percentage uplift, never
-                # allocated. Reported as its own figure because absorbing a
-                # cost is not a reason to be unable to see it -- and because
-                # B-090's report needs this number to exist.
-                shared_total += gross
-                continue
+        if kind == "shared":
+            # design 10: absorbed into the percentage uplift, never
+            # allocated. Reported as its own figure because absorbing a
+            # cost is not a reason to be unable to see it -- and because
+            # B-090's report needs this number to exist.
+            shared_total += gross
+            continue
 
-            entry = tenants.setdefault(tenant, {"raw_aws_cost": 0.0,
-                                                "accounts": set()})
-            entry["raw_aws_cost"] += gross
-
-    # Account counts, for the per-account flat fee.
-    accounts = _ce_month(
-        start, end,
-        [{"Type": "DIMENSION", "Key": "LINKED_ACCOUNT"},
-         {"Type": "COST_CATEGORY", "Key": TENANT_CATEGORY}],
-        ["UnblendedCost"])
-    for result in accounts.get("ResultsByTime", []):
-        for group in result.get("Groups", []):
-            account_id, tenant = (group["Keys"] + ["", ""])[:2]
-            tenant = tenant.split("$", 1)[-1] or "unregistered"
-            if tenant in tenants:
-                tenants[tenant]["accounts"].add(account_id)
-
-    # Each tenant's service model, from the ServiceModel Cost Category, which
-    # scripts/sync-cost-categories.sh builds from the registry's account
-    # records. Until 2026-09-30 the model came from the invocation EVENT, once
-    # for the whole run, so every tenant in a report was billed at the same
-    # model whatever its contract said.
-    by_model = _ce_month(
-        start, end,
-        [{"Type": "COST_CATEGORY", "Key": TENANT_CATEGORY},
-         {"Type": "COST_CATEGORY", "Key": MODEL_CATEGORY}],
-        ["UnblendedCost"])
-    for result in by_model.get("ResultsByTime", []):
-        for group in result.get("Groups", []):
-            tenant, model = (group["Keys"] + ["", ""])[:2]
-            tenant = tenant.split("$", 1)[-1] or "unregistered"
-            model = model.split("$", 1)[-1]
-            if tenant in tenants:
-                tenants[tenant].setdefault("models", set()).add(model)
+        entry = tenants.setdefault(tenant, {"raw_aws_cost": 0.0, "accounts": set(),
+                                            "models": set()})
+        entry["raw_aws_cost"] += gross
+        entry["accounts"].add(row.get("account"))
+        # Each tenant's service model, from the ServiceModel Cost Category,
+        # which scripts/sync-cost-categories.sh builds from the registry's
+        # account records. Until 2026-09-30 the model came from the invocation
+        # EVENT, once for the whole run, so every tenant in a report was billed
+        # at the same model whatever its contract said.
+        entry["models"].add(row.get("model") or "")
 
     lines = []
     for tenant, entry in sorted(tenants.items()):
-        recorded = {m for m in entry.get("models", set()) if m not in UNRECORDED_MODELS}
+        recorded = {m for m in entry["models"] if m not in UNRECORDED_MODELS}
         if len(recorded) > 1:
             # One tenant, accounts recorded under different models. Either a
             # registry error or a contract nobody has modelled; guessing which
@@ -331,6 +389,7 @@ def report(event=None, context=None):
         "produced": True,
         "month": month,
         "period": {"start": start, "end_exclusive": end},
+        "source": f"{DATABASE}.{TABLE} (CUR 2.0) via {WORKGROUP}",
         "tenants": lines,
         # design 10 absorbs this rather than allocating it. Shown because the
         # position "the uplift covers it" is otherwise uncheckable. B-090.
@@ -339,46 +398,43 @@ def report(event=None, context=None):
         # See above. Zero groups means the categorisation is not answering,
         # not that the estate is empty.
         "cost_groups_seen": groups_seen,
+        # How many line items carried AWS's own net figure. Zero while no
+        # discounts exist; the basis check below is only as good as this.
+        "net_basis": {"lines": lines_seen, "lines_with_net": net_lines},
     }
 
-    if groups_seen == 0:
-        # THREE causes, not two, and only one is a problem. Separated by asking
-        # what the period cost WITHOUT any grouping -- which the first version
-        # did not do, and so reported "the categories have not backfilled"
-        # about a month in which nothing had been spent because the estate did
-        # not yet exist.
-        #
-        #   ungrouped total is zero     nothing was spent. Not a problem.
-        #   total > 0, no groups        categorisation is not answering. It is
-        #                               either backfilling or misconfigured,
-        #                               and both need somebody to look.
-        total = _period_total(start, end)
-        if total is None:
-            out["coverage_warning"] = (
-                "Cost Explorer returned no grouped results, and the ungrouped "
-                "total could not be read either — so it is not known whether "
-                "this period had no spend or whether the categorisation "
-                "failed. No conclusion should be drawn from an empty report.")
-        elif total == 0.0:
-            out["coverage_note"] = (
-                "No spend at all in this period, grouped or ungrouped. The "
-                "report is empty because nothing was spent, not because the "
-                "categorisation failed.")
-        else:
-            out["coverage_warning"] = (
-                f"This period cost {total:.2f} ungrouped, and Cost Explorer "
-                "returned NO grouped results. Spend exists and the Cost "
-                "Categories are not accounting for it. Most likely they were "
-                "created within the last 24 hours and are still backfilling; "
-                "if not, check scripts/sync-cost-categories.sh has run. Do "
-                "not read this report as an empty estate.")
+    if not rows:
+        # Not "nothing was spent". The export holds whole billing periods
+        # from its first delivery onward, so an absent month is one it never
+        # delivered: before 2026-11, or a delivery that has not happened.
+        out["coverage_warning"] = (
+            f"The export holds no line items at all for {month}. That is not "
+            "a month of no spend: the export began with 2026-11 and was not "
+            "backfilled, or this month has not been delivered. Do not read "
+            "this report as an empty estate.")
+    elif groups_seen == 0:
+        out["coverage_warning"] = (
+            f"This period cost {total:.2f}, and no line item carries a "
+            f"'{TENANT_KEY}' cost category. Spend exists and the Cost "
+            "Categories are not accounting for it. Check "
+            "scripts/sync-cost-categories.sh has run since the accounts were "
+            "created. Do not read this report as an empty estate.")
     elif not lines:
         # Groups came back and none of them were billable. That IS a real
         # answer, and a different one.
         out["coverage_note"] = (
             f"{groups_seen} cost group(s) found, none billable — every "
-            "account in this period is kind=shared, which is AltDigital's own "
-            "estate. Correct until a tenant account is vested.")
+            "categorised account in this period is kind=shared, which is "
+            "AltDigital's own estate.")
+
+    if uncategorized_accounts:
+        out["uncategorized"] = {"cost": round(uncategorized_total, 2),
+                                "accounts": sorted(a for a in uncategorized_accounts if a)}
+        out["uncategorized_warning"] = (
+            f"{len(uncategorized_accounts)} account(s) carry no '{TENANT_KEY}' cost "
+            "category, so their spend is in no tenant's line and was not billed. "
+            "Run scripts/sync-cost-categories.sh, which builds the categories "
+            "from the registry, and regenerate the report.")
 
     if not contractual:
         out["warning"] = (

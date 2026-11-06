@@ -21,12 +21,14 @@ Description: >-
 # ---------------------------------------------------------------------------
 # Encryption
 # ---------------------------------------------------------------------------
-# The platform rule is SSE-KMS with a platform key (policies/guard). The Data
-# Exports documentation gives the bucket policy and says nothing about a
-# customer managed key. So the key policy below grants the export service
-# exactly what an SSE-KMS PutObject needs, on the same two conditions as the
-# bucket policy. This is untested until the first delivery; if that never
-# arrives, encryption is the first suspect.
+# The platform rule is SSE-KMS with a platform key (policies/guard), and the
+# bucket defaults to it. The export does not use it: Data Exports writes every
+# object with SSE-S3 explicitly, which overrides a bucket default, and the
+# first delivery (2026-11-06) arrived AES256. AWS documents KMS as applicable
+# only after delivery. Accepted as D-035, which says why re-encrypting was not
+# built. The key still encrypts Athena results and anything else written here,
+# and its grant to the export service is kept for the day the service honours
+# it.
 #
 # ---------------------------------------------------------------------------
 # Retention
@@ -37,10 +39,12 @@ Description: >-
 # the overwritten versions are noncurrent and go after 30 days.
 #
 # ---------------------------------------------------------------------------
-# What is not here yet
+# The table
 # ---------------------------------------------------------------------------
-# The Glue table. It is defined from the first delivery's actual Parquet
-# schema in step 4, rather than guessed now or inferred daily by a crawler.
+# platform_cost.cur2 is defined from the first delivery's manifest (116
+# columns, 2026-11-06), not guessed and not inferred daily by a crawler. The
+# column list is the export's query (finops/00-data-export.yaml) in the same
+# order. Add a column to both, or neither.
 
 Parameters:
 
@@ -240,7 +244,156 @@ Resources:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
         Name: platform_cost
-        Description: CUR 2.0 billing data. Tables are defined in step 4 (15.9).
+        Description: CUR 2.0 billing data.
+
+  # One partition per billing period, as the export writes them
+  # (data/BILLING_PERIOD=yyyy-MM/). Projected, so a new month needs nothing.
+  # Each period's files are rewritten daily until the month closes, and a
+  # query reads whatever the last rewrite left: the current month is
+  # provisional until AWS finalises the bill.
+  CurTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref CostDatabase
+      TableInput:
+        Name: cur2
+        Description: CUR 2.0 export platform-cur2, one partition per billing period.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+          projection.enabled: 'true'
+          projection.billing_period.type: date
+          projection.billing_period.format: yyyy-MM
+          projection.billing_period.range: '2026-11,NOW'
+          projection.billing_period.interval: '1'
+          projection.billing_period.interval.unit: MONTHS
+          storage.location.template: !Sub 's3://${ExportBucket}/cur2/platform-cur2/data/BILLING_PERIOD=${!billing_period}'
+        PartitionKeys:
+          - { Name: billing_period, Type: string }
+        StorageDescriptor:
+          Location: !Sub 's3://${ExportBucket}/cur2/platform-cur2/data/'
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - { Name: identity_line_item_id, Type: string }
+            - { Name: identity_time_interval, Type: string }
+            - { Name: bill_invoice_id, Type: string }
+            - { Name: bill_invoicing_entity, Type: string }
+            - { Name: bill_billing_entity, Type: string }
+            - { Name: bill_bill_type, Type: string }
+            - { Name: bill_payer_account_id, Type: string }
+            - { Name: bill_payer_account_name, Type: string }
+            - { Name: bill_billing_period_start_date, Type: timestamp }
+            - { Name: bill_billing_period_end_date, Type: timestamp }
+            - { Name: line_item_usage_account_id, Type: string }
+            - { Name: line_item_usage_account_name, Type: string }
+            - { Name: line_item_line_item_type, Type: string }
+            - { Name: line_item_usage_start_date, Type: timestamp }
+            - { Name: line_item_usage_end_date, Type: timestamp }
+            - { Name: line_item_product_code, Type: string }
+            - { Name: line_item_usage_type, Type: string }
+            - { Name: line_item_operation, Type: string }
+            - { Name: line_item_availability_zone, Type: string }
+            - { Name: line_item_resource_id, Type: string }
+            - { Name: line_item_usage_amount, Type: double }
+            - { Name: line_item_normalization_factor, Type: double }
+            - { Name: line_item_normalized_usage_amount, Type: double }
+            - { Name: line_item_currency_code, Type: string }
+            - { Name: line_item_unblended_rate, Type: string }
+            - { Name: line_item_unblended_cost, Type: double }
+            - { Name: line_item_user_identifier, Type: string }
+            - { Name: line_item_blended_rate, Type: string }
+            - { Name: line_item_blended_cost, Type: double }
+            - { Name: line_item_line_item_description, Type: string }
+            - { Name: line_item_tax_type, Type: string }
+            - { Name: line_item_net_unblended_rate, Type: string }
+            - { Name: line_item_net_unblended_cost, Type: double }
+            - { Name: line_item_legal_entity, Type: string }
+            - { Name: product_servicecode, Type: string }
+            - { Name: product_operation, Type: string }
+            - { Name: product_usagetype, Type: string }
+            - { Name: product_sku, Type: string }
+            - { Name: product_product_family, Type: string }
+            - { Name: product_comment, Type: string }
+            - { Name: product_fee_code, Type: string }
+            - { Name: product_fee_description, Type: string }
+            - { Name: product_location, Type: string }
+            - { Name: product_location_type, Type: string }
+            - { Name: product_region_code, Type: string }
+            - { Name: product_from_location, Type: string }
+            - { Name: product_from_location_type, Type: string }
+            - { Name: product_from_region_code, Type: string }
+            - { Name: product_to_location, Type: string }
+            - { Name: product_to_location_type, Type: string }
+            - { Name: product_to_region_code, Type: string }
+            - { Name: product_instance_family, Type: string }
+            - { Name: product_instance_type, Type: string }
+            - { Name: product_instancesku, Type: string }
+            - { Name: product_pricing_unit, Type: string }
+            - { Name: product, Type: 'map<string,string>' }
+            - { Name: pricing_lease_contract_length, Type: string }
+            - { Name: pricing_offering_class, Type: string }
+            - { Name: pricing_purchase_option, Type: string }
+            - { Name: pricing_rate_code, Type: string }
+            - { Name: pricing_rate_id, Type: string }
+            - { Name: pricing_currency, Type: string }
+            - { Name: pricing_public_on_demand_rate, Type: string }
+            - { Name: pricing_public_on_demand_cost, Type: double }
+            - { Name: pricing_term, Type: string }
+            - { Name: pricing_unit, Type: string }
+            - { Name: reservation_availability_zone, Type: string }
+            - { Name: reservation_start_time, Type: string }
+            - { Name: reservation_end_time, Type: string }
+            - { Name: reservation_modification_status, Type: string }
+            - { Name: reservation_amortized_upfront_cost_for_usage, Type: double }
+            - { Name: reservation_amortized_upfront_fee_for_billing_period, Type: double }
+            - { Name: reservation_unused_amortized_upfront_fee_for_billing_period, Type: double }
+            - { Name: reservation_recurring_fee_for_usage, Type: double }
+            - { Name: reservation_unused_recurring_fee, Type: double }
+            - { Name: reservation_effective_cost, Type: double }
+            - { Name: reservation_upfront_value, Type: double }
+            - { Name: reservation_net_amortized_upfront_cost_for_usage, Type: double }
+            - { Name: reservation_net_amortized_upfront_fee_for_billing_period, Type: double }
+            - { Name: reservation_net_unused_amortized_upfront_fee_for_billing_period, Type: double }
+            - { Name: reservation_net_recurring_fee_for_usage, Type: double }
+            - { Name: reservation_net_unused_recurring_fee, Type: double }
+            - { Name: reservation_net_effective_cost, Type: double }
+            - { Name: reservation_net_upfront_value, Type: double }
+            - { Name: reservation_normalized_units_per_reservation, Type: string }
+            - { Name: reservation_number_of_reservations, Type: string }
+            - { Name: reservation_reservation_a_r_n, Type: string }
+            - { Name: reservation_subscription_id, Type: string }
+            - { Name: reservation_total_reserved_normalized_units, Type: string }
+            - { Name: reservation_total_reserved_units, Type: string }
+            - { Name: reservation_units_per_reservation, Type: string }
+            - { Name: reservation_unused_normalized_unit_quantity, Type: double }
+            - { Name: reservation_unused_quantity, Type: double }
+            - { Name: savings_plan_total_commitment_to_date, Type: double }
+            - { Name: savings_plan_savings_plan_a_r_n, Type: string }
+            - { Name: savings_plan_savings_plan_rate, Type: double }
+            - { Name: savings_plan_used_commitment, Type: double }
+            - { Name: savings_plan_savings_plan_effective_cost, Type: double }
+            - { Name: savings_plan_amortized_upfront_commitment_for_billing_period, Type: double }
+            - { Name: savings_plan_recurring_commitment_for_billing_period, Type: double }
+            - { Name: savings_plan_net_savings_plan_effective_cost, Type: double }
+            - { Name: savings_plan_net_amortized_upfront_commitment_for_billing_period, Type: double }
+            - { Name: savings_plan_net_recurring_commitment_for_billing_period, Type: double }
+            - { Name: savings_plan_start_time, Type: string }
+            - { Name: savings_plan_end_time, Type: string }
+            - { Name: savings_plan_instance_type_family, Type: string }
+            - { Name: savings_plan_offering_type, Type: string }
+            - { Name: savings_plan_payment_option, Type: string }
+            - { Name: savings_plan_purchase_term, Type: string }
+            - { Name: savings_plan_region, Type: string }
+            - { Name: discount_bundled_discount, Type: double }
+            - { Name: discount_total_discount, Type: double }
+            - { Name: discount, Type: 'map<string,string>' }
+            - { Name: resource_tags, Type: 'map<string,string>' }
+            - { Name: tags, Type: 'map<string,string>' }
+            - { Name: cost_category, Type: 'map<string,string>' }
 
   # Enforced, so a query cannot choose an unencrypted result location. The
   # per-query scan cap stops a mistaken SELECT * over seven years from being
@@ -263,6 +416,60 @@ Resources:
       Tags:
         - { Key: platform-managed, Value: 'true' }
         - { Key: platform-layer,   Value: infrastructure }
+
+  # -------------------------------------------------------------------------
+  # Internal margin report: shared cost allocated to tenants (F-8, D-036)
+  # -------------------------------------------------------------------------
+  # INTERNAL ONLY. Never an input to an invoice.
+  #
+  # 15.9 step 5 asked for split-charge rules spreading the management,
+  # Security and Infrastructure accounts' cost across tenants by spend. Design
+  # 10 says shared platform cost is absorbed into the percentage uplift, never
+  # allocated, and allocated cost inside a tenant's raw AWS figure would carry
+  # the uplift too: cost-plus on cost-plus. F-8 (docs/phase-15-plan.md §6.8)
+  # resolved it: no split-charge rules; the allocation exists only here, so
+  # AltDigital can see what each tenant really costs to run.
+  #
+  # A saved query rather than an Athena view: a view managed by CloudFormation
+  # is a Glue table carrying base64-encoded Presto text, which is fragile to
+  # maintain and gains nothing for a report a person runs. D-036.
+  #
+  # scripts/test-cost-report.py fails if anything outside this template and
+  # the documentation names it. cost/src/report.py, the invoice path, must
+  # never read it.
+  QueryInternalSharedCostAllocation:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: internal-shared-cost-allocation
+      Description: INTERNAL ONLY, never invoiced (F-8, D-036). Shared platform cost allocated to tenants in proportion to their own AWS spend, per billing period.
+      WorkGroup: !Ref CostWorkGroup
+      Database: !Ref CostDatabase
+      QueryString: |
+        WITH by_kind AS (
+          SELECT billing_period,
+                 element_at(cost_category, 'tenant') AS tenant,
+                 element_at(cost_category, 'account_kind') AS kind,
+                 sum(line_item_unblended_cost) AS cost
+          FROM cur2
+          GROUP BY 1, 2, 3
+        ),
+        shared AS (
+          SELECT billing_period, sum(cost) AS shared_cost
+          FROM by_kind WHERE kind = 'shared' GROUP BY 1
+        ),
+        tenants AS (
+          SELECT billing_period, tenant, sum(cost) AS tenant_aws_cost
+          FROM by_kind WHERE kind = 'tenant' GROUP BY 1, 2
+        )
+        SELECT t.billing_period,
+               t.tenant,
+               t.tenant_aws_cost,
+               t.tenant_aws_cost / sum(t.tenant_aws_cost) OVER (PARTITION BY t.billing_period) AS share_of_tenant_spend,
+               s.shared_cost * t.tenant_aws_cost / sum(t.tenant_aws_cost) OVER (PARTITION BY t.billing_period) AS allocated_shared_cost,
+               (t.tenant_aws_cost + s.shared_cost * t.tenant_aws_cost / sum(t.tenant_aws_cost) OVER (PARTITION BY t.billing_period)) / t.tenant_aws_cost AS fully_loaded_multiple
+        FROM tenants t
+        JOIN shared s ON s.billing_period = t.billing_period
+        ORDER BY 1, 2
 
 Outputs:
 
