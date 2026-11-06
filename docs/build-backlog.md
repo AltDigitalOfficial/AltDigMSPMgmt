@@ -5844,9 +5844,25 @@ CloudTrail whether every region's hourly digest file arrived. A missing digest
 is a finding; a quiet hour is not. Runs in the Audit account with
 `s3:ListBucket` on the two archive buckets and nothing else.
 
-**What it does not cover yet:** VPC flow logs (B-012 — none are collected),
-Route 53 Resolver query logs and CloudWatch Logs (not centralised). Each joins
-as a source when its gap is closed; that is the next piece of this work.
+**What it does not cover yet:** Route 53 Resolver query logs and CloudWatch
+Logs (not centralised). Each joins as a source when its gap is closed.
+
+**Flow logs added 2026-11-06** (`daae81e`) as the third source, `flowlogs`.
+- What landed under `AWSLogs/<account>/vpcflowlogs/<region>/` in
+  `altdig-flow-logs-<log archive>`, with `immutable: false` (400-day expiry,
+  ADR-018).
+- A zero is never a finding: a quiet VPC writes no file, and an account with
+  no VPC never does.
+- The bucket grants `PlatformEvidenceCustody` `ListBucket` only.
+- Delivery from all four VPCs was confirmed after that policy change, because
+  B-012 makes this bucket's policy the sensitive one.
+- First run: 120 records (12 hours × 10 accounts), none failed. Each of the
+  four VPC accounts shows 24 files an hour; the six accounts without a VPC
+  show 0.
+- The template was at 51,037 of CloudFormation's 51,200-byte inline limit.
+  The flow-log bucket's history comment was condensed to fit; B-012 holds the
+  full account. The next addition to `security/10-log-archive.yaml` needs
+  either more trimming or deployment through S3.
 
 **Worth doing when convenient:** declare a 60-minute cadence for each member
 account's `log-custody` stream in Truveon's manifest apply, as is done for the
