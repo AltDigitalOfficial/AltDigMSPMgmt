@@ -8101,14 +8101,35 @@ Accelerator. Who created each public resource arrives with Stage B (B-171).
   PCI-out decision. The design package is not edited by build work; D-032
   and D-025 carry both until it is.
 - **Still owed from 15.6:**
-  - The before-and-after cost of Config and Security Hub, as ratios, from a
-    week of billing after 2026-10-26.
+  - ~~The before-and-after cost of Config and Security Hub, as ratios, from a
+    week of billing after 2026-10-26.~~ Read 2026-11-06, the week of
+    2026-10-19 against 2026-10-30 to 11-05:
+    - Config 5.8x, from 0.7% of all spend to 3.4%. 2026-10-26 alone ran
+      about 460 times a normal day: every resource recorded at once when
+      recording became continuous everywhere. The days since swing by an
+      order of magnitude. The FinOps account, created 2026-11-01, is 40% of
+      the week, which is its own first inventory. Not yet a steady state.
+    - Security Hub 1.8x, from 10.1% of all spend to 15.2%, and steady for a
+      week.
   - ~~The auditor guide.~~ Updated 2026-10-28: §6 (data events, Config
     coverage, B-175), §7 (the 15.6 detection state) and the gap register.
   - ~~Ratification of ADR-010 and ADR-011.~~ Ratified by Jamie, 2026-10-28.
   - The nine organization-plan controls are suppressed in Audit
     (`platform-suppress-org-protection-plans`, ADR-014), verified once the
     controls re-evaluate.
+    - Read 2026-11-06: only the us-east-2 copies were suppressed. us-east-1
+      and us-west-2 were NEW, and so were 12 platform-stack
+      CloudFormation.3/.4 findings.
+    - Cause: an automation rule changes only findings generated in its own
+      region, and the stack existed in us-east-2 alone.
+    - Fix: `platform-securityhub-suppressions` was deployed in all three
+      allowed regions and the new rules tagged.
+    - Still to confirm: SUPPRESSED in every region after the next daily
+      re-evaluation.
+    - us-east-1 has two orphaned rules from the create, outside the stack and
+      identical to their stack twins: `015457f2` (CloudFormation.3/.4) and
+      `6c06796b` (IAM.6). No stack event failed. They wait on Jamie's
+      approval to delete.
 
 ## B-178 · Nothing consumes the router's commercial queue
 

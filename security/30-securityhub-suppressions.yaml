@@ -4,7 +4,8 @@ Description: >-
   AltDigital Managed Platform - Security Hub automation rules that suppress
   findings the platform causes by design, each with its reason. Deployed to
   the Audit account, Security Hub's delegated administrator, where rules
-  apply to findings from every member account.
+  apply to findings from every member account. Deployed in every allowed
+  region, because a rule reaches only the findings of its own region.
 
 # ---------------------------------------------------------------------------
 # A suppression is a claim, so each one is narrow and says why
@@ -29,6 +30,18 @@ Description: >-
 # general and wrong only for the platform's own resources, so a tenant's
 # resource still raises it. CIS 3.x needs neither: CIS is no longer an enabled
 # standard (D-032).
+#
+# ---------------------------------------------------------------------------
+# One stack per region, not one in the home region
+# ---------------------------------------------------------------------------
+# Cross-region aggregation copies findings from us-east-1 and us-west-2 into
+# us-east-2, but an automation rule only changes findings generated in the
+# region it was created in. Deployed in us-east-2 alone from 2026-10-02, the
+# rules left every linked-region copy NEW. Read 2026-11-06 in Audit: the nine
+# plan controls SUPPRESSED in us-east-2 and NEW in the other two; 12
+# platform-stack CloudFormation.3/.4 findings NEW in us-east-1 and us-west-2.
+# The same stack, with the same parameters, is deployed in all three allowed
+# regions.
 
 Parameters:
 
